@@ -4,7 +4,7 @@ import { DEFAULT_SYNTHETIC, type SyntheticConfig } from './data/synthetic';
 import { Network, describe } from './nn/network';
 import { DEFAULT_LR } from './nn/optim';
 import type { Arch, Hyper, LayerSpec, Shape } from './nn/types';
-import type { EvalPoint, Status, TrainPoint } from './train/protocol';
+import type { EvalPoint, Speed, Status, TrainPoint } from './train/protocol';
 
 export type WeightMode = 'heat' | 'hinton' | 'numbers' | 'hist' | 'qq';
 
@@ -101,9 +101,10 @@ export const PRESETS = IMAGE_PRESETS;
 export const presetsFor = (info: DatasetInfo): Preset[] => (info.kind === 'image' ? IMAGE_PRESETS : POINT_PRESETS);
 
 /** Default architecture and training settings when switching to a dataset of this kind. */
-export function defaultsFor(info: DatasetInfo): { spec: LayerSpec[]; hyper: Hyper } {
-  if (info.kind === 'points') return { spec: structuredClone(POINT_PRESETS[2].spec), hyper: { lr: 0.03, batchSize: 10, optimizer: 'adam' } };
-  return { spec: structuredClone(IMAGE_PRESETS[2].spec), hyper: { lr: DEFAULT_LR.adam, batchSize: 32, optimizer: 'adam' } };
+export function defaultsFor(info: DatasetInfo): { spec: LayerSpec[]; hyper: Hyper; speed: Speed } {
+  // Point datasets train an epoch in a millisecond or two; cap the speed so the boundary can be watched forming.
+  if (info.kind === 'points') return { spec: structuredClone(POINT_PRESETS[2].spec), hyper: { lr: 0.03, batchSize: 10, optimizer: 'adam' }, speed: 'normal' };
+  return { spec: structuredClone(IMAGE_PRESETS[2].spec), hyper: { lr: DEFAULT_LR.adam, batchSize: 32, optimizer: 'adam' }, speed: 'max' };
 }
 
 export class Store {
@@ -115,6 +116,8 @@ export class Store {
   trainLimit: number | null = null;
   spec: LayerSpec[] = structuredClone(IMAGE_PRESETS[2].spec);
   hyper: Hyper = { lr: DEFAULT_LR.adam, batchSize: 32, optimizer: 'adam' };
+  /** Training speed cap (see SPEEDS). */
+  speed: Speed = 'max';
   /** Per block (hidden layers then output): weights held fixed during training. */
   frozen: boolean[] = [];
   /** When the architecture is edited, keep the weights of layers that did not change. */

@@ -50,6 +50,8 @@ export type ToTrainer =
   | { type: 'model'; version: number; arch: Arch; weights: Float32Array[]; hyper: Hyper; frozen: boolean[] }
   | { type: 'frozen'; frozen: boolean[] }
   | { type: 'hyper'; hyper: Hyper }
+  /** Caps training at this many samples per second (null = as fast as possible). */
+  | { type: 'speed'; samplesPerSec: number | null }
   | { type: 'weights'; weights: Float32Array[] }
   | { type: 'custom'; samples: CustomSample[] }
   | { type: 'play' }
@@ -67,3 +69,7 @@ export type FromTrainer =
 export const CUSTOM_REPEAT = 10;
 export const EVALS_PER_EPOCH = 5;
 export const POINTS_PER_EPOCH = 60;
+
+/** Training speeds offered on the page, in samples per second (null = as fast as possible). */
+export const SPEEDS = { slow: 300, normal: 3000, max: null } as const;
+export type Speed = keyof typeof SPEEDS;

@@ -60,6 +60,12 @@ export class Trainer {
   private lastStatus = 0;
   private lastWeights = 0;
   private rate = 0;
+  /** Speed cap (samples per second) and the samples it currently allows (a token bucket). */
+  private maxRate: number | null = null;
+  private allowance = 0;
+  private lastTick = 0;
+  private capSeen = 0;
+  private capFrom = 0;
 
   /**
    * `pace` sets wall-clock floors between recorded curve points and between test-set evaluations.
@@ -116,6 +122,13 @@ export class Trainer {
       case 'frozen':
         this.frozen = msg.frozen.slice();
         break;
+      case 'speed':
+        this.maxRate = msg.samplesPerSec;
+        this.allowance = 0;
+        this.lastTick = this.capFrom = performance.now();
+        this.capSeen = 0;
+        this.rate = 0;
+        break;
       case 'custom':
         this.custom = msg.samples;
         this.rebuildOrder(true);
@@ -123,6 +136,9 @@ export class Trainer {
       case 'play':
         this.running = true;
         this.stopAtEpochEnd = false;
+        this.allowance = 0;
+        this.lastTick = this.capFrom = performance.now();
+        this.capSeen = 0;
         this.sendStatus(true);
         this.schedule();
         break;
@@ -272,10 +288,17 @@ export class Trainer {
     }
   }
 
-  private schedule(): void {
+  private schedule(delay = 0): void {
     if (this.timer !== null) return;
     if (!this.ready() || (!this.running && !this.evalJob)) return;
-    this.timer = setTimeout(this.loop, 0);
+    this.timer = setTimeout(this.loop, delay);
+  }
+
+  /** With a speed cap: milliseconds until the cap allows the next batch (0 = now). */
+  private capWait(): number {
+    if (this.maxRate === null || !this.running || this.evalJob) return 0;
+    const need = this.hyper.batchSize - this.allowance;
+    return need <= 0 ? 0 : Math.min(100, Math.max(4, Math.ceil((need / this.maxRate) * 1000)));
   }
 
   private loop = (): void => {
@@ -283,13 +306,32 @@ export class Trainer {
     if (!this.ready()) return;
     const t0 = performance.now();
     const seen0 = this.seen;
+    if (this.maxRate !== null) {
+      // Refill the bucket; never bank more than a tenth of a second (or one batch) of samples.
+      this.allowance = Math.min(this.allowance + ((t0 - this.lastTick) / 1000) * this.maxRate, Math.max(this.hyper.batchSize, this.maxRate / 10));
+      this.lastTick = t0;
+    }
     while (performance.now() - t0 < this.sliceMs) {
       if (this.evalJob) this.evalChunk(40);
-      else if (this.running) this.trainBatch();
-      else break;
+      else if (this.running) {
+        if (this.maxRate !== null && this.allowance < this.hyper.batchSize) break;
+        const before = this.seen;
+        this.trainBatch();
+        if (this.maxRate !== null) this.allowance -= this.seen - before;
+      } else break;
     }
     const dt = performance.now() - t0;
-    if (this.seen > seen0 && dt > 0) {
+    if (this.maxRate !== null) {
+      // Capped: measure over wall-clock time, idle waits included.
+      this.capSeen += this.seen - seen0;
+      const wall = t0 + dt - this.capFrom;
+      if (wall >= 500) {
+        const r = (this.capSeen * 1000) / wall;
+        this.rate = this.rate ? 0.5 * this.rate + 0.5 * r : r;
+        this.capSeen = 0;
+        this.capFrom = t0 + dt;
+      }
+    } else if (this.seen > seen0 && dt > 0) {
       const r = ((this.seen - seen0) * 1000) / dt;
       this.rate = this.rate ? 0.8 * this.rate + 0.2 * r : r;
     }
@@ -299,8 +341,10 @@ export class Trainer {
       return;
     }
     if (now - this.lastStatus > 120) this.sendStatus(false);
-    if (now - this.lastWeights > 300 && this.running) this.sendWeights();
-    this.schedule();
+    // Small networks (point datasets) are cheap to copy: send them often so the boundary animates.
+    const every = this.net && this.net.paramCount < 20_000 ? 100 : 300;
+    if (now - this.lastWeights > every && this.running) this.sendWeights();
+    this.schedule(this.capWait());
   };
 
   private flush(): void {

@@ -221,6 +221,34 @@ suite('datasets', () => {
     expect(evals.at(-1)!.acc).toBeGreaterThan(0.95);
   });
 
+  it('a speed cap limits samples per second; lifting it trains at full speed again', async () => {
+    const d = pointsData({ id: 'circle', count: 600, noise: 0.1, trainRatio: 0.5, seed: 3 });
+    const arch: Arch = { input: d.input, layers: [{ kind: 'dense', units: 8, act: 'tanh' }], classes: 2 };
+    const log: FromTrainer[] = [];
+    const t = new Trainer((m) => log.push(m), 5);
+    t.handle({ type: 'model', version: 1, arch, weights: new Network(arch, 1).getWeights(), hyper: { lr: 0.03, batchSize: 10, optimizer: 'adam' }, frozen: [] });
+    t.handle({ type: 'data', data: { inputSize: d.inputSize, scale: 1, classes: 2, trainX: d.trainX, trainY: d.trainY, testX: d.testX, testY: d.testY } });
+    const seen = () => (log.filter((m) => m.type === 'status').at(-1) as { status: Status }).status.seen;
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    await sleep(50); // the first test-set evaluation
+    t.handle({ type: 'speed', samplesPerSec: 400 });
+    const s0 = seen();
+    const t0 = performance.now();
+    t.handle({ type: 'play' });
+    await sleep(1000);
+    t.handle({ type: 'pause' });
+    const capped = ((seen() - s0) * 1000) / (performance.now() - t0);
+    // 400/s, plus at most one tenth of a second banked and one batch of rounding.
+    expect(capped).toBeGreaterThan(250);
+    expect(capped).toBeLessThan(400 + 40 + 20);
+    t.handle({ type: 'speed', samplesPerSec: null });
+    const s1 = seen();
+    t.handle({ type: 'play' });
+    await sleep(300);
+    t.handle({ type: 'pause' });
+    expect(seen() - s1).toBeGreaterThan(1000); // uncapped: thousands of points per second
+  });
+
   it('the trainer leaves frozen layers alone and waits for matching data', async () => {
     const spec: LayerSpec[] = [{ kind: 'dense', units: 6, act: 'relu' }];
     const arch = mnistArch(spec);

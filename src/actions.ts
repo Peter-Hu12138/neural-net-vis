@@ -9,7 +9,7 @@ import { decodeModel, encodeModel, type ModelFile } from './models/format';
 import type { Hyper, LayerSpec, Shape } from './nn/types';
 import { defaultsFor, store, type CustomEntry, type Probe, type WeightMode } from './store';
 import { TrainerClient } from './train/client';
-import type { FromTrainer } from './train/protocol';
+import { SPEEDS, type FromTrainer, type Speed } from './train/protocol';
 
 let weightsQueued = false;
 
@@ -183,6 +183,7 @@ export async function setDataset(id: DatasetId): Promise<void> {
     const d = defaultsFor(info);
     store.spec = d.spec;
     setHyper(d.hyper);
+    if (prev.kind !== info.kind) setSpeed(d.speed);
   }
   store.emit('dataset');
   rebuild(false, { from: store.keepWeights ? prevNet : null });
@@ -303,6 +304,13 @@ export function setHyper(patch: Partial<Hyper>): void {
   if (patch.optimizer && patch.optimizer !== store.hyper.optimizer && patch.lr === undefined) next.lr = DEFAULT_LR[patch.optimizer];
   store.hyper = next;
   client.post({ type: 'hyper', hyper: next });
+  store.emit('hyper');
+}
+
+/** Caps training speed ('slow', 'normal') or lifts the cap ('max'). */
+export function setSpeed(speed: Speed): void {
+  store.speed = speed;
+  client.post({ type: 'speed', samplesPerSec: SPEEDS[speed] });
   store.emit('hyper');
 }
 
