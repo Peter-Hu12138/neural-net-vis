@@ -902,7 +902,13 @@ select {
 
 .charts {
   display: grid;
+  /* minmax(0, 1fr): let a drawn canvas shrink with the section so the ResizeObserver can redraw it. */
+  grid-template-columns: minmax(0, 1fr);
   gap: 18px;
+}
+
+.charts > * {
+  min-width: 0;
 }
 
 .chart-head {

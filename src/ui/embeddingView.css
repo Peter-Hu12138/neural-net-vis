@@ -1,0 +1,244 @@
+/* ── 11 Embedding ─────────────────────────────────────────
+   A square scatter of numerals beside a preview of the hovered digit, the digit legend and notes. */
+
+.embed {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+}
+
+.embed .synced-status {
+  margin-bottom: 0;
+}
+
+.embed-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 14px 28px;
+}
+
+.embed-layer {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.embed-layer .field {
+  min-width: 200px;
+  max-width: 100%;
+}
+
+.embed-controls .check {
+  height: 28px;
+}
+
+/* "t-SNE" keeps its lower-case t, even in the upper-case segmented control. */
+#embed-method-tsne {
+  text-transform: none;
+}
+
+.embed-nowrap {
+  white-space: nowrap;
+}
+
+/* Progress lives in the status row and keeps its place while idle, so nothing jumps. */
+.embed-run {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  min-height: 18px;
+}
+
+.embed-run.is-idle {
+  visibility: hidden;
+}
+
+.embed-run .progress {
+  width: 160px;
+  flex: 0 0 auto;
+}
+
+.embed-run-text {
+  font: 500 12px/1.4 var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-2);
+}
+
+.embed-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 24px var(--gap);
+  align-items: start;
+}
+
+@media (min-width: 900px) {
+  .embed-layout {
+    grid-template-columns: minmax(0, 640px) minmax(240px, 400px);
+  }
+}
+
+.embed-plot {
+  min-width: 0;
+}
+
+.embed-plot canvas {
+  display: block;
+  cursor: crosshair;
+  touch-action: manipulation;
+}
+
+.embed-aside {
+  display: grid;
+  gap: 22px;
+  align-content: start;
+  min-width: 0;
+}
+
+.embed-preview {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+  min-height: 106px;
+}
+
+.embed-preview-img {
+  display: block;
+  border: 1px solid var(--hair);
+  image-rendering: pixelated;
+}
+
+.embed-preview-text {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.embed-preview-title {
+  font-size: 16px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+}
+
+.embed-preview-meta {
+  display: grid;
+  gap: 2px;
+  font: 400 12px/1.5 var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-2);
+}
+
+.embed-preview-meta .tag {
+  margin-left: 4px;
+  vertical-align: 1px;
+}
+
+.embed-preview-act {
+  margin-top: 4px;
+  font-family: var(--sans);
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.embed-chips {
+  gap: 4px;
+}
+
+.embed-chip {
+  width: auto;
+  min-width: 42px;
+  padding: 0 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.embed-swatch {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  flex: none;
+}
+
+.embed-chip[aria-pressed='true'] .embed-swatch {
+  box-shadow: 0 0 0 1px var(--bg);
+}
+
+.embed-chip-hint {
+  margin-top: 8px;
+}
+
+.embed-keys {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--ink-2);
+}
+
+.embed-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+/* The ring and the cross repeat the marks drawn on the canvas. */
+.embed-ring {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 1.25px solid var(--accent);
+  border-radius: 50%;
+}
+
+.embed-cross {
+  position: relative;
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+}
+
+.embed-cross::before,
+.embed-cross::after {
+  content: '';
+  position: absolute;
+  background: var(--accent);
+}
+
+.embed-cross::before {
+  left: 0;
+  right: 0;
+  top: 7px;
+  height: 2px;
+}
+
+.embed-cross::after {
+  top: 0;
+  bottom: 0;
+  left: 7px;
+  width: 2px;
+}
+
+.embed-stats {
+  display: grid;
+  gap: 3px;
+  padding-top: 10px;
+  border-top: 1px solid var(--hair);
+  font: 400 12px/1.45 var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.embed-stats b {
+  color: var(--ink);
+  font-weight: 500;
+}
+
+.embed-hints {
+  display: grid;
+  gap: 8px;
+}

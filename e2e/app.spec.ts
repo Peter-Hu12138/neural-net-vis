@@ -318,7 +318,7 @@ test('backprop walkthrough steps through every stage and applies the update', as
   expect(after).toBeLessThan(before);
   const w0 = await raster(page, (r) => Array.from(r.store.net.getWeights().at(-2)!.slice(0, 50)));
   await page.getByRole('button', { name: 'Apply to network' }).click();
-  await expect(page.locator('.notice')).toContainText('Applied');
+  await expect(page.locator('#bplab .notice')).toContainText('Applied');
   const w1 = await raster(page, (r) => Array.from(r.store.net.getWeights().at(-2)!.slice(0, 50)));
   expect(w1).not.toEqual(w0);
   await page.locator('#backprop').screenshot({ path: `${SHOTS}/07-backprop-update.png` });

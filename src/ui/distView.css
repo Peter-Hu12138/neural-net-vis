@@ -1,0 +1,139 @@
+/* ── 08 Distributions ─────────────────────────────────── */
+
+.dist-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 24px;
+  align-items: end;
+  margin-bottom: 16px;
+}
+
+.dist-controls .seg button:disabled {
+  opacity: 0.32;
+  cursor: not-allowed;
+}
+
+.dist-progress {
+  margin: -6px 0 14px;
+}
+
+.dist-error {
+  margin-bottom: 14px;
+}
+
+.dist-guide {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr));
+  gap: 6px var(--gap);
+  margin: 0 0 24px;
+  padding: 10px 0 12px;
+  border-top: 1px solid var(--hair);
+  border-bottom: 1px solid var(--hair);
+}
+
+.dist-guide .sub {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
+.dist-guide .hint b {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.dist-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 252px), 1fr));
+  gap: 32px var(--gap);
+}
+
+.dist-panel {
+  min-width: 0;
+  display: grid;
+  gap: 10px;
+  align-content: start;
+  border-top: 1px solid var(--ink);
+  padding-top: 8px;
+  transition: opacity 120ms linear;
+}
+
+/* Head, plot, histogram and stats line up across a row of panels, even when a head wraps. */
+@supports (grid-template-rows: subgrid) {
+  .dist-panel {
+    grid-row: span 4;
+    grid-template-rows: subgrid;
+    row-gap: 10px;
+    align-content: stretch;
+  }
+  .dist-panel > * {
+    align-self: start;
+  }
+}
+
+.dist-grid.is-busy .dist-panel {
+  opacity: 0.45;
+}
+
+.dist-head {
+  display: grid;
+  gap: 1px;
+}
+
+.dist-head h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  line-height: 22px;
+}
+
+.dist-detail {
+  font: 400 12px/1.4 var(--mono);
+  color: var(--muted);
+}
+
+.dist-panel canvas {
+  display: block;
+  max-width: 100%;
+}
+
+/* Stats as a two-column table of label/value pairs. */
+.dist-stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 18px;
+  border-top: 1px solid var(--hair);
+}
+
+.dist-stats > span {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 0;
+  border-bottom: 1px solid var(--hair);
+  min-width: 0;
+}
+
+.dist-stats > .is-wide {
+  grid-column: 1 / -1;
+}
+
+.dist-stats .k {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.dist-stats b {
+  font: 500 12px/1.4 var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dist-panel {
+    transition: none;
+  }
+}

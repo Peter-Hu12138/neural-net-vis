@@ -1,9 +1,11 @@
 import { initialWeights, select, setMode } from '../actions';
+import { summarize, summarizeFrozen } from '../analysis/stats';
 import type { ConvBlock, DenseBlock } from '../nn/network';
 import { store, type WeightMode } from '../store';
 import { layerDetail, layerName } from './builder';
 import { $, clear, h, segmented, selectField } from './dom';
 import { drawMatrix, fitCanvas, maxAbs, type MatrixMode } from './draw';
+import { drawQQ, num, SANS as SANS_FONT, type QQSeries } from './qq';
 import { onThemeChange, palette } from './theme';
 import { hideTip, showTip } from './tip';
 
@@ -332,9 +334,137 @@ export function mountInspector(): void {
     ctx.strokeRect(left - 1, top + unit * ch - 1, N * cw + 2, ch + 2);
   }
 
-  // Placeholder: replaced by the Q–Q implementation.
-  function renderQQMode(_w: Float32Array, _init: Float32Array | null, availW: number) {
-    fitCanvas(canvas, availW, 40);
+  /**
+   * Q–Q plot of the layer's weights now and at initialisation, both against normal quantiles, with
+   * the normal line through the current weights' quartiles. Legend and a small stats table sit
+   * beside the plot when there is room, below it otherwise.
+   */
+  function renderQQMode(w: Float32Array, init: Float32Array | null, availW: number) {
+    const p = palette();
+    const now = summarize(w, 400);
+    const start = init && init.length ? summarizeFrozen(init, 400) : null; // initial weights never change
+    const qqH = 300;
+    const sideW = 280;
+    // Beside the plot when the plot can stay at least 420 px wide; stacked below it otherwise.
+    const beside = availW >= 420 + sideW + 24;
+    const plotW = beside ? Math.min(560, availW - sideW - 24) : Math.min(availW, 560);
+    const sideX = beside ? plotW + 24 : 0;
+    const ITEMS: { text: string; mark: 'filled' | 'hollow' | 'line' }[] = [
+      { text: 'Now', mark: 'filled' },
+      ...(start ? [{ text: 'At initialisation', mark: 'hollow' as const }] : []),
+      { text: 'Normal line through the quartiles of now', mark: 'line' },
+    ];
+
+    // Legend entries, wrapped to the available width (measured before the canvas is sized).
+    const ctx0 = canvas.getContext('2d')!;
+    ctx0.font = `500 12px ${SANS_FONT}`;
+    const legendW = beside ? sideW : availW;
+    const placed: { x: number; y: number; item: (typeof ITEMS)[number] }[] = [];
+    let lx = 0;
+    let ly = 0;
+    for (const item of ITEMS) {
+      const wItem = (item.mark === 'line' ? 22 : 14) + ctx0.measureText(item.text).width + 22;
+      if (beside) {
+        placed.push({ x: 0, y: ly, item });
+        ly += 20;
+        continue;
+      }
+      if (lx > 0 && lx + wItem > legendW) {
+        lx = 0;
+        ly += 20;
+      }
+      placed.push({ x: lx, y: ly, item });
+      lx += wItem;
+    }
+    const legendH = ly + (beside ? 0 : 20);
+    const tableH = 5 * 18 + 6;
+    const plotY = beside ? 8 : legendH + 8;
+    const tableY = beside ? legendH + 18 : plotY + qqH + 16;
+    const H = Math.max(plotY + qqH, tableY + tableH) + 4;
+    const ctx = fitCanvas(canvas, availW, H);
+
+    const legendX = beside ? sideX : 0;
+    const legendY = beside ? 6 : 0;
+    ctx.font = `500 12px ${SANS_FONT}`;
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'left';
+    for (const { x, y, item } of placed) {
+      const cx = legendX + x;
+      const cy = legendY + y + 9;
+      if (item.mark === 'filled') {
+        ctx.fillStyle = p.ink;
+        ctx.fillRect(cx, cy - 3.5, 7, 7);
+      } else if (item.mark === 'hollow') {
+        ctx.strokeStyle = p.muted;
+        ctx.lineWidth = 1;
+        ctx.strokeRect(cx + 0.5, cy - 3, 6, 6);
+      } else {
+        ctx.strokeStyle = p.accent;
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([6, 4]);
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        ctx.lineTo(cx + 16, cy);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+      ctx.fillStyle = p.ink2;
+      ctx.fillText(item.text, cx + (item.mark === 'line' ? 22 : 14), cy);
+    }
+
+    // drawQQ paints hollow series first, so "now" sits on top; the tooltip lists it first too.
+    const series: QQSeries[] = [{ x: now.qq.theoretical, y: now.qq.sample, probs: now.qq.probs, style: 'filled', name: 'now' }];
+    if (start) series.push({ x: start.qq.theoretical, y: start.qq.sample, probs: start.qq.probs, style: 'hollow', name: 'at init' });
+    const plot = drawQQ(ctx, { x: 0, y: plotY, w: plotW, h: qqH }, series, {
+      xTitle: 'Normal quantile',
+      yTitle: 'Weight quantile',
+      xName: 'normal',
+      line: now.qq.line,
+    });
+
+    // Stats table: one column per series, values right-aligned under their headings.
+    const tx = beside ? sideX : 0;
+    const nowX = tx + 150;
+    const initX = tx + 280;
+    const row = (i: number) => tableY + 9 + i * 18;
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'right';
+    ctx.font = `600 10px ${SANS_FONT}`;
+    ctx.fillStyle = p.muted;
+    ctx.fillText('NOW', nowX, row(0));
+    if (start) ctx.fillText('AT INITIALISATION', initX, row(0));
+    ctx.fillStyle = p.hair;
+    ctx.fillRect(tx, row(0) + 9, (start ? initX : nowX) - tx, 1);
+    const f2 = (v: number) => (Number.isFinite(v) ? v.toFixed(2).replace(/^-/, '−') : '—');
+    const f4 = (v: number) => (Number.isFinite(v) ? v.toFixed(4) : '—');
+    const rows: [string, (s: typeof now) => string][] = [
+      ['Skew', (s) => f2(s.moments.skew)],
+      ['Excess kurtosis', (s) => f2(s.moments.excessKurtosis)],
+      ['PPCC r', (s) => f4(s.ppcc)],
+      ['Std', (s) => num(s.moments.std)],
+    ];
+    rows.forEach(([name, get], i) => {
+      const y = row(i + 1);
+      ctx.font = `500 12px ${SANS_FONT}`;
+      ctx.textAlign = 'left';
+      ctx.fillStyle = p.ink2;
+      ctx.fillText(name, tx, y);
+      ctx.font = `500 12px ${MONO}`;
+      ctx.textAlign = 'right';
+      ctx.fillStyle = p.ink;
+      ctx.fillText(get(now), nowX, y);
+      if (start) ctx.fillText(get(start), initX, y);
+    });
+
+    regions.push({
+      x: plot.plot.x,
+      y: plot.plot.y,
+      w: plot.plot.w,
+      h: plot.plot.h,
+      rows: 1,
+      cols: Math.max(1, Math.round(plot.plot.w)),
+      label: (_r, c) => plot.column(plot.plot.x + c + 0.5) ?? '',
+    });
   }
 
   function renderHist(w: Float32Array, init: Float32Array | null, availW: number) {

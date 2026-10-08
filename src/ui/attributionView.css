@@ -1,0 +1,236 @@
+/* ── 10 Attribution ───────────────────────────────────────
+   Target chips and the prediction on the left; five 28×28 maps of the same input on the right. */
+
+.attr {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.attr .synced-status {
+  margin-bottom: 0;
+}
+
+.attr-busy {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  visibility: hidden;
+}
+
+.attr-busy.is-on {
+  visibility: visible;
+}
+
+.attr-busy .progress {
+  width: 96px;
+}
+
+.attr-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas: 'side' 'panels' 'notes';
+  gap: 24px var(--gap);
+  align-items: start;
+}
+
+/* Wide: target and notes on the left, the maps beside them. */
+@media (min-width: 1200px) {
+  .attr-layout {
+    grid-template-columns: minmax(0, 3fr) minmax(0, 9fr);
+    grid-template-rows: auto 1fr;
+    grid-template-areas: 'side panels' 'notes panels';
+    row-gap: 18px;
+  }
+}
+
+.attr-side {
+  grid-area: side;
+}
+
+.attr-panels {
+  grid-area: panels;
+}
+
+.attr-notes {
+  grid-area: notes;
+}
+
+/* ── Side: target, prediction, notes ── */
+
+.attr-side {
+  display: grid;
+  gap: 14px;
+  align-content: start;
+  min-width: 0;
+}
+
+.attr-target {
+  display: grid;
+  gap: 6px;
+}
+
+.attr-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.attr-chip-col {
+  display: grid;
+  justify-items: center;
+  align-content: start;
+  gap: 3px;
+  width: 28px;
+}
+
+/* "pred" / "true" under the chips; two lines when the prediction is right. */
+.attr-mark {
+  display: grid;
+  justify-items: center;
+  gap: 2px;
+  min-height: 20px;
+}
+
+.attr-tag {
+  font: 600 8.5px/1 var(--mono);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+}
+
+.attr-tag.is-pred {
+  color: var(--accent);
+}
+
+.attr-pred {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 1.35;
+  max-width: 40ch;
+}
+
+.attr-pred b {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.attr-input-caption {
+  margin: 0;
+  font: 500 12px/1.4 var(--mono);
+  color: var(--muted);
+}
+
+.attr-notes {
+  display: grid;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--hair);
+}
+
+/* ── Panels ── */
+
+.attr-panels {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 26px 20px;
+  min-width: 0;
+}
+
+@media (max-width: 760px) {
+  .attr-panels {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 520px) {
+  .attr-panels {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 22px 16px;
+  }
+}
+
+/* Title, map, scale and text line up across a row of panels. */
+.attr-panel {
+  display: grid;
+  grid-row: span 4;
+  grid-template-rows: subgrid;
+  row-gap: 8px;
+  align-content: start;
+  min-width: 0;
+  margin: 0;
+}
+
+.attr-title {
+  margin: 0;
+  padding-top: 6px;
+  border-top: 1px solid var(--ink);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.25;
+  letter-spacing: -0.005em;
+  align-self: end;
+}
+
+.attr-title .mono {
+  font-weight: 500;
+  font-size: 12.5px;
+  color: var(--ink-2);
+}
+
+.attr-map {
+  min-width: 0;
+}
+
+.attr-map canvas {
+  display: block;
+  cursor: crosshair;
+}
+
+.attr-scale {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font: 400 11px/1 var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.attr-scale canvas {
+  flex: 0 1 56px;
+  min-width: 24px;
+  height: 8px;
+  border: 1px solid var(--hair);
+}
+
+.attr-text {
+  display: grid;
+  gap: 8px;
+  align-content: start;
+  min-width: 0;
+}
+
+.attr-text .hint {
+  font-size: 12.5px;
+}
+
+.attr-check {
+  margin: 0;
+  padding-top: 6px;
+  border-top: 1px solid var(--hair);
+  font: 500 12px/1.45 var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+
+.attr-check span {
+  white-space: nowrap;
+}
+
+.attr-check .attr-gap {
+  color: var(--muted);
+}
