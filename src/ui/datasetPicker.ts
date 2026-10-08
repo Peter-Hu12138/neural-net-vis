@@ -15,7 +15,9 @@ import { classColor, onThemeChange, palette } from './theme';
  * for point datasets the generator settings and input features (as in the TensorFlow Playground).
  */
 
-const PREVIEW = 36;
+const PREVIEW = 32;
+/** Matches .dsp-index's scroll-padding: where a snapped item's left edge sits. */
+const SNAP_PAD = 6;
 const GROUPS: DatasetInfo['group'][] = ['Images', 'Points in 2D', 'Points in 3D'];
 const IMAGE_LIMITS = [null, 5_000, 1_000, 200];
 const POINT_LIMITS = [null, 100, 50, 20];
@@ -70,6 +72,16 @@ export function project3(x: number, y: number, z: number): [number, number] {
   return [u, z * Math.cos(el) - depth * Math.sin(el)];
 }
 
+/** A dataset name that wraps only at spaces ("Fashion-MNIST" and "CIFAR-10" never split at the hyphen). */
+function nameEl(name: string): HTMLElement {
+  const el = h('span', { class: 'dsp-name' });
+  name.split(' ').forEach((w, i) => {
+    if (i) el.append(' ');
+    el.append(w.includes('-') ? h('span', { class: 'dsp-word' }, w) : w);
+  });
+  return el;
+}
+
 interface Item {
   info: DatasetInfo;
   btn: HTMLButtonElement;
@@ -100,7 +112,7 @@ export function mountDatasetPicker(): void {
         'button',
         { type: 'button', class: 'dsp-item', 'data-id': info.id, 'aria-pressed': 'false', 'aria-describedby': desc.id, tabindex: '-1' },
         canvas,
-        h('span', { class: 'dsp-name' }, info.name),
+        nameEl(info.name),
         progress,
       ) as HTMLButtonElement;
       btn.addEventListener('click', () => choose(info.id));
@@ -155,22 +167,33 @@ export function mountDatasetPicker(): void {
   const trainHint = h('p', { class: 'hint dsp-train-hint' });
   const train = h('div', { class: 'dsp-train' }, h('span', { class: 'label' }, 'Train on'), h('div', { class: 'dsp-train-row' }, trainSeg, trainUnit), trainHint);
 
+  let trainKind = '';
+  const trainButtons: { v: number | null; b: HTMLButtonElement }[] = [];
   const renderTrain = () => {
     const info = store.info;
-    const limits = limitsFor(info);
     const full = fullTrainCount(info);
-    clear(trainSeg);
-    for (const v of limits) {
-      const b = h('button', { type: 'button', 'aria-pressed': String(store.trainLimit === v) }, v === null ? 'All' : int(v));
-      b.addEventListener('click', () => {
-        if (store.trainLimit === v) return;
-        setTrainLimit(v);
-        renderTrain();
-      });
-      trainSeg.append(b);
+    // Rebuilt only when the choices change (images ↔ points), so a pressed button keeps its focus.
+    if (trainKind !== info.kind) {
+      trainKind = info.kind;
+      clear(trainSeg);
+      trainButtons.length = 0;
+      for (const v of limitsFor(info)) {
+        const b = h('button', { type: 'button', 'aria-pressed': 'false' }, v === null ? 'All' : int(v)) as HTMLButtonElement;
+        b.addEventListener('click', () => {
+          if (store.trainLimit === v) return;
+          setTrainLimit(v);
+          renderTrain();
+        });
+        trainButtons.push({ v, b });
+        trainSeg.append(b);
+      }
     }
+    for (const { v, b } of trainButtons) b.setAttribute('aria-pressed', String(store.trainLimit === v));
     trainUnit.textContent = `of ${int(full)} ${noun(info, full)}`;
-    trainHint.textContent = 'Few examples are memorised: training accuracy runs far above test. Transfer learning reuses features learned on more data.';
+    trainHint.textContent =
+      info.kind === 'image'
+        ? 'Few examples are memorised: training accuracy runs far above test. Transfer learning reuses features learned on more data.'
+        : 'Few examples are memorised: training accuracy runs far above test, and the boundary bends around single points.';
   };
 
   // ── Point-data controls ──
@@ -202,15 +225,16 @@ export function mountDatasetPicker(): void {
   const share = slider('dsp-share', 'Training share', 0.1, 0.9, 0.1, () => store.pointsConfig.trainRatio, (v) => `${Math.round(v * 100)}%`, (v) => setPointsConfig({ trainRatio: v }));
 
   const countSeg = h('div', { class: 'seg dsp-seg', role: 'group', 'aria-labelledby': 'dsp-count-label' });
+  const countButtons = POINT_COUNTS.map((n) => {
+    const b = h('button', { type: 'button', 'aria-pressed': 'false' }, int(n)) as HTMLButtonElement;
+    b.addEventListener('click', () => {
+      if (store.pointsConfig.count !== n) setPointsConfig({ count: n });
+    });
+    countSeg.append(b);
+    return { n, b };
+  });
   const renderCount = () => {
-    clear(countSeg);
-    for (const n of POINT_COUNTS) {
-      const b = h('button', { type: 'button', 'aria-pressed': String(store.pointsConfig.count === n) }, int(n));
-      b.addEventListener('click', () => {
-        if (store.pointsConfig.count !== n) setPointsConfig({ count: n });
-      });
-      countSeg.append(b);
-    }
+    for (const { n, b } of countButtons) b.setAttribute('aria-pressed', String(store.pointsConfig.count === n));
   };
 
   const regen = h('button', { type: 'button', class: 'btn btn-sm', id: 'dsp-regenerate', title: 'Draw a new random sample with the same settings' }, 'Regenerate');
@@ -222,43 +246,49 @@ export function mountDatasetPicker(): void {
     clear(featNote);
     featNote.append(mathLabel(text));
   };
-  const playground =
-    'Hand-made features can make a simple model enough: with x₁² and x₂², the Circle classes are split by a straight line, so even the Linear preset solves it.';
+  // The Playground's lesson, with an example in the current number of dimensions.
+  const playground = () =>
+    store.info.dims === 3
+      ? 'Hand-made features can make a simple model enough: with x₁², x₂² and x₃², the ball and the shell of Shells are split by a flat plane, so even the Linear preset solves it.'
+      : 'Hand-made features can make a simple model enough: with x₁² and x₂², the Circle classes are split by a straight line, so even the Linear preset solves it.';
+  let featDims = 0;
+  const featButtons: { id: string; title: string; b: HTMLButtonElement }[] = [];
   const renderFeatures = () => {
-    clear(feats);
     const info = store.info;
     if (info.kind !== 'points') return;
+    const dims = info.dims!;
+    if (featDims !== dims) {
+      // Built once per dimension, then updated in place, so a toggled chip keeps its focus.
+      featDims = dims;
+      clear(feats);
+      featButtons.length = 0;
+      for (const f of featureCatalog(dims)) {
+        const b = h('button', { type: 'button', class: 'ds-feat', 'aria-pressed': 'false', 'aria-label': f.label, 'data-feature': f.id }, mathLabel(f.label)) as HTMLButtonElement;
+        b.addEventListener('click', () => {
+          const now = new Set(store.features);
+          if (now.has(f.id)) {
+            if (now.size === 1) {
+              note('Keep at least one feature on: the network needs an input.');
+              return;
+            }
+            now.delete(f.id);
+          } else now.add(f.id);
+          // Keep the catalogue order, so the inputs always appear in the same order.
+          setFeatures(featureCatalog(dims).map((d) => d.id).filter((id) => now.has(id)));
+          note(playground());
+        });
+        featButtons.push({ id: f.id, title: f.title, b });
+        feats.append(b);
+      }
+    }
     const on = new Set(store.features);
-    for (const f of featureCatalog(info.dims!)) {
-      const pressed = on.has(f.id);
+    for (const { id, title, b } of featButtons) {
+      const pressed = on.has(id);
       const last = pressed && on.size === 1;
-      const b = h(
-        'button',
-        {
-          type: 'button',
-          class: 'ds-feat',
-          'aria-pressed': String(pressed),
-          'aria-disabled': last ? 'true' : undefined,
-          'aria-label': f.label,
-          title: last ? `${f.title}. Keep at least one feature on.` : f.title,
-          'data-feature': f.id,
-        },
-        mathLabel(f.label),
-      );
-      b.addEventListener('click', () => {
-        const now = new Set(store.features);
-        if (now.has(f.id)) {
-          if (now.size === 1) {
-            note('Keep at least one feature on: the network needs an input.');
-            return;
-          }
-          now.delete(f.id);
-        } else now.add(f.id);
-        // Keep the catalogue order, so the inputs always appear in the same order.
-        setFeatures(featureCatalog(info.dims!).map((d) => d.id).filter((id) => now.has(id)));
-        note(playground);
-      });
-      feats.append(b);
+      b.setAttribute('aria-pressed', String(pressed));
+      if (last) b.setAttribute('aria-disabled', 'true');
+      else b.removeAttribute('aria-disabled');
+      b.title = last ? `${title}. Keep at least one feature on.` : title;
     }
   };
 
@@ -381,7 +411,7 @@ export function mountDatasetPicker(): void {
     share.sync();
     renderCount();
     renderFeatures();
-    if (!featNote.textContent || featNote.textContent.startsWith('Keep')) note(playground);
+    note(playground());
   };
 
   const onDataset = () => {
@@ -409,8 +439,8 @@ export function mountDatasetPicker(): void {
     if (!btn) return;
     const ir = index.getBoundingClientRect();
     const br = btn.getBoundingClientRect();
-    if (br.left < ir.left) index.scrollLeft += br.left - ir.left - 8;
-    else if (br.right > ir.right) index.scrollLeft += br.right - ir.right + 8;
+    // Aligned at its start, which is also where the strip's scroll snapping would put it.
+    if (br.left < ir.left || br.right > ir.right) index.scrollLeft += br.left - ir.left - SNAP_PAD;
   };
   let lastWidth = 0;
   if (typeof ResizeObserver !== 'undefined') {

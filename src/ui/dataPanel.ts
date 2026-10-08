@@ -640,6 +640,9 @@ function pointPanel(): { el: HTMLElement } {
       }
       // Mistakes: a red ring around every misclassified point.
       if (wrong) {
+        // Slightly see-through, so a crowd of mistakes early in training does not hide the classes.
+        ctx.save();
+        ctx.globalAlpha = 0.75;
         ctx.strokeStyle = pal.accent;
         ctx.lineWidth = 1;
         ctx.beginPath();
@@ -652,6 +655,7 @@ function pointPanel(): { el: HTMLElement } {
           ctx.arc(x, yy, ring, 0, 2 * Math.PI);
         }
         ctx.stroke();
+        ctx.restore();
         p.stat.textContent = `${int(n)} points · ${int(k)} wrong · ${fixed((100 * (n - k)) / Math.max(1, n), 1)}% right`;
       } else p.stat.textContent = `${int(n)} points`;
       // Your points are training data: larger squares with an ink outline.

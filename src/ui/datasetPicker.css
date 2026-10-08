@@ -3,7 +3,7 @@
 
 .dsp {
   display: grid;
-  gap: 10px;
+  gap: 8px;
   min-width: 0;
 }
 
@@ -15,9 +15,10 @@
   overflow-x: auto;
   overscroll-behavior-x: contain;
   scroll-snap-type: x proximity;
+  scroll-padding-inline: 6px;
   scrollbar-width: thin;
   /* Room for the focus outline of the first and last item. */
-  padding: 0 6px 6px;
+  padding: 0 6px 4px;
   margin: 0 -6px -2px;
 }
 
@@ -35,7 +36,7 @@
   left: 0;
   width: max-content;
   margin: 0;
-  padding: 5px 0 4px;
+  padding: 4px 0 3px;
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.1em;
@@ -56,9 +57,9 @@
   grid-template-rows: auto 1fr;
   justify-items: start;
   align-content: start;
-  gap: 5px;
+  gap: 4px;
   min-width: 0;
-  padding: 6px 8px 8px;
+  padding: 5px 8px 6px;
   border: 0;
   border-left: 1px solid var(--hair);
   background: transparent;
@@ -104,6 +105,11 @@
   line-height: 1.15;
   letter-spacing: -0.005em;
   text-wrap: balance;
+}
+
+/* Hyphenated names ("CIFAR-10") wrap only at spaces. */
+.dsp-word {
+  white-space: nowrap;
 }
 
 .dsp-progress {
