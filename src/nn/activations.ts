@@ -24,15 +24,21 @@ export function activate(act: Act, z: Float32Array, a: Float32Array): void {
   }
 }
 
-/** dZ = dA ⊙ f'(z). Uses the stored activation `a` where that is cheaper. */
-export function activateBackward(act: Act, z: Float32Array, a: Float32Array, dA: Float32Array, dZ: Float32Array): void {
+/**
+ * dZ = dA ⊙ f'(z). Uses the stored activation `a` where that is cheaper.
+ * At the ReLU kink (z exactly 0) training uses the left slope; `symmetric` uses the midpoint of the
+ * two one-sided slopes instead, which analyses prefer (blank MNIST pixels sit exactly on the kink).
+ */
+export function activateBackward(act: Act, z: Float32Array, a: Float32Array, dA: Float32Array, dZ: Float32Array, symmetric = false): void {
   const n = z.length;
   switch (act) {
     case 'relu':
-      for (let i = 0; i < n; i++) dZ[i] = z[i] > 0 ? dA[i] : 0;
+      if (symmetric) for (let i = 0; i < n; i++) dZ[i] = z[i] > 0 ? dA[i] : z[i] < 0 ? 0 : 0.5 * dA[i];
+      else for (let i = 0; i < n; i++) dZ[i] = z[i] > 0 ? dA[i] : 0;
       break;
     case 'leaky':
-      for (let i = 0; i < n; i++) dZ[i] = z[i] > 0 ? dA[i] : LEAKY_ALPHA * dA[i];
+      if (symmetric) for (let i = 0; i < n; i++) dZ[i] = z[i] > 0 ? dA[i] : z[i] < 0 ? LEAKY_ALPHA * dA[i] : 0.5 * (1 + LEAKY_ALPHA) * dA[i];
+      else for (let i = 0; i < n; i++) dZ[i] = z[i] > 0 ? dA[i] : LEAKY_ALPHA * dA[i];
       break;
     case 'tanh':
       for (let i = 0; i < n; i++) dZ[i] = dA[i] * (1 - a[i] * a[i]);

@@ -1,44 +1,91 @@
 import { store } from '../store';
 import { h } from './dom';
 
+/** Which network state a result belongs to. */
+export interface Stamp {
+  version: number;
+  step: number;
+  rev: number;
+  spec: string;
+}
+
+export const stampNow = (): Stamp => ({
+  version: store.version,
+  step: store.weightsStep,
+  rev: store.weightsRev,
+  spec: JSON.stringify(store.spec),
+});
+
+/** True when `s` describes the page's current weights. */
+export const isCurrent = (s: Stamp | null): boolean => !!s && s.version === store.version && s.rev === store.weightsRev;
+
 export interface Synced {
-  /** One-line status ("Based on the weights at step 1,234.") plus a recompute button; place it in the section. */
+  /** Status line ("Based on the weights at step 1,234." + Recompute) with a progress bar; place it in the section. */
   status: HTMLElement;
-  /** Call right before starting a computation: records which weights it uses. */
-  markComputed(): void;
+  /** Call when a computation starts. Returns the stamp to hand back to done(). */
+  begin(): Stamp;
+  /** Call when a result computed from `stamp` is shown. */
+  done(stamp: Stamp): void;
+  /** Call when a computation ends without a new result (error, superseded). */
+  fail(): void;
+  /** Progress of the running computation, 0–1, or null to hide the bar. */
+  setProgress(fraction: number | null): void;
+  /** Ask for a refresh, subject to the section's policy (on screen, data loaded, see below). */
+  request(): void;
   /** Recompute now, regardless of visibility or training state. */
   refreshNow(): void;
+  /** Stamp of the result on screen, or null. */
+  readonly shown: Stamp | null;
   /** True while the section is on screen (or close to it). */
   readonly visible: boolean;
+  /** @deprecated use begin()/done(). Marks the current weights as computed. */
+  markComputed(): void;
 }
 
 /**
  * Keeps an analysis section in step with the network without recomputing on every training tick.
- * `refresh` runs when the section first comes into view (once data has loaded), when the
- * architecture changes, and when the weights change while training is paused. While training
- * runs, the status line says which step the result belongs to and offers a recompute button.
+ *
+ * Policy (the same for every section): `refresh` runs when the section comes into view with no
+ * result yet, when the architecture or weights changed and training is paused, and on Recompute.
+ * While training runs a section computes once if it has nothing to show, then holds its result
+ * and says which step it belongs to. Requests are throttled to one per 250 ms; a burst of
+ * trainer ticks never postpones a pending refresh.
  */
 export function syncedSection(root: HTMLElement, refresh: () => void, opts: { auto?: boolean } = {}): Synced {
   const auto = opts.auto ?? true;
   const text = h('span', { class: 'hint' }, 'Not computed yet.');
   const btn = h('button', { type: 'button', class: 'btn btn-sm' }, 'Recompute') as HTMLButtonElement;
-  const status = h('div', { class: 'synced-status' }, text, btn);
-  let computed: { version: number; step: number } | null = null;
+  const bar = h('span', { style: { width: '0%' } });
+  const progress = h('div', { class: 'progress synced-progress', role: 'progressbar', 'aria-valuemin': '0', 'aria-valuemax': '100', hidden: true }, bar);
+  const status = h('div', { class: 'synced-status' }, text, btn, progress);
+  let shown: Stamp | null = null;
+  let busy: Stamp | null = null;
   let visible = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
 
-  const stale = () => !computed || computed.version !== store.version || computed.step !== store.weightsStep;
+  const stale = () => !isCurrent(shown);
+  const fmtStep = (n: number) => n.toLocaleString('en-US');
 
   const update = () => {
     btn.disabled = !store.data;
-    if (!computed) {
-      text.textContent = store.data ? 'Not computed yet.' : 'Waiting for MNIST to load…';
+    if (!store.data) {
+      text.textContent = 'Waiting for MNIST to load…';
       return;
     }
-    const at = computed.step.toLocaleString('en-US');
-    if (computed.version !== store.version) text.textContent = 'The architecture changed since this was computed.';
-    else if (!stale()) text.textContent = `Based on the weights at step ${at}.`;
-    else text.textContent = `Computed at step ${at}; the network is now at step ${store.weightsStep.toLocaleString('en-US')}.`;
+    if (busy && stale()) {
+      text.textContent = shown ? `Updating to step ${fmtStep(busy.step)}…` : 'Computing…';
+      return;
+    }
+    if (!shown) {
+      text.textContent = 'Not computed yet.';
+      return;
+    }
+    if (shown.spec !== JSON.stringify(store.spec)) text.textContent = 'The architecture changed since this was computed.';
+    else if (shown.version !== store.version) text.textContent = 'The weights were re-initialised since this was computed.';
+    else if (!stale()) text.textContent = `Based on the weights at step ${fmtStep(shown.step)}.`;
+    else if (shown.step !== store.weightsStep)
+      text.textContent = `Computed at step ${fmtStep(shown.step)}; the network is now at step ${fmtStep(store.weightsStep)}.`;
+    else text.textContent = `Computed at step ${fmtStep(shown.step)}, before the latest manual weight update.`;
   };
 
   const run = () => {
@@ -47,14 +94,20 @@ export function syncedSection(root: HTMLElement, refresh: () => void, opts: { au
     update();
   };
 
-  const maybe = () => {
+  /** Whether the policy allows an automatic refresh right now. */
+  const wanted = () => {
+    if (!auto || !visible || !store.data || !stale()) return false;
+    if (busy && isCurrent(busy)) return false; // already computing exactly this
+    if (store.running && shown && shown.version === store.version) return false; // hold while training
+    return true;
+  };
+
+  const request = () => {
     update();
-    if (!auto || !visible || !store.data || !stale()) return;
-    if (store.running && computed && computed.version === store.version) return;
-    if (timer) clearTimeout(timer);
+    if (!wanted() || timer) return;
     timer = setTimeout(() => {
       timer = null;
-      if (visible && stale() && !(store.running && computed && computed.version === store.version)) run();
+      if (wanted()) run();
     }, 250);
   };
 
@@ -62,22 +115,51 @@ export function syncedSection(root: HTMLElement, refresh: () => void, opts: { au
   new IntersectionObserver(
     (entries) => {
       visible = entries.some((e) => e.isIntersecting);
-      maybe();
+      request();
     },
     { rootMargin: '200px 0px' },
   ).observe(root);
-  for (const ev of ['weights', 'model', 'data', 'status'] as const) store.on(ev, maybe);
+  for (const ev of ['weights', 'model', 'data', 'status'] as const) store.on(ev, request);
   update();
 
   return {
     status,
-    markComputed() {
-      computed = { version: store.version, step: store.weightsStep };
+    begin() {
+      busy = stampNow();
+      update();
+      return busy;
+    },
+    done(stamp) {
+      shown = stamp;
+      busy = null;
+      progress.hidden = true;
+      update();
+      request(); // the network may have moved on while this was computing
+    },
+    fail() {
+      busy = null;
+      progress.hidden = true;
       update();
     },
+    setProgress(f) {
+      progress.hidden = f === null;
+      if (f !== null) {
+        const pct = Math.round(Math.max(0, Math.min(1, f)) * 100);
+        bar.style.width = `${pct}%`;
+        progress.setAttribute('aria-valuenow', String(pct));
+      }
+    },
+    request,
     refreshNow: run,
+    get shown() {
+      return shown;
+    },
     get visible() {
       return visible;
+    },
+    markComputed() {
+      shown = stampNow();
+      update();
     },
   };
 }

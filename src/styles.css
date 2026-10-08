@@ -10,18 +10,19 @@
   --accent: #e3120b;
   --neg: #1747d1;
   --on-accent: #ffffff;
-  /* Digit identity in scatter plots (secondary to the numeral glyph itself): the validated
-     8-hue categorical order for 0–7, then two neutrals. */
-  --cat-0: #2a78d6;
-  --cat-1: #eb6834;
-  --cat-2: #1baf7a;
-  --cat-3: #eda100;
-  --cat-4: #e87ba4;
-  --cat-5: #008300;
+  /* Digit identity in scatter plots, drawn as numeral glyphs (the numeral carries identity, colour
+     is secondary): eight validated hues for 0–7 (no red, which marks state), two neutrals for 8–9.
+     Every token clears 4.5:1 against --surface in its theme. */
+  --cat-0: #1f6fd0;
+  --cat-1: #b8501a;
+  --cat-2: #11805a;
+  --cat-3: #946800;
+  --cat-4: #c2447a;
+  --cat-5: #1c7a1c;
   --cat-6: #4a3aa7;
-  --cat-7: #e34948;
+  --cat-7: #985a12;
   --cat-8: #3f3f3b;
-  --cat-9: #8d8d85;
+  --cat-9: #6e6e67;
   --sans: 'Archivo', 'Helvetica Neue', Helvetica, Arial, sans-serif;
   --mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
   --gutter: clamp(16px, 3vw, 44px);
@@ -45,9 +46,9 @@
     --cat-2: #199e70;
     --cat-3: #c98500;
     --cat-4: #d55181;
-    --cat-5: #008300;
+    --cat-5: #3aae4e;
     --cat-6: #9085e9;
-    --cat-7: #e66767;
+    --cat-7: #c48633;
     --cat-8: #c6c6be;
     --cat-9: #8d8d85;
     color-scheme: dark;
@@ -60,9 +61,9 @@
   --cat-2: #199e70;
   --cat-3: #c98500;
   --cat-4: #d55181;
-  --cat-5: #008300;
+  --cat-5: #3aae4e;
   --cat-6: #9085e9;
-  --cat-7: #e66767;
+  --cat-7: #c48633;
   --cat-8: #c6c6be;
   --cat-9: #8d8d85;
   --bg: #0e0e0d;
@@ -212,8 +213,10 @@ select {
 
 .bar-group {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+  min-width: 0;
 }
 
 .bar-stats {
@@ -1177,11 +1180,29 @@ select {
 }
 
 .synced-status {
+  position: relative;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px 14px;
   margin-bottom: 14px;
+}
+
+/* The shared progress bar sits under the status row without moving anything below it. */
+.synced-progress {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -8px;
+}
+
+/* Title of a panel inside a section (Q–Q panels, attribution maps, unit details). */
+.panel-title {
+  margin: 0;
+  font-size: 16px;
+  line-height: 1.2;
+  font-weight: 800;
+  letter-spacing: -0.01em;
 }
 
 /* ── 07 Data ──────────────────────────────────────────── */
@@ -1345,6 +1366,18 @@ select {
 }
 
 @media (max-width: 560px) {
+  /* Segmented controls become a tidy two-column grid instead of wrapping raggedly. */
+  .seg {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    border-width: 1px 0 0 1px;
+  }
+  .seg button,
+  .seg button + button {
+    border: 0;
+    border-right: 1px solid var(--ink);
+    border-bottom: 1px solid var(--ink);
+  }
   .bar {
     gap: 10px 16px;
   }

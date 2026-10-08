@@ -7,6 +7,16 @@ import type { FromTrainer } from './train/protocol';
 
 let weightsQueued = false;
 
+function sameWeights(net: Network, ws: Float32Array[]): boolean {
+  return net.blocks.every((b, i) => equal(b.W, ws[2 * i]) && equal(b.b, ws[2 * i + 1]));
+}
+
+function equal(a: Float32Array, b: Float32Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
 function onMessage(m: FromTrainer): void {
   switch (m.type) {
     case 'status':
@@ -22,6 +32,8 @@ function onMessage(m: FromTrainer): void {
       break;
     case 'weights':
       if (m.version !== store.version) return;
+      // The trainer resends unchanged weights after pauses and evaluations; only real changes count.
+      if (m.step !== store.weightsStep || !sameWeights(store.net, m.weights)) store.weightsRev++;
       store.net.setWeights(m.weights);
       store.weightsStep = m.step;
       if (!weightsQueued) {
@@ -48,6 +60,7 @@ export function rebuild(newSeed = false): void {
   store.net = new Network(store.spec, store.seed);
   initialWeights = store.net.getWeights();
   store.weightsStep = 0;
+  store.weightsRev++;
   store.points = [];
   store.evals = [];
   store.status = null;
@@ -120,6 +133,7 @@ export function removeCustom(id: number): void {
 /** Replaces the live weights (used when the backprop view applies its update). */
 export function applyWeights(weights: Float32Array[]): void {
   store.net.setWeights(weights);
+  store.weightsRev++;
   client.post({ type: 'weights', weights: weights.map((w) => w.slice()) });
   store.emit('weights');
 }

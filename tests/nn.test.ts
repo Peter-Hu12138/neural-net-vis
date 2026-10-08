@@ -231,3 +231,65 @@ suite('input gradients', () => {
     for (let i = 0; i < 784; i += 37) expect(viaSeed[i]).toBeCloseTo(viaLoss[i], 5);
   });
 });
+
+suite('symmetric input gradients (analyses)', () => {
+  it('splits a tied max-pool window evenly instead of favouring its top-left element', () => {
+    // Zero kernels: every activation equals relu(bias), so every 2×2 window is a four-way tie.
+    const net = new Network([{ kind: 'conv', filters: 2, kernel: 3, act: 'relu', pool: true }], 1);
+    const conv = net.blocks[0];
+    conv.W.fill(0);
+    conv.b.set([0.5, 0.3]);
+    net.forward(new Float32Array(784));
+    const seed = new Float32Array(10).fill(0);
+    seed[3] = 1;
+    net.inputGradient(1, seed, true);
+    const dA = conv.dA;
+    let nonzero = 0;
+    for (let f = 0; f < 2; f++) {
+      for (let py = 0; py < 14; py++) {
+        for (let px = 0; px < 14; px++) {
+          // Each window's four entries carry the same share.
+          const i = f * 784 + 2 * py * 28 + 2 * px;
+          expect(dA[i + 1]).toBeCloseTo(dA[i], 7);
+          expect(dA[i + 28]).toBeCloseTo(dA[i], 7);
+          expect(dA[i + 29]).toBeCloseTo(dA[i], 7);
+          if (dA[i] !== 0) nonzero++;
+        }
+      }
+    }
+    expect(nonzero).toBeGreaterThan(100);
+    net.inputGradient(1, seed, false);
+    let corners = 0;
+    let others = 0;
+    for (let y = 0; y < 28; y++) for (let x = 0; x < 28; x++) (y % 2 === 0 && x % 2 === 0 ? (corners += Math.abs(conv.dA[y * 28 + x])) : (others += Math.abs(conv.dA[y * 28 + x])));
+    expect(others).toBe(0); // training routing: everything to the first winner
+    expect(corners).toBeGreaterThan(0);
+  });
+
+  it('uses the midpoint slope exactly at the ReLU kink and leaves other inputs unchanged', () => {
+    const spec: LayerSpec[] = [{ kind: 'dense', units: 4, act: 'relu' }];
+    const net = new Network(spec, 2);
+    const dense = net.blocks[0];
+    dense.b.fill(0);
+    const x = new Float32Array(784); // blank input: every hidden z is exactly 0
+    net.forward(x);
+    const seed = new Float32Array(10);
+    seed[0] = 1;
+    const sym = net.inputGradient(1, seed, true).slice();
+    net.forward(x);
+    const train = net.inputGradient(1, seed, false).slice();
+    expect(train.every((v) => v === 0)).toBe(true);
+    // Midpoint = average of the one-sided (+ε, −ε) derivatives, i.e. half the right-hand slope.
+    let expected = 0;
+    for (let j = 0; j < 4; j++) expected += 0.5 * net.output.W[j] * dense.W[j * 784 + 100];
+    expect(sym[100]).toBeCloseTo(expected, 6);
+    // Away from kinks both modes agree.
+    const r = new Rng(4);
+    const y = Float32Array.from({ length: 784 }, () => r.next());
+    net.forward(y);
+    const a = net.inputGradient(1, seed, true).slice();
+    net.forward(y);
+    const b = net.inputGradient(1, seed, false);
+    for (let i = 0; i < 784; i += 31) expect(a[i]).toBeCloseTo(b[i], 6);
+  });
+});

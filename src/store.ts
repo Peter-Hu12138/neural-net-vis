@@ -57,6 +57,8 @@ export class Store {
   version = 0;
   net: Network = new Network(this.spec, this.seed);
   weightsStep = 0;
+  /** Bumped on every change to the page's weights (training snapshots, manual updates, rebuilds). */
+  weightsRev = 0;
   data: Mnist | null = null;
   status: Status | null = null;
   points: TrainPoint[] = [];

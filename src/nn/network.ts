@@ -222,15 +222,36 @@ export class ConvBlock {
     this.backwardFromZ(needDx, true);
   }
 
-  /** ∂L/∂out → ∂L/∂z: routes through the max-pool winners, then the activation slope. */
-  backwardToZ(): void {
+  /**
+   * ∂L/∂out → ∂L/∂z: routes through the max-pool winners, then the activation slope.
+   * `symmetric` (analyses only) splits a window's gradient evenly among tied maxima instead of
+   * giving it all to the first, and uses the midpoint slope at activation kinks.
+   */
+  backwardToZ(symmetric = false): void {
     if (this.spec.pool) {
       const dA = this.dA;
       dA.fill(0);
       const am = this.argmax!;
-      for (let i = 0; i < am.length; i++) dA[am[i]] += this.dOut[i];
+      if (!symmetric) {
+        for (let i = 0; i < am.length; i++) dA[am[i]] += this.dOut[i];
+      } else {
+        const a = this.a;
+        const Wd = this.zShape.w;
+        for (let i = 0; i < am.length; i++) {
+          const m = a[am[i]];
+          // Window top-left from the winner's position (windows are 2×2, stride 2).
+          const y = Math.floor((am[i] % (this.zShape.h * Wd)) / Wd) & ~1;
+          const x = (am[i] % Wd) & ~1;
+          const base = am[i] - (am[i] % (this.zShape.h * Wd)) + y * Wd + x;
+          const idx = [base, base + 1, base + Wd, base + Wd + 1];
+          let ties = 0;
+          for (const j of idx) if (a[j] === m) ties++;
+          const g = this.dOut[i] / ties;
+          for (const j of idx) if (a[j] === m) dA[j] += g;
+        }
+      }
     }
-    activateBackward(this.spec.act, this.z, this.a, this.dA, this.dZ);
+    activateBackward(this.spec.act, this.z, this.a, this.dA, this.dZ, symmetric);
   }
 
   /** Reads this.dZ; accumulates gW, gb when `params`; writes dX when needDx. */
@@ -342,9 +363,9 @@ export class DenseBlock {
     this.backwardFromZ(needDx, true);
   }
 
-  /** ∂L/∂out → ∂L/∂z through the activation slope. */
-  backwardToZ(): void {
-    activateBackward(this.spec.act, this.z, this.a, this.dA, this.dZ);
+  /** ∂L/∂out → ∂L/∂z through the activation slope (`symmetric`: midpoint slope at kinks). */
+  backwardToZ(symmetric = false): void {
+    activateBackward(this.spec.act, this.z, this.a, this.dA, this.dZ, symmetric);
   }
 
   /** Reads this.dZ; accumulates gW, gb when `params`; writes dX when needDx. */
@@ -462,16 +483,19 @@ export class Network {
    * Gradient of Σ seed[i]·z[i] (the pre-activations of `block`) with respect to the input pixels,
    * for the input of the last forward pass. Used by activation maximisation and attribution:
    * a one-hot seed asks "which pixels would raise this unit?". Parameter gradients are untouched.
-   * Returns the network's internal buffer; copy it before the next call.
+   * By default ties in max-pool windows share the gradient and activation kinks use the midpoint
+   * slope (`symmetric`), so blank regions do not inherit an arbitrary tie-break pattern; pass false
+   * for exactly the gradient training uses. Returns the network's internal buffer; copy it before
+   * the next call.
    */
-  inputGradient(block: number, seed: ArrayLike<number>): Float32Array {
+  inputGradient(block: number, seed: ArrayLike<number>, symmetric = true): Float32Array {
     const b = this.blocks[block];
     b.dZ.set(seed);
     b.backwardFromZ(true, false);
     for (let i = block - 1; i >= 0; i--) {
       const bi = this.blocks[i];
       bi.dOut.set(this.blocks[i + 1].dX);
-      bi.backwardToZ();
+      bi.backwardToZ(symmetric);
       bi.backwardFromZ(true, false);
     }
     return this.blocks[0].dX;
