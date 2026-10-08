@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { inflateSync } from 'node:zlib';
 import { describe, expect, it } from 'vitest';
+import { mnistArch } from '../src/nn/types';
 import { layerStats, type LayerStatsResult } from '../src/analysis/layerStats';
 import type { JobContext, Progress } from '../src/analysis/protocol';
 import { registry } from '../src/analysis/registry';
@@ -42,11 +43,15 @@ function loadTestSet() {
 const mnist = loadTestSet();
 
 function context(spec: LayerSpec[], seed = 1, data = mnist): JobContext {
-  const net = new Network(spec, seed);
+  const net = new Network(mnistArch(spec), seed);
   const { testX, testY } = data;
   return {
     net,
+    arch: net.arch,
     spec,
+    inputSize: 784,
+    scale: 1 / 255,
+    classes: 10,
     testX,
     testY,
     image(i, out = new Float32Array(784)) {
@@ -116,7 +121,7 @@ describe('layerStats job', () => {
     const ctx = context([], 3);
     const { result } = drain(layerStats(ctx, { samples: 4 }));
     // Images at evenly spaced indices 0, 500, 1000, 1500; nothing is dropped below maxValues.
-    const check = new Network([], 3);
+    const check = new Network(mnistArch([]), 3);
     const expected: number[] = [];
     for (const idx of [0, 500, 1000, 1500]) {
       check.forward(ctx.image(idx));
@@ -132,7 +137,7 @@ describe('layerStats job', () => {
     const { result } = drain(layerStats(ctx, { samples: 3, maxValues: 1e9, activityImages: 3 }));
     expect(result.activityImages).toBe(3);
     // Brute force over every value of Conv 1.
-    const check = new Network(SMALL_CNN, 2);
+    const check = new Network(mnistArch(SMALL_CNN), 2);
     const counts = new Array(8).fill(0);
     for (const idx of [0, 666, 1333]) {
       check.forward(ctx.image(idx));
@@ -151,7 +156,7 @@ describe('layerStats job', () => {
     ];
     const ctx = context(spec, 5);
     const { result } = drain(layerStats(ctx, { samples: 2 }));
-    const ref = new Network(spec, 5);
+    const ref = new Network(mnistArch(spec), 5);
     ref.zeroGrad();
     for (const idx of [0, 1000]) {
       ref.forward(ctx.image(idx));

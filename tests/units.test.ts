@@ -1,8 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { inflateSync } from 'node:zlib';
 import { describe as suite, expect, it } from 'vitest';
+import { mnistArch } from '../src/nn/types';
 import type { JobContext, Progress } from '../src/analysis/protocol';
-import { centreFieldSize, cropBox, receptiveBox, receptiveSize, WHOLE_IMAGE, type Box } from '../src/analysis/receptive';
+import { centreFieldSize, cropBox, receptiveBox, receptiveSize, wholeImage, type Box } from '../src/analysis/receptive';
 import {
   actmax,
   allOff,
@@ -66,7 +67,11 @@ const data = loadTest();
 function context(net: Network, d = data): JobContext {
   return {
     net,
+    arch: net.arch,
     spec: net.spec,
+    inputSize: 784,
+    scale: 1 / 255,
+    classes: 10,
     testX: d.testX,
     testY: d.testY,
     image(i, out = new Float32Array(784)) {
@@ -92,36 +97,36 @@ const box = (y0: number, y1: number, x0: number, x1: number): Box => ({ y0, y1, 
 suite('receptiveBox', () => {
   it('a first 3×3 conv sees the 3×3 neighbourhood', () => {
     const spec: LayerSpec[] = [{ kind: 'conv', filters: 4, kernel: 3, act: 'relu', pool: false }];
-    expect(receptiveBox(spec, 0, 5, 5, 'z')).toEqual(box(4, 6, 4, 6));
-    expect(receptiveBox(spec, 0, 5, 9, 'z')).toEqual(box(4, 6, 8, 10));
-    expect(receptiveSize(spec, 0)).toBe(3);
+    expect(receptiveBox(mnistArch(spec), 0, 5, 5, 'z')).toEqual(box(4, 6, 4, 6));
+    expect(receptiveBox(mnistArch(spec), 0, 5, 9, 'z')).toEqual(box(4, 6, 8, 10));
+    expect(receptiveSize(mnistArch(spec), 0)).toBe(3);
   });
 
   it('Small CNN: conv 2 at (5, 5) of its pre-pool map sees rows and columns 7–14', () => {
-    expect(receptiveBox(SMALL_CNN, 1, 5, 5, 'z')).toEqual(box(7, 14, 7, 14));
-    expect(receptiveSize(SMALL_CNN, 1)).toBe(8);
-    expect(receptiveSize(SMALL_CNN, 0)).toBe(3);
+    expect(receptiveBox(mnistArch(SMALL_CNN), 1, 5, 5, 'z')).toEqual(box(7, 14, 7, 14));
+    expect(receptiveSize(mnistArch(SMALL_CNN), 1)).toBe(8);
+    expect(receptiveSize(mnistArch(SMALL_CNN), 0)).toBe(3);
     // Pooled output of conv 1 at (5, 5) covers z rows 10–11, so pixels 9–12.
-    expect(receptiveBox(SMALL_CNN, 0, 5, 5, 'out')).toEqual(box(9, 12, 9, 12));
+    expect(receptiveBox(mnistArch(SMALL_CNN), 0, 5, 5, 'out')).toEqual(box(9, 12, 9, 12));
     // Pooled output of conv 2 at (3, 3): z rows 6–7 → conv-1 out 5–8 → z 10–17 → pixels 9–18.
-    expect(receptiveBox(SMALL_CNN, 1, 3, 3, 'out')).toEqual(box(9, 18, 9, 18));
-    expect(receptiveSize(SMALL_CNN, 1, 'out')).toBe(10);
+    expect(receptiveBox(mnistArch(SMALL_CNN), 1, 3, 3, 'out')).toEqual(box(9, 18, 9, 18));
+    expect(receptiveSize(mnistArch(SMALL_CNN), 1, 'out')).toBe(10);
   });
 
   it('LeNet-ish 5×5 kernels give a 14-pixel field for conv 2', () => {
-    expect(receptiveSize(LENET, 0)).toBe(5);
-    expect(receptiveSize(LENET, 1)).toBe(14);
-    expect(receptiveBox(LENET, 1, 7, 7, 'z')).toEqual(box(8, 21, 8, 21));
+    expect(receptiveSize(mnistArch(LENET), 0)).toBe(5);
+    expect(receptiveSize(mnistArch(LENET), 1)).toBe(14);
+    expect(receptiveBox(mnistArch(LENET), 1, 7, 7, 'z')).toEqual(box(8, 21, 8, 21));
   });
 
   it('clips at the corners', () => {
-    expect(receptiveBox(SMALL_CNN, 0, 0, 0, 'z')).toEqual(box(0, 1, 0, 1));
-    expect(receptiveBox(SMALL_CNN, 0, 27, 27, 'z')).toEqual(box(26, 27, 26, 27));
-    expect(receptiveBox(SMALL_CNN, 1, 0, 0, 'z')).toEqual(box(0, 4, 0, 4));
-    expect(receptiveBox(SMALL_CNN, 1, 13, 13, 'z')).toEqual(box(23, 27, 23, 27));
-    expect(receptiveBox(SMALL_CNN, 1, 0, 13, 'z')).toEqual(box(0, 4, 23, 27));
+    expect(receptiveBox(mnistArch(SMALL_CNN), 0, 0, 0, 'z')).toEqual(box(0, 1, 0, 1));
+    expect(receptiveBox(mnistArch(SMALL_CNN), 0, 27, 27, 'z')).toEqual(box(26, 27, 26, 27));
+    expect(receptiveBox(mnistArch(SMALL_CNN), 1, 0, 0, 'z')).toEqual(box(0, 4, 0, 4));
+    expect(receptiveBox(mnistArch(SMALL_CNN), 1, 13, 13, 'z')).toEqual(box(23, 27, 23, 27));
+    expect(receptiveBox(mnistArch(SMALL_CNN), 1, 0, 13, 'z')).toEqual(box(0, 4, 23, 27));
     // Unclipped, the nominal field keeps its full size.
-    expect(receptiveBox(SMALL_CNN, 1, 0, 0, 'z', false)).toEqual(box(-3, 4, -3, 4));
+    expect(receptiveBox(mnistArch(SMALL_CNN), 1, 0, 0, 'z', false)).toEqual(box(-3, 4, -3, 4));
   });
 
   it('works through three pools (28 → 14 → 7 → 3)', () => {
@@ -131,19 +136,19 @@ suite('receptiveBox', () => {
       { kind: 'conv', filters: 2, kernel: 3, act: 'linear', pool: true },
     ];
     // out (0, 0) → z 0–1 → 0–2 → pool 0–5 → 0–6 → pool 0–13 → 0–14
-    expect(receptiveBox(spec, 2, 0, 0, 'out')).toEqual(box(0, 14, 0, 14));
+    expect(receptiveBox(mnistArch(spec), 2, 0, 0, 'out')).toEqual(box(0, 14, 0, 14));
     // out (2, 2) → z 4–5 → 3–6 → pool 6–13 → 5–14 → pool 10–29 → 9–30, clipped to 27
-    expect(receptiveBox(spec, 2, 2, 2, 'out')).toEqual(box(9, 27, 9, 27));
-    expect(receptiveSize(spec, 2, 'out')).toBe(22);
+    expect(receptiveBox(mnistArch(spec), 2, 2, 2, 'out')).toEqual(box(9, 27, 9, 27));
+    expect(receptiveSize(mnistArch(spec), 2, 'out')).toBe(22);
   });
 
   it('dense and output blocks see the whole image', () => {
-    expect(receptiveBox(SMALL_CNN, 2, 0, 0)).toBeNull();
-    expect(receptiveBox(SMALL_CNN, 3, 0, 0)).toBeNull();
-    expect(receptiveSize(SMALL_CNN, 2)).toBe(28);
-    expect(receptiveSize(SMALL_CNN, 3)).toBe(28);
-    expect(centreFieldSize(SMALL_CNN, 2)).toBe(28);
-    expect(cropBox(SMALL_CNN, 2, 0, 0)).toBeNull();
+    expect(receptiveBox(mnistArch(SMALL_CNN), 2, 0, 0)).toBeNull();
+    expect(receptiveBox(mnistArch(SMALL_CNN), 3, 0, 0)).toBeNull();
+    expect(receptiveSize(mnistArch(SMALL_CNN), 2)).toBe(28);
+    expect(receptiveSize(mnistArch(SMALL_CNN), 3)).toBe(28);
+    expect(centreFieldSize(mnistArch(SMALL_CNN), 2)).toBe(28);
+    expect(cropBox(mnistArch(SMALL_CNN), 2, 0, 0)).toBeNull();
   });
 
   it('deep stacks: the field shown and cropped never exceeds the 28×28 image (U6)', () => {
@@ -151,26 +156,26 @@ suite('receptiveBox', () => {
     const deepA = [conv(3, true), conv(5, true), conv(3, true), conv(5, false)];
     const deepB = [conv(3, true), conv(3, true), conv(3, true), conv(3, true)];
     // The nominal field outgrows the image: 58 and 38 pixels.
-    expect(receptiveSize(deepA, 3)).toBe(58);
-    expect(receptiveSize(deepB, 3)).toBe(38);
+    expect(receptiveSize(mnistArch(deepA), 3)).toBe(58);
+    expect(receptiveSize(mnistArch(deepB), 3)).toBe(38);
     for (const spec of [deepA, deepB]) {
       // What the centre unit really sees is the whole image, and crops are the image itself.
-      expect(centreFieldSize(spec, 3)).toBe(28);
+      expect(centreFieldSize(mnistArch(spec), 3)).toBe(28);
       const map = 3; // 28 → 14 → 7 → 3
-      for (let y = 0; y < map; y++) for (let x = 0; x < map; x++) expect(cropBox(spec, 3, y, x)).toEqual(WHOLE_IMAGE);
+      for (let y = 0; y < map; y++) for (let x = 0; x < map; x++) expect(cropBox(mnistArch(spec), 3, y, x)).toEqual(wholeImage(mnistArch(spec)));
     }
     // Shallower layers keep their nominal, same-size crops (blank past the edge).
-    expect(cropBox(SMALL_CNN, 1, 0, 0)).toEqual(box(-3, 4, -3, 4));
-    expect(cropBox(SMALL_CNN, 1, 5, 5)).toEqual(box(7, 14, 7, 14));
-    expect(centreFieldSize(SMALL_CNN, 1)).toBe(8);
-    expect(centreFieldSize(LENET, 1)).toBe(14);
+    expect(cropBox(mnistArch(SMALL_CNN), 1, 0, 0)).toEqual(box(-3, 4, -3, 4));
+    expect(cropBox(mnistArch(SMALL_CNN), 1, 5, 5)).toEqual(box(7, 14, 7, 14));
+    expect(centreFieldSize(mnistArch(SMALL_CNN), 1)).toBe(8);
+    expect(centreFieldSize(mnistArch(LENET), 1)).toBe(14);
     // Every crop of every buildable layer is at most 28 pixels wide.
     for (const spec of [SMALL_CNN, LENET, deepA, deepB]) {
       spec.forEach((l, block) => {
         if (l.kind !== 'conv') return;
-        const crop = cropBox(spec, block, 0, 0)!;
+        const crop = cropBox(mnistArch(spec), block, 0, 0)!;
         expect(crop.y1 - crop.y0 + 1).toBeLessThanOrEqual(28);
-        expect(centreFieldSize(spec, block)).toBeLessThanOrEqual(28);
+        expect(centreFieldSize(mnistArch(spec), block)).toBeLessThanOrEqual(28);
       });
     }
   });
@@ -180,7 +185,7 @@ suite('receptiveBox', () => {
    * the pooled output) change. Returns the bounding box of the pixels that moved each position.
    */
   function bruteForce(spec: LayerSpec[], block: number, level: 'z' | 'out', positions: [number, number][], deltas: number[], seed: number) {
-    const net = new Network(spec, seed);
+    const net = new Network(mnistArch(spec), seed);
     const rng = new Rng(seed + 50);
     const x = new Float32Array(784);
     for (let i = 0; i < 784; i++) x[i] = rng.next();
@@ -227,7 +232,7 @@ suite('receptiveBox', () => {
     ];
     const positions: [number, number][] = [[14, 14], [0, 0], [27, 27], [3, 20], [26, 1], [9, 4]];
     const found = bruteForce(spec, 2, 'z', positions, [0.5], 3);
-    positions.forEach(([y, x], k) => expect(found[k], `position ${y},${x}`).toEqual(receptiveBox(spec, 2, y, x, 'z')));
+    positions.forEach(([y, x], k) => expect(found[k], `position ${y},${x}`).toEqual(receptiveBox(mnistArch(spec), 2, y, x, 'z')));
     expect(found[0]).toEqual(box(10, 18, 10, 18)); // 3 + 5 + 3 kernels: 9 pixels wide
   });
 
@@ -240,11 +245,11 @@ suite('receptiveBox', () => {
     ];
     const positions: [number, number][] = [[7, 7], [0, 0], [13, 13], [2, 11], [12, 5]];
     const found = bruteForce(spec, 1, 'z', positions, [25, -25], 5);
-    positions.forEach(([y, x], k) => expect(found[k], `position ${y},${x}`).toEqual(receptiveBox(spec, 1, y, x, 'z')));
+    positions.forEach(([y, x], k) => expect(found[k], `position ${y},${x}`).toEqual(receptiveBox(mnistArch(spec), 1, y, x, 'z')));
     // The pooled output of block 0 itself, at a few positions.
     const outPos: [number, number][] = [[5, 5], [0, 13], [13, 0]];
     const foundOut = bruteForce(spec, 0, 'out', outPos, [25, -25], 7);
-    outPos.forEach(([y, x], k) => expect(foundOut[k], `out ${y},${x}`).toEqual(receptiveBox(spec, 0, y, x, 'out')));
+    outPos.forEach(([y, x], k) => expect(foundOut[k], `out ${y},${x}`).toEqual(receptiveBox(mnistArch(spec), 0, y, x, 'out')));
   });
 
   it('never misses a pixel in a deeper pooled network (affected pixels lie inside the box)', () => {
@@ -256,7 +261,7 @@ suite('receptiveBox', () => {
     const positions: [number, number][] = [[3, 3], [0, 6], [6, 6]];
     const found = bruteForce(spec, 2, 'z', positions, [25, -25], 11);
     positions.forEach(([y, x], k) => {
-      const want = receptiveBox(spec, 2, y, x, 'z')!;
+      const want = receptiveBox(mnistArch(spec), 2, y, x, 'z')!;
       const got = found[k]!;
       expect(got).not.toBeNull();
       expect(got.y0).toBeGreaterThanOrEqual(want.y0);
@@ -309,10 +314,10 @@ suite('topk job', () => {
 
   for (const block of [0, 1, 2, 3]) {
     it(`matches a brute-force scan on Small CNN block ${block}`, () => {
-      const net = new Network(SMALL_CNN, 4);
+      const net = new Network(mnistArch(SMALL_CNN), 4);
       const n = 300;
       const { result, reports } = drain(topk(context(net), { block, k: 9, count: n }));
-      const brute = bruteResponses(new Network(SMALL_CNN, 4), block, n);
+      const brute = bruteResponses(new Network(mnistArch(SMALL_CNN), 4), block, n);
       expect(result.kind).toBe(['conv', 'conv', 'dense', 'output'][block]);
       expect(result.count).toBe(n);
       expect(result.units).toHaveLength(brute.length);
@@ -354,12 +359,12 @@ suite('topk job', () => {
   }
 
   it('records where a conv filter fired and the pixels behind that position', () => {
-    const net = new Network(SMALL_CNN, 9);
+    const net = new Network(mnistArch(SMALL_CNN), 9);
     const { result } = drain(topk(context(net), { block: 1, k: 4, count: 120 }));
-    const probe = new Network(SMALL_CNN, 9);
+    const probe = new Network(mnistArch(SMALL_CNN), 9);
     for (const u of result.units.slice(0, 5)) {
       for (const hit of u.top) {
-        expect(hit.box).toEqual(receptiveBox(SMALL_CNN, 1, hit.y, hit.x, 'z'));
+        expect(hit.box).toEqual(receptiveBox(mnistArch(SMALL_CNN), 1, hit.y, hit.x, 'z'));
         const x = context(probe).image(hit.index);
         const r = unitResponse(probe, 1, u.unit, x);
         expect(hit.z).toBeCloseTo(probe.blocks[1].z[u.unit * 196 + hit.y * 14 + hit.x], 6);
@@ -373,7 +378,7 @@ suite('topk job', () => {
   });
 
   it('dense and output hits carry no box', () => {
-    const net = new Network(SMALL_CNN, 2);
+    const net = new Network(mnistArch(SMALL_CNN), 2);
     const { result } = drain(topk(context(net), { block: 3, k: 3, count: 50 }));
     expect(result.units).toHaveLength(10);
     expect(result.units[0].top[0]).toMatchObject({ box: null, y: -1, x: -1 });
@@ -381,7 +386,7 @@ suite('topk job', () => {
 
   it('labels of the top 50 follow the digit a trained output unit stands for', () => {
     // Train a softmax (no hidden layers) for two quick SGD passes over the first 1,000 digits.
-    const net = new Network([], 1);
+    const net = new Network(mnistArch([]), 1);
     const x = new Float32Array(784);
     const out = net.output;
     for (let epoch = 0; epoch < 2; epoch++) {
@@ -404,7 +409,7 @@ suite('topk job', () => {
   });
 
   it('scans all 2,000 digits for every Small CNN layer within the time budget', () => {
-    const net = new Network(SMALL_CNN, 1);
+    const net = new Network(mnistArch(SMALL_CNN), 1);
     const times: Record<string, number> = {};
     for (const block of [0, 1, 2, 3]) {
       const { result, ms } = drain(topk(context(net), { block, k: 16 }));
@@ -418,7 +423,7 @@ suite('topk job', () => {
 
 suite('actmax job', () => {
   it('inputGradient with a one-hot seed at the centre is the gradient of that z (finite differences)', () => {
-    const net = new Network(SMALL_CNN, 3);
+    const net = new Network(mnistArch(SMALL_CNN), 3);
     const rng = new Rng(8);
     const x = new Float32Array(784);
     for (let i = 0; i < 784; i++) x[i] = 0.3 * rng.next();
@@ -460,7 +465,7 @@ suite('actmax job', () => {
     ['LeNet-ish conv 2', LENET, 1],
   ] as const) {
     it(`raises the objective above its blank start: ${name}`, () => {
-      const net = new Network(spec as LayerSpec[], 6);
+      const net = new Network(mnistArch(spec as LayerSpec[]), 6);
       const units = [0, 1, 2];
       const { result, reports } = drain(actmax(context(net), { block, units, steps: 160 }));
       expect(result.units.map((u) => u.unit)).toEqual(units);
@@ -490,9 +495,9 @@ suite('actmax job', () => {
   }
 
   it('is deterministic and seeds each unit differently', () => {
-    const net = new Network(SMALL_CNN, 2);
+    const net = new Network(mnistArch(SMALL_CNN), 2);
     const a = drain(actmax(context(net), { block: 2, units: [4, 5], steps: 20 })).result;
-    const b = drain(actmax(context(new Network(SMALL_CNN, 2)), { block: 2, units: [4], steps: 20 })).result;
+    const b = drain(actmax(context(new Network(mnistArch(SMALL_CNN), 2)), { block: 2, units: [4], steps: 20 })).result;
     expect(Array.from(b.units[0].x)).toEqual(Array.from(a.units[0].x));
     expect(Array.from(a.units[1].x)).not.toEqual(Array.from(a.units[0].x));
   });
@@ -501,7 +506,7 @@ suite('actmax job', () => {
     // With a single linear 3×3 conv, z = b + Σ w·x over the patch: the optimum puts ink (1) where
     // the weight is positive and leaves 0 where it is negative.
     const spec: LayerSpec[] = [{ kind: 'conv', filters: 4, kernel: 3, act: 'linear', pool: false }];
-    const net = new Network(spec, 12);
+    const net = new Network(mnistArch(spec), 12);
     const { result } = drain(actmax(context(net), { block: 0, steps: 160 }));
     const W = net.blocks[0].W;
     for (const u of result.units) {
@@ -523,7 +528,7 @@ suite('actmax job', () => {
   it('synthesises every unit of each Small CNN layer within the time budget', () => {
     const times: Record<string, number> = {};
     for (const block of [0, 1, 2, 3]) {
-      const net = new Network(SMALL_CNN, 1);
+      const net = new Network(mnistArch(SMALL_CNN), 1);
       const { result, ms } = drain(actmax(context(net), { block }));
       expect(result.steps).toBe(160);
       times[`block ${block} (${result.units.length} units)`] = Math.round(ms);
@@ -535,7 +540,7 @@ suite('actmax job', () => {
 
 // Result types are what the page receives; keep them structured-cloneable.
 it('results survive structured cloning', () => {
-  const net = new Network(SMALL_CNN, 1);
+  const net = new Network(mnistArch(SMALL_CNN), 1);
   const t = drain(topk(context(net), { block: 1, k: 2, count: 20 })).result;
   const a = drain(actmax(context(net), { block: 1, units: [0], steps: 4 })).result;
   expect(structuredClone(t) as TopkResult).toEqual(t);
@@ -605,9 +610,9 @@ suite('ranks against the scan (U1, U2)', () => {
   });
 
   it('a dense ReLU unit: ranks from the sorted responses count the exact zeros', () => {
-    const net = new Network(SMALL_CNN, 3);
+    const net = new Network(mnistArch(SMALL_CNN), 3);
     const { result } = drain(topk(context(net), { block: 2, k: 4 }));
-    const copy = new Network(SMALL_CNN, 0);
+    const copy = new Network(mnistArch(SMALL_CNN), 0);
     copy.setWeights(net.getWeights());
     let checked = 0;
     for (const u of result.units) {
@@ -629,10 +634,10 @@ suite('ranks against the scan (U1, U2)', () => {
   });
 
   it('the current input measured with a copy of the scan weights ranks consistently, even after training moves on', () => {
-    const live = new Network(SMALL_CNN, 1);
+    const live = new Network(mnistArch(SMALL_CNN), 1);
     const { result } = drain(topk(context(live), { block: 1, k: 16 }));
     // What the page keeps beside the scan: a network holding the weights the scan used.
-    const scanNet = new Network(SMALL_CNN, 0);
+    const scanNet = new Network(mnistArch(SMALL_CNN), 0);
     scanNet.setWeights(live.getWeights());
     train(live, 25);
     const x0 = context(live).image(0);
@@ -658,7 +663,7 @@ suite('ranks against the scan (U1, U2)', () => {
 
 suite('coverage (U4)', () => {
   it('conv filters report the share of positions that fire, not "some position fired"', () => {
-    const net = new Network(SMALL_CNN, 1);
+    const net = new Network(mnistArch(SMALL_CNN), 1);
     train(net, 40);
     const { result } = drain(topk(context(net), { block: 1, k: 2, count: 300 }));
     const brute = bruteResponses(net, 1, 300);
@@ -673,7 +678,7 @@ suite('coverage (U4)', () => {
 
   it('sigmoid units are not "active" on every digit: firing means z > 0 (a > 0.5)', () => {
     const spec: LayerSpec[] = [{ kind: 'dense', units: 16, act: 'sigmoid' }];
-    const net = new Network(spec, 2);
+    const net = new Network(mnistArch(spec), 2);
     const { result } = drain(topk(context(net), { block: 0, k: 2, count: 400 }));
     const brute = bruteResponses(net, 0, 400);
     for (const u of result.units) {
@@ -685,7 +690,7 @@ suite('coverage (U4)', () => {
   });
 
   it('output units report how often each digit is predicted; the shares sum to 1', () => {
-    const net = new Network(SMALL_CNN, 5);
+    const net = new Network(mnistArch(SMALL_CNN), 5);
     const { result } = drain(topk(context(net), { block: 3, k: 2, count: 500 }));
     const brute = bruteResponses(net, 3, 500);
     result.units.forEach((u) => expect(u.coverage).toBeCloseTo(brute.coverage[u.unit], 9));
@@ -696,7 +701,7 @@ suite('coverage (U4)', () => {
 
 suite('weakest digits heading (U7)', () => {
   it('conv filters still fire on their weakest digits; dense ReLU units can be switched off', () => {
-    const net = new Network(SMALL_CNN, 1);
+    const net = new Network(mnistArch(SMALL_CNN), 1);
     const conv = drain(topk(context(net), { block: 1, k: 8, count: 500 })).result;
     for (const u of conv.units) {
       expect(u.bottom[0].value).toBeGreaterThan(0);

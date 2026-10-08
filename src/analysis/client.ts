@@ -88,8 +88,8 @@ export class AnalysisClient {
     else w.reject(new Error(m.message));
   }
 
-  setData(testX: Uint8Array, testY: Uint8Array): void {
-    this.post({ type: 'data', testX, testY });
+  setData(d: { testX: Uint8Array | Float32Array; testY: Uint8Array; inputSize: number; scale: number; classes: number }): void {
+    this.post({ type: 'data', testX: d.testX, testY: d.testY, inputSize: d.inputSize, scale: d.scale, classes: d.classes });
   }
 
   /**
@@ -103,7 +103,7 @@ export class AnalysisClient {
     const promise = new Promise<R>((resolve, reject) => {
       this.waiters.set(id, { channel, resolve: resolve as (r: unknown) => void, reject, onProgress });
     });
-    this.post({ type: 'run', id, channel, kind, params, spec: store.spec, weights: store.net.getWeights() });
+    this.post({ type: 'run', id, channel, kind, params, arch: store.arch, weights: store.net.getWeights() });
     return promise;
   }
 

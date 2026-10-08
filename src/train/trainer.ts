@@ -43,13 +43,16 @@ export class Trainer {
   private running = false;
   private stopAtEpochEnd = false;
   private timer: ReturnType<typeof setTimeout> | null = null;
-  private x = new Float32Array(784);
+  private x = new Float32Array(0);
+  private frozen: boolean[] = [];
 
   private winLoss = 0;
   private winAcc = 0;
   private winN = 0;
   private nextPointStep = 0;
   private nextEvalEpoch = 0;
+  private lastPointAt = -Infinity;
+  private lastEvalAt = -Infinity;
   private evalJob: EvalJob | null = null;
   private points: TrainPoint[] = [];
   private evals: EvalPoint[] = [];
@@ -58,23 +61,31 @@ export class Trainer {
   private lastWeights = 0;
   private rate = 0;
 
+  /**
+   * `pace` sets wall-clock floors between recorded curve points and between test-set evaluations.
+   * Tiny datasets (a few hundred points) finish an epoch in milliseconds; without the floors the
+   * curves would get thousands of points per second. Tests use the default 0 for exact counts.
+   */
   constructor(
     private emit: (msg: FromTrainer, transfer?: Transferable[]) => void,
     private sliceMs = 40,
+    private pace: { pointMs: number; evalMs: number } = { pointMs: 0, evalMs: 0 },
   ) {}
 
   handle(msg: ToTrainer): void {
     switch (msg.type) {
       case 'data':
         this.data = msg.data;
+        this.x = new Float32Array(msg.data.inputSize);
         this.rebuildOrder();
         this.startEval();
         this.schedule();
         break;
       case 'model':
         this.version = msg.version;
-        this.net = new Network(msg.spec, 0);
+        this.net = new Network(msg.arch, 0);
         this.net.setWeights(msg.weights);
+        this.frozen = msg.frozen.slice();
         this.hyper = msg.hyper;
         this.opt = new Optimizer(this.net, msg.hyper.optimizer, msg.hyper.lr);
         this.running = this.stopAtEpochEnd = false;
@@ -101,6 +112,9 @@ export class Trainer {
         this.net?.setWeights(msg.weights);
         this.startEval();
         this.schedule();
+        break;
+      case 'frozen':
+        this.frozen = msg.frozen.slice();
         break;
       case 'custom':
         this.custom = msg.samples;
@@ -133,8 +147,11 @@ export class Trainer {
     }
   }
 
+  /** Data and network agree on input size and classes (they arrive separately on a dataset switch). */
   private ready(): boolean {
-    return !!(this.data && this.net && this.opt);
+    const d = this.data;
+    const net = this.net;
+    return !!(d && net && this.opt && net.inputSize === d.inputSize && net.classes === d.classes);
   }
 
   private get poolSize(): number {
@@ -157,13 +174,13 @@ export class Trainer {
   private load(idx: number): number {
     const d = this.data!;
     const n = d.trainY.length;
-    let src: Uint8Array;
+    let src: Uint8Array | Float32Array;
     let off: number;
     let y: number;
     if (idx < n || this.custom.length === 0) {
       const i = idx % n;
       src = d.trainX;
-      off = i * 784;
+      off = i * d.inputSize;
       y = d.trainY[i];
     } else {
       const s = this.custom[(idx - n) % this.custom.length];
@@ -172,7 +189,9 @@ export class Trainer {
       y = s.y;
     }
     const x = this.x;
-    for (let j = 0; j < 784; j++) x[j] = src[off + j] / 255;
+    const len = d.inputSize;
+    const scale = d.scale;
+    for (let j = 0; j < len; j++) x[j] = src[off + j] * scale;
     return y;
   }
 
@@ -187,21 +206,26 @@ export class Trainer {
       const y = this.load(this.order[this.cursor++]);
       const p = net.forward(this.x);
       if (argmax(p) === y) correct++;
-      loss += net.backward(y);
+      loss += net.backward(y, false, this.frozen);
     }
-    this.opt!.step(1 / B);
+    this.opt!.step(1 / B, this.frozen);
     if (this.cursor >= this.order.length) this.endEpoch();
     this.step++;
     this.seen += B;
     this.winLoss += loss;
     this.winAcc += correct;
     this.winN += B;
-    if (this.step >= this.nextPointStep) {
+    const now = this.pace.pointMs || this.pace.evalMs ? performance.now() : 0;
+    if (this.step >= this.nextPointStep && now - this.lastPointAt >= this.pace.pointMs) {
+      this.lastPointAt = now;
       this.points.push({ epoch: this.epochFraction(), step: this.step, loss: this.winLoss / this.winN, acc: this.winAcc / this.winN });
       this.winLoss = this.winAcc = this.winN = 0;
       this.nextPointStep = this.step + Math.max(1, Math.round(this.stepsPerEpoch() / POINTS_PER_EPOCH));
     }
-    if (this.epochFraction() >= this.nextEvalEpoch) this.startEval();
+    if (this.epochFraction() >= this.nextEvalEpoch && !this.evalJob && now - this.lastEvalAt >= this.pace.evalMs) {
+      this.lastEvalAt = now;
+      this.startEval();
+    }
   }
 
   private endEpoch(): void {
@@ -221,7 +245,7 @@ export class Trainer {
   private startEval(): void {
     if (!this.ready()) return;
     const ef = this.epochFraction();
-    this.evalJob = { i: 0, loss: 0, correct: 0, confusion: new Array(100).fill(0), epoch: ef, step: this.step };
+    this.evalJob = { i: 0, loss: 0, correct: 0, confusion: new Array(this.data!.classes * this.data!.classes).fill(0), epoch: ef, step: this.step };
     this.nextEvalEpoch = (Math.floor(ef * EVALS_PER_EPOCH + 1e-9) + 1) / EVALS_PER_EPOCH;
   }
 
@@ -233,14 +257,14 @@ export class Trainer {
     const n = d.testY.length;
     const end = Math.min(n, job.i + budget);
     for (; job.i < end; job.i++) {
-      const off = job.i * 784;
-      for (let j = 0; j < 784; j++) this.x[j] = d.testX[off + j] / 255;
+      const off = job.i * d.inputSize;
+      for (let j = 0; j < d.inputSize; j++) this.x[j] = d.testX[off + j] * d.scale;
       const y = d.testY[job.i];
       const p = net.forward(this.x);
       const pred = argmax(p);
       job.loss += -Math.log(Math.max(p[y], 1e-12));
       if (pred === y) job.correct++;
-      job.confusion[y * 10 + pred]++;
+      job.confusion[y * d.classes + pred]++;
     }
     if (job.i >= n) {
       this.evals.push({ epoch: job.epoch, step: job.step, loss: job.loss / n, acc: job.correct / n, confusion: job.confusion });

@@ -1,5 +1,5 @@
 import './unitsView.css';
-import { select, setProbe } from '../actions';
+import { select, setProbe, testProbe } from '../actions';
 import { analysis, isSuperseded } from '../analysis/client';
 import { centreFieldSize, centrePosition, cropBox, type Box } from '../analysis/receptive';
 import {
@@ -19,7 +19,7 @@ import {
   type UnitKind,
   type UnitSummary,
 } from '../analysis/units';
-import { sampleToFloat } from '../data/mnist';
+import { sampleInput } from '../data/datasets';
 import { Network } from '../nn/network';
 import { store, type Probe } from '../store';
 import { layerDetail, layerName } from './builder';
@@ -187,10 +187,10 @@ export function mountUnits(): void {
   };
   /** What a conv layer's units see, for the copy: the clipped field at the centre of the map. */
   const field = () => {
-    const spec = store.net.spec;
-    const size = centreFieldSize(spec, layer);
-    const c = centrePosition(spec, layer);
-    const crop = cropBox(spec, layer, c.y, c.x);
+    const arch = store.net.arch;
+    const size = centreFieldSize(arch, layer);
+    const c = centrePosition(arch, layer);
+    const crop = cropBox(arch, layer, c.y, c.x);
     const cropSide = crop ? crop.y1 - crop.y0 + 1 : 28;
     return { size, whole: size >= 28, cropSide, crop };
   };
@@ -204,7 +204,7 @@ export function mountUnits(): void {
     const block = layer;
     const stamp = sync.begin();
     // The worker gets these same weights (analysis.run copies them synchronously below).
-    const net = new Network(store.net.spec, 0);
+    const net = new Network(store.net.arch, 0);
     net.setWeights(store.net.getWeights());
     scanning = { block };
     scanError = null;
@@ -303,12 +303,12 @@ export function mountUnits(): void {
 
   const hitCanvas = (hit: Hit): HTMLCanvasElement => {
     const c = h('canvas', { class: 'units-px', 'aria-hidden': 'true' }) as HTMLCanvasElement;
-    const b = hit.y >= 0 ? cropBox(store.net.spec, layer, hit.y, hit.x) : null;
+    const b = hit.y >= 0 ? cropBox(store.net.arch, layer, hit.y, hit.x) : null;
     if (b) {
       const { data, H, W } = crop(digitAt(hit.index), b);
       paintPixels(c, data, H, W);
     } else {
-      paintPixels(c, sampleToFloat(store.data!.testX, hit.index), 28, 28);
+      paintPixels(c, sampleInput(store.data!, 'test', hit.index), 28, 28);
     }
     return c;
   };
@@ -413,7 +413,7 @@ export function mountUnits(): void {
     const i = hit.index;
     const label = d.testY[i];
     const c = h('canvas', { class: 'units-px', 'aria-hidden': 'true' }) as HTMLCanvasElement;
-    paintPixels(c, sampleToFloat(d.testX, i), 28, 28);
+    paintPixels(c, sampleInput(d, 'test', i), 28, 28);
     const box = showBox && hit.box
       ? h('span', {
           class: 'units-digit-box',
@@ -439,7 +439,7 @@ export function mountUnits(): void {
       box,
       h('span', { class: 'units-digit-label' }, String(label)),
     );
-    btn.addEventListener('click', () => setProbe({ x: sampleToFloat(d.testX, i), label, caption: `Test digit #${i} · label ${label}`, key: `test:${i}` }));
+    btn.addEventListener('click', () => setProbe(testProbe(d, i)));
     return btn;
   };
 

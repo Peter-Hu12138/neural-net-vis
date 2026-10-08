@@ -1,5 +1,5 @@
 import './embeddingView.css';
-import { setProbe } from '../actions';
+import { setProbe, testProbe } from '../actions';
 import { analysis, isSuperseded } from '../analysis/client';
 import {
   alignPca,
@@ -19,7 +19,7 @@ import {
   type TsnePartial,
 } from '../analysis/embed';
 import type { Progress } from '../analysis/protocol';
-import { sampleToFloat } from '../data/mnist';
+import { sampleInput } from '../data/datasets';
 import { Network } from '../nn/network';
 import { fmtShape } from '../nn/types';
 import { store } from '../store';
@@ -317,7 +317,7 @@ export function mountEmbedding(): void {
   };
 
   const snapshotNet = () => {
-    const net = new Network(store.net.spec, 0);
+    const net = new Network(store.net.arch, 0);
     net.setWeights(store.net.getWeights());
     return net;
   };
@@ -599,8 +599,7 @@ export function mountEmbedding(): void {
     const d = store.data;
     if (!v || !d) return;
     const i = v.indices[s];
-    const label = d.testY[i];
-    setProbe({ x: sampleToFloat(d.testX, i), label, caption: `Test digit #${i} · label ${label}`, key: `test:${i}` });
+    setProbe(testProbe(d, i));
   };
   canvas.addEventListener('click', (e) => {
     const r = canvas.getBoundingClientRect();
@@ -678,7 +677,7 @@ export function mountEmbedding(): void {
     if (hover !== null && v && d && hover < v.labels.length) {
       const i = v.indices[hover];
       previewHead.textContent = 'Hovered digit';
-      paintThumb(previewCanvas, sampleToFloat(d.testX, i), 28, 28, size);
+      paintThumb(previewCanvas, sampleInput(d, 'test', i), 28, 28, size);
       previewCanvas.hidden = false;
       previewTitle.textContent = `Test digit #${i}`;
       clear(previewMeta);

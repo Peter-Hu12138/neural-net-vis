@@ -1,7 +1,9 @@
+import { datasetInfo, featureShape, type Data, type DatasetId, type DatasetInfo } from './data/datasets';
+import { defaultFeatures, type FeatureId } from './data/features';
+import { DEFAULT_SYNTHETIC, type SyntheticConfig } from './data/synthetic';
 import { Network, describe } from './nn/network';
-import type { Mnist } from './data/mnist';
 import { DEFAULT_LR } from './nn/optim';
-import type { Hyper, LayerSpec } from './nn/types';
+import type { Arch, Hyper, LayerSpec, Shape } from './nn/types';
 import type { EvalPoint, Status, TrainPoint } from './train/protocol';
 
 export type WeightMode = 'heat' | 'hinton' | 'numbers' | 'hist' | 'qq';
@@ -11,14 +13,19 @@ export interface Probe {
   label: number | null;
   caption: string;
   key: string;
+  /** Point datasets: the raw coordinates the input was computed from. */
+  coords?: Float32Array;
 }
 
 export interface CustomEntry {
   id: number;
+  /** Network input (already scaled). */
   x: Float32Array;
   y: number;
-  origin: 'upload' | 'drawing';
+  origin: 'upload' | 'drawing' | 'point';
   name: string;
+  /** Point datasets: raw coordinates. */
+  coords?: Float32Array;
 }
 
 /** Highlight requested by the backprop view: which block, and forward or backward. */
@@ -27,9 +34,27 @@ export interface Highlight {
   dir: 'fwd' | 'back' | 'update';
 }
 
-type EventName = 'model' | 'weights' | 'status' | 'metrics' | 'probe' | 'select' | 'mode' | 'custom' | 'data' | 'highlight' | 'hyper';
+type EventName =
+  | 'model'
+  | 'weights'
+  | 'status'
+  | 'metrics'
+  | 'probe'
+  | 'select'
+  | 'mode'
+  | 'custom'
+  | 'data'
+  | 'highlight'
+  | 'hyper'
+  | 'dataset'
+  | 'frozen';
 
-export const PRESETS: { name: string; spec: LayerSpec[] }[] = [
+export interface Preset {
+  name: string;
+  spec: LayerSpec[];
+}
+
+export const IMAGE_PRESETS: Preset[] = [
   { name: 'Softmax', spec: [] },
   { name: 'MLP', spec: [{ kind: 'dense', units: 64, act: 'relu' }] },
   {
@@ -50,16 +75,60 @@ export const PRESETS: { name: string; spec: LayerSpec[] }[] = [
   },
 ];
 
+export const POINT_PRESETS: Preset[] = [
+  { name: 'Linear', spec: [] },
+  { name: 'One layer', spec: [{ kind: 'dense', units: 6, act: 'tanh' }] },
+  {
+    name: 'Two layers',
+    spec: [
+      { kind: 'dense', units: 8, act: 'tanh' },
+      { kind: 'dense', units: 8, act: 'tanh' },
+    ],
+  },
+  {
+    name: 'Deep',
+    spec: [
+      { kind: 'dense', units: 8, act: 'relu' },
+      { kind: 'dense', units: 8, act: 'relu' },
+      { kind: 'dense', units: 8, act: 'relu' },
+    ],
+  },
+];
+
+/** @deprecated image presets; use presetsFor(). */
+export const PRESETS = IMAGE_PRESETS;
+
+export const presetsFor = (info: DatasetInfo): Preset[] => (info.kind === 'image' ? IMAGE_PRESETS : POINT_PRESETS);
+
+/** Default architecture and training settings when switching to a dataset of this kind. */
+export function defaultsFor(info: DatasetInfo): { spec: LayerSpec[]; hyper: Hyper } {
+  if (info.kind === 'points') return { spec: structuredClone(POINT_PRESETS[2].spec), hyper: { lr: 0.03, batchSize: 10, optimizer: 'adam' } };
+  return { spec: structuredClone(IMAGE_PRESETS[2].spec), hyper: { lr: DEFAULT_LR.adam, batchSize: 32, optimizer: 'adam' } };
+}
+
 export class Store {
-  spec: LayerSpec[] = structuredClone(PRESETS[2].spec);
+  dataset: DatasetId = 'mnist';
+  /** Point datasets: generator settings and input features. */
+  pointsConfig: Omit<SyntheticConfig, 'id'> = { ...DEFAULT_SYNTHETIC };
+  features: FeatureId[] = defaultFeatures(2);
+  /** Train on only the first N training samples (null = all). */
+  trainLimit: number | null = null;
+  spec: LayerSpec[] = structuredClone(IMAGE_PRESETS[2].spec);
   hyper: Hyper = { lr: DEFAULT_LR.adam, batchSize: 32, optimizer: 'adam' };
+  /** Per block (hidden layers then output): weights held fixed during training. */
+  frozen: boolean[] = [];
+  /** When the architecture is edited, keep the weights of layers that did not change. */
+  keepWeights = false;
+  /** Name of the pretrained model the weights came from, if any. */
+  modelName: string | null = null;
   seed = 1;
   version = 0;
-  net: Network = new Network(this.spec, this.seed);
+  net: Network;
   weightsStep = 0;
   /** Bumped on every change to the page's weights (training snapshots, manual updates, rebuilds). */
   weightsRev = 0;
-  data: Mnist | null = null;
+  /** The loaded dataset (null while loading). */
+  data: Data | null = null;
   status: Status | null = null;
   points: TrainPoint[] = [];
   evals: EvalPoint[] = [];
@@ -72,21 +141,54 @@ export class Store {
 
   private handlers = new Map<EventName, Set<() => void>>();
 
+  constructor() {
+    this.net = new Network(this.arch, this.seed);
+  }
+
   on(ev: EventName, fn: () => void): void {
     if (!this.handlers.has(ev)) this.handlers.set(ev, new Set());
     this.handlers.get(ev)!.add(fn);
   }
 
+  /** Calls every listener; one that throws is reported and does not stop the others. */
   emit(ev: EventName): void {
-    this.handlers.get(ev)?.forEach((fn) => fn());
+    this.handlers.get(ev)?.forEach((fn) => {
+      try {
+        fn();
+      } catch (e) {
+        console.error(`Error in a '${ev}' listener:`, e);
+      }
+    });
+  }
+
+  get info(): DatasetInfo {
+    return datasetInfo(this.dataset);
+  }
+
+  /** The network's input shape for the current dataset (and, for points, the chosen features). */
+  get input(): Shape {
+    const info = this.info;
+    return info.kind === 'image' ? info.image!.shape : featureShape(this.features);
+  }
+
+  get classes(): number {
+    return this.info.classes.length;
+  }
+
+  get arch(): Arch {
+    return { input: this.input, layers: this.spec, classes: this.classes };
   }
 
   get valid(): boolean {
-    return !describe(this.spec).some((l) => l.error);
+    return !describe(this.arch).some((l) => l.error);
   }
 
   get running(): boolean {
     return !!this.status?.running;
+  }
+
+  isFrozen(block: number): boolean {
+    return !!this.frozen[block];
   }
 }
 

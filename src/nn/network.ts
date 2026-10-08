@@ -1,6 +1,6 @@
 import { activate, activateBackward } from './activations';
 import { Rng } from './rng';
-import { CLASSES, INPUT_SHAPE, size, type Act, type ConvSpec, type DenseSpec, type LayerSpec, type Shape } from './types';
+import { isImage, size, type Act, type Arch, type ConvSpec, type DenseSpec, type LayerSpec, type Shape } from './types';
 
 /**
  * A tiny feed-forward engine: conv blocks (conv → activation → optional 2×2 max-pool)
@@ -399,18 +399,19 @@ export interface LayerInfo {
 }
 
 /** Shape bookkeeping for the builder, without allocating any weights. */
-export function describe(spec: LayerSpec[]): LayerInfo[] {
+export function describe(arch: Arch): LayerInfo[] {
   const out: LayerInfo[] = [];
-  let shape: Shape = INPUT_SHAPE;
+  let shape: Shape = arch.input;
   let sawDense = false;
-  for (const l of spec) {
+  for (const l of arch.layers) {
     if (l.kind === 'conv') {
       let error: string | undefined;
-      if (sawDense) error = 'Convolutions must come before dense layers.';
+      if (!isImage(arch.input)) error = 'Convolutions need an image input; this dataset is a list of features.';
+      else if (sawDense) error = 'Convolutions must come before dense layers.';
       const z = { c: l.filters, h: shape.h, w: shape.w };
       let o = z;
       if (l.pool) {
-        if (shape.h < 2) error = 'Too small to pool. Turn pooling off or remove a pooling layer.';
+        if (shape.h < 2) error ??= 'Too small to pool. Turn pooling off or remove a pooling layer.';
         o = { c: l.filters, h: shape.h >> 1, w: shape.w >> 1 };
       }
       out.push({ spec: l, inShape: shape, outShape: o, params: l.filters * shape.c * l.kernel * l.kernel + l.filters, error });
@@ -423,29 +424,68 @@ export function describe(spec: LayerSpec[]): LayerInfo[] {
       shape = o;
     }
   }
-  out.push({ spec: null, inShape: shape, outShape: { c: CLASSES, h: 1, w: 1 }, params: size(shape) * CLASSES + CLASSES });
+  const k = arch.classes;
+  out.push({ spec: null, inShape: shape, outShape: { c: k, h: 1, w: 1 }, params: size(shape) * k + k });
   return out;
 }
 
-export const OUTPUT_SPEC: DenseSpec = { kind: 'dense', units: CLASSES, act: 'linear' };
+export const outputSpec = (classes: number): DenseSpec => ({ kind: 'dense', units: classes, act: 'linear' });
+
+/** Identifies a block's weight layout: two blocks with the same signature can share weights. */
+export function blockSignature(b: Block): string {
+  const s = b.inShape;
+  const o = b.outShape;
+  const spec = b.kind === 'conv' ? `conv:${b.spec.filters}:${b.spec.kernel}` : `dense:${b.spec.units}`;
+  return `${spec}|${s.c}x${s.h}x${s.w}|${o.c}x${o.h}x${o.w}|${b.W.length}`;
+}
 
 export class Network {
   readonly blocks: Block[] = [];
-  readonly probs = new Float32Array(CLASSES);
-  input: Float32Array = new Float32Array(size(INPUT_SHAPE));
+  readonly probs: Float32Array;
+  input: Float32Array;
 
   constructor(
-    readonly spec: LayerSpec[],
+    readonly arch: Arch,
     seed: number,
   ) {
     const rng = new Rng(seed);
-    let shape: Shape = INPUT_SHAPE;
-    for (const l of spec) {
+    this.probs = new Float32Array(arch.classes);
+    this.input = new Float32Array(size(arch.input));
+    let shape: Shape = arch.input;
+    for (const l of arch.layers) {
       const b = l.kind === 'conv' ? new ConvBlock(l, shape, rng) : new DenseBlock(l, shape, false, rng);
       this.blocks.push(b);
       shape = b.outShape;
     }
-    this.blocks.push(new DenseBlock(OUTPUT_SPEC, shape, true, rng));
+    this.blocks.push(new DenseBlock(outputSpec(arch.classes), shape, true, rng));
+  }
+
+  /** The hidden layers (kept for code that predates Arch). */
+  get spec(): LayerSpec[] {
+    return this.arch.layers;
+  }
+
+  get classes(): number {
+    return this.arch.classes;
+  }
+
+  get inputSize(): number {
+    return size(this.arch.input);
+  }
+
+  /**
+   * Copies weights from `from` into every block of this network whose layout matches the block at
+   * the same position (same kind, sizes, input and output shapes). Used for transfer learning and
+   * for keeping trained layers when the architecture is edited. Returns which blocks were copied.
+   */
+  copyCompatible(from: Network): boolean[] {
+    return this.blocks.map((b, i) => {
+      const src = from.blocks[i];
+      if (!src || src.kind !== b.kind || blockSignature(src) !== blockSignature(b)) return false;
+      b.W.set(src.W);
+      b.b.set(src.b);
+      return true;
+    });
   }
 
   get output(): DenseBlock {
@@ -466,15 +506,32 @@ export class Network {
     return -Math.log(Math.max(this.probs[label], 1e-12));
   }
 
-  /** Backpropagates the cross-entropy loss of the last forward pass; gradients accumulate. */
-  backward(label: number, needInputGrad = false): number {
+  /**
+   * Backpropagates the cross-entropy loss of the last forward pass; gradients accumulate.
+   * Frozen blocks get no parameter gradients, and the pass stops below the lowest block that is
+   * still trainable (nothing underneath would use it), which is what makes training a new head on
+   * a frozen feature extractor fast.
+   */
+  backward(label: number, needInputGrad = false, frozen?: ArrayLike<boolean>): number {
     const out = this.output;
-    for (let j = 0; j < CLASSES; j++) out.dOut[j] = this.probs[j] - (j === label ? 1 : 0);
-    for (let i = this.blocks.length - 1; i >= 0; i--) {
+    const k = this.arch.classes;
+    for (let j = 0; j < k; j++) out.dOut[j] = this.probs[j] - (j === label ? 1 : 0);
+    let lowest = 0;
+    if (frozen && !needInputGrad) {
+      lowest = this.blocks.length;
+      for (let i = 0; i < this.blocks.length; i++) {
+        if (!frozen[i]) {
+          lowest = i;
+          break;
+        }
+      }
+    }
+    for (let i = this.blocks.length - 1; i >= lowest; i--) {
       const b = this.blocks[i];
-      const needDx = i > 0 || needInputGrad;
-      b.backward(needDx);
-      if (i > 0) this.blocks[i - 1].dOut.set(b.dX);
+      const needDx = i > lowest || needInputGrad;
+      b.backwardToZ();
+      b.backwardFromZ(needDx, !frozen?.[i]);
+      if (i > 0 && needDx) this.blocks[i - 1].dOut.set(b.dX);
     }
     return this.loss(label);
   }
@@ -531,7 +588,7 @@ export class Network {
   predict(x: Float32Array): number {
     const p = this.forward(x);
     let best = 0;
-    for (let j = 1; j < CLASSES; j++) if (p[j] > p[best]) best = j;
+    for (let j = 1; j < p.length; j++) if (p[j] > p[best]) best = j;
     return best;
   }
 }

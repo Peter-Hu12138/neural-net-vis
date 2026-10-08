@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { mnistArch } from '../src/nn/types';
 import { Network } from '../src/nn/network';
 import type { Hyper, LayerSpec } from '../src/nn/types';
 import { CUSTOM_REPEAT, EVALS_PER_EPOCH, type DataPayload, type EvalPoint, type FromTrainer, type Status, type TrainPoint } from '../src/train/protocol';
@@ -20,14 +21,14 @@ function toyData(nTrain: number, nTest: number): DataPayload {
   };
   const tr = make(nTrain, 1);
   const te = make(nTest, 2);
-  return { trainX: tr.x, trainY: tr.y, testX: te.x, testY: te.y };
+  return { inputSize: 784, scale: 1 / 255, classes: 10, trainX: tr.x, trainY: tr.y, testX: te.x, testY: te.y };
 }
 
 function harness(spec: LayerSpec[] = [], hyper: Hyper = { lr: 0.01, batchSize: 10, optimizer: 'adam' }) {
   const log: FromTrainer[] = [];
   const t = new Trainer((m) => log.push(m), 5);
-  const net = new Network(spec, 1);
-  t.handle({ type: 'model', version: 3, spec, weights: net.getWeights(), hyper });
+  const net = new Network(mnistArch(spec), 1);
+  t.handle({ type: 'model', version: 3, arch: mnistArch(spec), weights: net.getWeights(), hyper, frozen: [] });
   const statuses = () => log.filter((m): m is { type: 'status'; status: Status } => m.type === 'status').map((m) => m.status);
   const metrics = () => log.filter((m): m is { type: 'metrics'; version: number; points: TrainPoint[]; evals: EvalPoint[] } => m.type === 'metrics');
   const evals = () => metrics().flatMap((m) => m.evals);
@@ -133,7 +134,7 @@ describe('Trainer', () => {
     h.t.handle({ type: 'play' });
     await until(() => h.last().step > 5);
     const spec: LayerSpec[] = [{ kind: 'dense', units: 8, act: 'tanh' }];
-    h.t.handle({ type: 'model', version: 4, spec, weights: new Network(spec, 2).getWeights(), hyper: { lr: 0.001, batchSize: 32, optimizer: 'adam' } });
+    h.t.handle({ type: 'model', version: 4, arch: mnistArch(spec), weights: new Network(mnistArch(spec), 2).getWeights(), hyper: { lr: 0.001, batchSize: 32, optimizer: 'adam' }, frozen: [] });
     const s = h.last();
     expect(s.version).toBe(4);
     expect(s.step).toBe(0);

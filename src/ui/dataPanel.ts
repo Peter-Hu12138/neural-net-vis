@@ -1,5 +1,5 @@
 import { addCustom, removeCustom, setProbe } from '../actions';
-import { sampleToFloat } from '../data/mnist';
+import { sampleInput } from '../data/datasets';
 import { rgbaToMnist } from '../data/preprocess';
 import { argmax } from '../nn/network';
 import { CUSTOM_REPEAT } from '../train/protocol';
@@ -93,7 +93,7 @@ export function mountDataPanel(): void {
     cells.length = 0;
     const d = store.data!;
     for (const i of indices) {
-      const x = sampleToFloat(d.testX, i);
+      const x = sampleInput(d, 'test', i);
       const tag = h('span', { class: 'thumb-label' }, String(d.testY[i]));
       const btn = h('button', { type: 'button', class: 'thumb', title: `Test digit #${i} · label ${d.testY[i]}`, 'aria-pressed': 'false' }, thumbCanvas(x, 28, 28, 40), tag) as HTMLButtonElement;
       btn.addEventListener('click', () => setProbe({ x, label: d.testY[i], caption: `Test digit #${i} · label ${d.testY[i]}`, key: `test:${i}` }));
@@ -123,7 +123,7 @@ export function mountDataPanel(): void {
     let wrong = 0;
     for (const c of cells) {
       const y = d.testY[c.i];
-      const p = argmax(store.net.forward(sampleToFloat(d.testX, c.i)));
+      const p = argmax(store.net.forward(sampleInput(d, 'test', c.i)));
       const ok = p === y;
       if (!ok) wrong++;
       c.tag.textContent = ok ? String(y) : `${y}→${p}`;

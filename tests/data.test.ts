@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { inflateSync } from 'node:zlib';
 import { describe, expect, it } from 'vitest';
 
-/** Minimal PNG reader for the 8-bit greyscale sprites written by scripts/build-mnist.py. */
+/** Minimal PNG reader for the 8-bit greyscale sprites written by scripts/build-datasets.py. */
 function readPng(path: string) {
   const buf = readFileSync(path);
   expect(buf.subarray(0, 8)).toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));

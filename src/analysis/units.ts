@@ -194,7 +194,7 @@ function checkBlock(net: Network, block: number): void {
 
 /** Per unit: strongest and weakest digits, mean, coverage, sorted responses, histogram and top-50 labels. */
 export const topk: Job<TopkParams, TopkResult> = function* (ctx, p) {
-  const { net, spec } = ctx;
+  const { net, arch } = ctx;
   const block = p.block;
   checkBlock(net, block);
   const k = Math.max(1, Math.floor(p.k ?? 9));
@@ -207,7 +207,7 @@ export const topk: Job<TopkParams, TopkResult> = function* (ctx, p) {
   const resp = new Float32Array(N * U);
   const preAll = new Float32Array(N * U);
   const posAll = conv ? new Int32Array(N * U) : null;
-  const x = new Float32Array(784);
+  const x = new Float32Array(ctx.inputSize);
   const values = new Float32Array(U);
   const pre = new Float32Array(U);
   const pos = conv ? new Int32Array(U) : null;
@@ -236,7 +236,7 @@ export const topk: Job<TopkParams, TopkResult> = function* (ctx, p) {
     const at = posAll[i * U + u];
     const y = Math.floor(at / mapW);
     const xx = at % mapW;
-    return { index: i, value, box: receptiveBox(spec, block, y, xx, 'z'), y, x: xx, z };
+    return { index: i, value, box: receptiveBox(arch, block, y, xx, 'z'), y, x: xx, z };
   };
 
   const order = new Int32Array(N);
@@ -261,7 +261,7 @@ export const topk: Job<TopkParams, TopkResult> = function* (ctx, p) {
     for (let r = 0; r < Math.min(k, N); r++) top.push(hit(order[r], u));
     const bottom: Hit[] = [];
     for (let r = 0; r < Math.min(k, N); r++) bottom.push(hit(order[N - 1 - r], u));
-    const labelCounts = new Array<number>(10).fill(0);
+    const labelCounts = new Array<number>(ctx.classes).fill(0);
     for (let r = 0; r < Math.min(TOP_LABELS, N); r++) labelCounts[ctx.testY[order[r]]]++;
 
     if (!(hi - lo > 1e-9)) {
@@ -315,7 +315,7 @@ function blur(x: Float32Array, mask: Uint8Array, tmp: Float32Array): void {
  * the image sharpens) and clamping to [0, 1]. Pixels a conv filter cannot see are held at 0.
  */
 export const actmax: Job<ActmaxParams, ActmaxResult> = function* (ctx, p) {
-  const { net, spec } = ctx;
+  const { net, arch } = ctx;
   const block = p.block;
   checkBlock(net, block);
   const steps = Math.max(1, Math.floor(p.steps ?? ACTMAX_STEPS));
@@ -332,7 +332,7 @@ export const actmax: Job<ActmaxParams, ActmaxResult> = function* (ctx, p) {
     const cx = b.zShape.w >> 1;
     HW = b.zShape.h * b.zShape.w;
     centre = cy * b.zShape.w + cx;
-    box = receptiveBox(spec, block, cy, cx, 'z');
+    box = receptiveBox(arch, block, cy, cx, 'z');
   }
   if (box) {
     for (let r = box.y0; r <= box.y1; r++) for (let c = box.x0; c <= box.x1; c++) mask[r * 28 + c] = 1;

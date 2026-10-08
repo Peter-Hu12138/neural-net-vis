@@ -16,16 +16,19 @@
         <p class="tagline">Build a neural network, train it on handwritten digits, and watch every weight and gradient move.</p>
         <dl class="facts" id="facts">
           <div><dt>Dataset</dt><dd id="fact-data">MNIST, loading…</dd></div>
-          <div><dt>Input</dt><dd>28 × 28 px, grey</dd></div>
+          <div><dt>Input</dt><dd id="fact-input">28 × 28 px, grey</dd></div>
           <div><dt>Engine</dt><dd id="fact-engine">Starting…</dd></div>
         </dl>
       </header>
 
       <div class="bar" id="bar" role="toolbar" aria-label="Training controls"></div>
 
+      <section class="datasets" id="datasets" aria-label="Dataset"></section>
+
       <main class="grid">
         <section class="sec sec-arch" id="architecture" aria-labelledby="h-arch">
           <header class="sec-head"><span class="sec-num">01</span><h2 id="h-arch">Architecture</h2></header>
+          <div id="models"></div>
           <div id="builder"></div>
         </section>
 
@@ -40,6 +43,7 @@
         <section class="sec sec-draw" id="draw" aria-labelledby="h-draw">
           <header class="sec-head"><span class="sec-num">03</span><h2 id="h-draw">Draw</h2></header>
           <div id="drawpad"></div>
+          <div id="boundary" hidden></div>
         </section>
 
         <section class="sec sec-weights" id="weights" aria-labelledby="h-weights">

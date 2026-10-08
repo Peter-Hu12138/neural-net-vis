@@ -115,7 +115,7 @@ export const layerStats: Job<LayerStatsParams, LayerStatsResult> = function* (ct
   };
 
   net.zeroGrad();
-  const x = new Float32Array(784);
+  const x = new Float32Array(ctx.inputSize);
   for (let k = 0; k < samples; k++) {
     const idx = sampleIdx[k];
     ctx.image(idx, x);

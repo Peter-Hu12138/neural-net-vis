@@ -15,8 +15,7 @@ type Pending = Extract<ToAnalyzer, { type: 'run' }>;
  * copy, so a job started at training step N keeps using step N's weights to the end.
  */
 export class Analyzer {
-  private testX: Uint8Array | null = null;
-  private testY: Uint8Array | null = null;
+  private data: Extract<ToAnalyzer, { type: 'data' }> | null = null;
   private active = new Map<string, Running>();
   private waiting = new Map<string, Pending>();
   private timer: ReturnType<typeof setTimeout> | null = null;
@@ -30,14 +29,13 @@ export class Analyzer {
   handle(msg: ToAnalyzer): void {
     switch (msg.type) {
       case 'data':
-        this.testX = msg.testX;
-        this.testY = msg.testY;
+        this.data = msg;
         for (const p of this.waiting.values()) this.start(p);
         this.waiting.clear();
         break;
       case 'run':
         this.active.delete(msg.channel);
-        if (!this.testX) this.waiting.set(msg.channel, msg);
+        if (!this.data) this.waiting.set(msg.channel, msg);
         else this.start(msg);
         break;
       case 'cancel':
@@ -53,18 +51,26 @@ export class Analyzer {
       this.emit({ type: 'error', id: m.id, message: `Unknown analysis "${m.kind}"` });
       return;
     }
-    const net = new Network(m.spec, 0);
+    const d = this.data!;
+    if (m.arch.input.c * m.arch.input.h * m.arch.input.w !== d.inputSize || m.arch.classes !== d.classes) {
+      this.emit({ type: 'error', id: m.id, message: 'The network does not match the loaded dataset.' });
+      return;
+    }
+    const net = new Network(m.arch, 0);
     net.setWeights(m.weights);
-    const testX = this.testX!;
-    const testY = this.testY!;
+    const { testX, testY, inputSize, scale, classes } = d;
     const ctx: JobContext = {
       net,
-      spec: m.spec,
+      arch: m.arch,
+      spec: m.arch.layers,
       testX,
       testY,
-      image(i, out = new Float32Array(784)) {
-        const off = i * 784;
-        for (let j = 0; j < 784; j++) out[j] = testX[off + j] / 255;
+      inputSize,
+      scale,
+      classes,
+      image(i, out = new Float32Array(inputSize)) {
+        const off = i * inputSize;
+        for (let j = 0; j < inputSize; j++) out[j] = testX[off + j] * scale;
         return out;
       },
     };

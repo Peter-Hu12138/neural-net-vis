@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { inflateSync } from 'node:zlib';
 import { describe as suite, expect, it } from 'vitest';
+import { mnistArch } from '../src/nn/types';
 import {
   alignPca,
   balancedIndices,
@@ -73,7 +74,7 @@ function loadTest(): { testX: Uint8Array; testY: Uint8Array } {
 function trainer(name: string, seed: number) {
   const trainX = decodeSprite('public/data/mnist-train-0.png', 5000);
   const trainY = Uint8Array.from(labelText.slice(0, 5000), (ch) => ch.charCodeAt(0) - 48);
-  const net = new Network(preset(name), seed);
+  const net = new Network(mnistArch(preset(name)), seed);
   const opt = new Optimizer(net, 'adam', 0.003);
   const x = new Float32Array(784);
   let pos = 0;
@@ -99,7 +100,11 @@ const data = loadTest();
 function context(net: Network): JobContext {
   return {
     net,
+    arch: net.arch,
     spec: net.spec,
+    inputSize: 784,
+    scale: 1 / 255,
+    classes: 10,
     testX: data.testX,
     testY: data.testY,
     image(i, out = new Float32Array(784)) {
@@ -423,7 +428,7 @@ suite('t-SNE pieces', () => {
 
 suite('embed job on real digits', () => {
   it('PCA of the last hidden layer: balanced points, predictions and a projection that matches', () => {
-    const net = new Network(preset('Small CNN'), 4);
+    const net = new Network(mnistArch(preset('Small CNN')), 4);
     const layer = net.blocks.length - 2;
     const { result, reports } = drain(jobs.embed(context(net), { layer, method: 'pca', n: 300 }) as Generator<Progress, EmbedResult, void>);
     expect(result.method).toBe('pca');
@@ -452,7 +457,7 @@ suite('embed job on real digits', () => {
   });
 
   it('PCA of raw pixels finds the familiar first components', () => {
-    const net = new Network([], 1);
+    const net = new Network(mnistArch([]), 1);
     const { result, ms } = drain(jobs.embed(context(net), { layer: -1, method: 'pca' }) as Generator<Progress, EmbedResult, void>);
     console.log(`PCA, pixels, n = ${result.indices.length}: ${ms.toFixed(0)} ms, ${result.iterations} power iterations`);
     expect(result.dim).toBe(784);
@@ -465,7 +470,7 @@ suite('embed job on real digits', () => {
   });
 
   it('t-SNE of raw pixels keeps neighbours and streams frames', () => {
-    const net = new Network([], 1);
+    const net = new Network(mnistArch([]), 1);
     const n = 400;
     const run = drain(jobs.embed(context(net), { layer: -1, method: 'tsne', n, iterations: 400 }) as Generator<Progress, EmbedResult, void>);
     const r = run.result;
@@ -505,7 +510,7 @@ suite('embed job on real digits', () => {
   });
 
   it('runs the default t-SNE (n = 1000, 500 steps) on a conv layer in time', () => {
-    const net = new Network(preset('Small CNN'), 2);
+    const net = new Network(mnistArch(preset('Small CNN')), 2);
     const ctx = context(net);
     expect(layerDim(net, 0)).toBe(14 * 14 * 8);
     const run = drain(jobs.embed(ctx, { layer: 0, method: 'tsne' }) as Generator<Progress, EmbedResult, void>);
@@ -614,7 +619,7 @@ suite('PCA orientation (alignPca)', () => {
 
 suite('flat layers', () => {
   it('a layer whose units are all inactive is reported as flat, not drawn as noise', () => {
-    const net = new Network(preset('Small CNN'), 4);
+    const net = new Network(mnistArch(preset('Small CNN')), 4);
     net.blocks[2].b.fill(-100); // Dense 3: every ReLU is off for every digit
     const pca = drain(jobs.embed(context(net), { layer: 2, method: 'pca', n: 200 }) as Generator<Progress, EmbedResult, void>).result;
     expect(pca.flat).toBe(true);
@@ -676,7 +681,7 @@ suite('axis and tooltip numbers', () => {
 
 suite('t-SNE start', () => {
   it('starts from the PCA layout scaled to TSNE_INIT_STD; random start still available', () => {
-    const net = new Network([], 1);
+    const net = new Network(mnistArch([]), 1);
     const n = 300;
     const idx = balancedIndices(data.testY, n);
     const x = new Float32Array(784);
@@ -780,7 +785,7 @@ suite('randomized PCA (t-SNE reduction)', () => {
   it('the job reads very wide layers a second time and gets the same result as from memory', () => {
     // Unpooled conv, 16 filters: 12,544 values per digit; 400 digits exceed KEEP_LIMIT, so the
     // job runs the network again for the PCA step instead of holding 20 MB of rows.
-    const net = new Network([{ kind: 'conv', filters: 16, kernel: 3, act: 'relu', pool: false }], 3);
+    const net = new Network(mnistArch([{ kind: 'conv', filters: 16, kernel: 3, act: 'relu', pool: false }]), 3);
     const n = 400;
     const d = layerDim(net, 0);
     expect(n * d).toBeGreaterThan(KEEP_LIMIT);
