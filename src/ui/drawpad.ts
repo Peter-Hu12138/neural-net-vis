@@ -16,7 +16,7 @@ import {
   type Adjustment,
   type Box,
 } from '../data/preprocess';
-import { argmax } from '../nn/network';
+import { Network, argmax } from '../nn/network';
 import { size } from '../nn/types';
 import { store } from '../store';
 import { $, clear, digitChips, h, segmented, selectField } from './dom';
@@ -90,6 +90,24 @@ export function imageInput(info: DatasetInfo, img: HTMLImageElement): { x: Float
     return { x: r.x, box: r.box && { x0: r.box.x0 * s, y0: r.box.y0 * s, x1: r.box.x1 * s, y1: r.box.y1 * s } };
   }
   return { x: rgbaToMnist(data.data, data.width, data.height), box: null };
+}
+
+/**
+ * A private copy of the page's network, refreshed on each call. Classifying other inputs with it
+ * leaves the page's network alone, whose activations the other views read for the current input.
+ */
+export function privateNetwork(): () => Network {
+  let net: Network | null = null;
+  let arch = '';
+  return () => {
+    const a = JSON.stringify(store.net.arch);
+    if (!net || a !== arch) {
+      net = new Network(store.net.arch, 0);
+      arch = a;
+    }
+    net.copyCompatible(store.net);
+    return net;
+  };
 }
 
 const named = (info: DatasetInfo) => info.classes.some((c, k) => c !== String(k));
@@ -313,6 +331,7 @@ export function mountDrawpad(): void {
   }
 
   const blank = () => new Float32Array(size(store.input));
+  const copy = privateNetwork();
 
   /** Shows probabilities (or the empty state) in the prediction block. */
   const showPrediction = (x: Float32Array | null, emptyText: string) => {
@@ -331,7 +350,8 @@ export function mountDrawpad(): void {
       }
       return;
     }
-    const probs = store.net.forward(x);
+    // The page's network when x is the current input (its activations then match); a copy otherwise.
+    const probs = (store.probe?.x === x ? store.net : copy()).forward(x);
     const best = argmax(probs);
     const word = isNamed ? info.classes[best] : String(best);
     if (digit.textContent !== word) digit.textContent = word;

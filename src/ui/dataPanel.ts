@@ -4,14 +4,14 @@ import { fixed } from '../analysis/stats';
 import { noun, sampleCaption, sampleInput, type Data, type DatasetId, type DatasetInfo } from '../data/datasets';
 import { featureDefs } from '../data/features';
 import { PointEvaluator, argmaxRows, pointDomain } from '../data/grid';
-import { argmax } from '../nn/network';
+import { argmax, type Network } from '../nn/network';
 import { size } from '../nn/types';
 import { CUSTOM_REPEAT } from '../train/protocol';
 import { store, type CustomEntry, type Probe } from '../store';
 import { mathLabel } from './datasetPicker';
 import { $, clear, digitChips, h, int, selectField } from './dom';
 import { fitCanvas, paintSample, sampleCanvas } from './draw';
-import { imageInput, readImageFile } from './drawpad';
+import { imageInput, privateNetwork, readImageFile } from './drawpad';
 import { classColor, onThemeChange, palette } from './theme';
 import { hideTip, showTip } from './tip';
 
@@ -74,6 +74,8 @@ interface Upload {
   label: number | null;
   customId: number | null;
   row?: HTMLElement;
+  /** The "Predicts …" line, refreshed with the grid while training runs. */
+  pred?: HTMLElement;
 }
 
 const DROP: Record<string, { title: string; how: string }> = {
@@ -157,11 +159,15 @@ function imagePanel(): { el: HTMLElement } {
   };
   shuffle.addEventListener('click', pick);
 
-  // Re-classifying the grid costs a few milliseconds per image (more for CIFAR-10 convolutions), so
-  // it runs only on screen, and at most once per ten times as long as it took.
+  // Re-classifying the grid costs about a millisecond per image, so it runs only on screen, in
+  // slices of a few milliseconds (the page stays responsive while training), on a private copy of
+  // the network (the page's network keeps the current input's activations for the other views),
+  // and at most once per ten times as long as it took.
+  const syncShadow = privateNetwork();
   let lastPredict = 0;
   let interval = 1200;
   let pending: ReturnType<typeof setTimeout> | null = null;
+  let pass = 0; // bumped to abandon a pass that is under way
   const predict = () => {
     const d = store.data;
     if (!d || d.info.kind !== 'image' || !cells.length || !visible()) return;
@@ -172,22 +178,39 @@ function imagePanel(): { el: HTMLElement } {
       return;
     }
     lastPredict = now;
+    const net = syncShadow();
     const info = d.info;
-    let wrong = 0;
+    const todo = cells.slice();
+    const id = ++pass;
     const x = new Float32Array(d.inputSize);
-    for (const c of cells) {
-      const y = d.testY[c.i];
-      const p = argmax(store.net.forward(sampleInput(d, 'test', c.i, x)));
-      const ok = p === y;
-      if (!ok) wrong++;
-      c.tag.textContent = ok ? info.glyphs[y] : `${info.glyphs[y]}→${info.glyphs[p]}`;
-      c.tag.classList.toggle('is-wrong', !ok);
-      c.btn.classList.toggle('is-wrong', !ok);
-      c.btn.title = ok ? c.caption : `${c.caption} · predicted ${className(info, p)}`;
-      c.btn.setAttribute('aria-label', c.btn.title);
-    }
-    interval = Math.max(1200, 10 * (performance.now() - now));
-    gridNote.textContent = `${cells.length - wrong} of ${cells.length} classified correctly by the current weights. Mistakes are marked true→predicted in red. Click any ${noun(info)} to feed it through the network.`;
+    let k = 0;
+    let wrong = 0;
+    let busy = 0;
+    const slice = () => {
+      if (id !== pass || store.data !== d) return;
+      const t0 = performance.now();
+      for (; k < todo.length && performance.now() - t0 < 6; k++) {
+        const c = todo[k];
+        const y = d.testY[c.i];
+        const p = argmax(net.forward(sampleInput(d, 'test', c.i, x)));
+        const ok = p === y;
+        if (!ok) wrong++;
+        c.tag.textContent = ok ? info.glyphs[y] : `${info.glyphs[y]}→${info.glyphs[p]}`;
+        c.tag.classList.toggle('is-wrong', !ok);
+        c.btn.classList.toggle('is-wrong', !ok);
+        c.btn.title = ok ? c.caption : `${c.caption} · predicted ${className(info, p)}`;
+        c.btn.setAttribute('aria-label', c.btn.title);
+      }
+      busy += performance.now() - t0;
+      if (k < todo.length) {
+        setTimeout(slice, 0);
+        return;
+      }
+      predictUploads(net);
+      interval = Math.max(1200, 10 * busy);
+      gridNote.textContent = `${todo.length - wrong} of ${todo.length} classified correctly by the current weights. Mistakes are marked true→predicted in red. Click any ${noun(info)} to feed it through the network.`;
+    };
+    slice();
   };
 
   const renderKey = () => {
@@ -234,13 +257,9 @@ function imagePanel(): { el: HTMLElement } {
     if (!u.x) {
       meta.append(h('span', { class: 'layer-error' }, info.id === 'mnist' ? 'No ink found. Try a higher-contrast image.' : 'Nothing stands out from the background. Try a photo with a plain backdrop.'));
     } else {
-      const fits = store.net.inputSize === u.x.length;
-      const probs = fits ? store.net.forward(u.x) : null;
-      const best = probs ? argmax(probs) : 0;
-      meta.append(
-        probs ? h('span', { class: 'upload-pred' }, 'Predicts ', h('b', null, className(info, best)), ` · ${fixed(probs[best] * 100, 1)}%`) : h('span', { class: 'hint' }, 'Waiting for the network…'),
-        classPicker(u),
-      );
+      u.pred = h('span', { class: 'upload-pred' });
+      showUploadPrediction(u, store.net.inputSize === u.x.length ? syncShadow() : null);
+      meta.append(u.pred, classPicker(u));
     }
     const buttons = h('div', { class: 'dp-upload-actions' });
     if (u.x) {
@@ -278,6 +297,25 @@ function imagePanel(): { el: HTMLElement } {
     row.append(h('img', { src: u.url, alt: `Uploaded image ${u.name}` }), processed, meta, buttons);
     return row;
   };
+
+  /** Fills an upload's "Predicts …" line using `net` (null: the network does not fit this input). */
+  function showUploadPrediction(u: Upload, net: Network | null): void {
+    if (!u.pred || !u.x) return;
+    const info = store.info;
+    clear(u.pred);
+    if (!net || net.inputSize !== u.x.length) {
+      u.pred.className = 'hint';
+      u.pred.textContent = 'Waiting for the network…';
+      return;
+    }
+    const probs = net.forward(u.x);
+    const best = argmax(probs);
+    u.pred.className = 'upload-pred';
+    u.pred.append('Predicts ', h('b', null, className(info, best)), ` · ${fixed(probs[best] * 100, 1)}%`);
+  }
+  function predictUploads(net: Network): void {
+    for (const u of current()) showUploadPrediction(u, net);
+  }
 
   const addFiles = async (files: FileList | File[]) => {
     const info = store.info;

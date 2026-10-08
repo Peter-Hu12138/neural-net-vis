@@ -418,6 +418,25 @@ test('keyboard: one tab stop for the index, arrows move, Enter picks', async ({ 
   await page.waitForFunction(() => (window as unknown as { raster: Raster }).raster.store.data?.info.id === 'xor3');
   await expect(item(page, 'XOR cube')).toHaveAttribute('aria-pressed', 'true');
   await expect(page.locator('#datasets .dsp-item[tabindex="0"]')).toHaveCount(1);
+
+  // Controls keep keyboard focus while the data they change is rebuilt.
+  const chip = page.locator('#datasets .ds-feat[data-feature="x1*x2"]');
+  await chip.focus();
+  await page.keyboard.press('Enter');
+  await page.waitForFunction(() => (window as unknown as { raster: Raster }).raster.store.net.inputSize === 4);
+  await expect(chip).toHaveAttribute('aria-pressed', 'true');
+  await expect(chip).toBeFocused();
+  const fifty = page.locator('#datasets .dsp-train').getByRole('button', { name: '50', exact: true });
+  await fifty.focus();
+  await page.keyboard.press('Space');
+  await page.waitForFunction(() => (window as unknown as { raster: Raster }).raster.store.data!.trainY.length === 50);
+  await expect(fifty).toHaveAttribute('aria-pressed', 'true');
+  await expect(fifty).toBeFocused();
+  const count = page.locator('#datasets .dsp-points .seg button', { hasText: '400' });
+  await count.focus();
+  await page.keyboard.press('Enter');
+  await page.waitForFunction(() => (window as unknown as { raster: Raster }).raster.store.pointsConfig.count === 400);
+  await expect(count).toBeFocused();
 });
 
 test('dark theme and phone width', async ({ page }) => {
