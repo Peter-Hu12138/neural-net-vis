@@ -11,7 +11,7 @@ t10k-images-idx3-ubyte.gz, t10k-labels-idx1-ubyte.gz).
 Output (default: public/data):
     mnist-train-0.png ... mnist-train-3.png  5,000 training digits each
     mnist-test.png                            2,000 test digits
-    mnist-labels.bin                          22,000 uint8 labels (train, then test)
+    mnist-labels.txt                          22,000 labels as one line of digits (train, then test)
 
 Each sprite is a grayscale PNG with 100 digits per row, 28x28 px per digit,
 white ink on black, exactly as stored in MNIST. Only the standard library is used.
@@ -88,8 +88,9 @@ def main():
     w, h, px = sprite(test_x, 0, TEST_COUNT)
     write_png(os.path.join(dst, "mnist-test.png"), w, h, px)
 
-    with open(os.path.join(dst, "mnist-labels.bin"), "wb") as f:
-        f.write(train_y[:TRAIN_COUNT] + test_y[:TEST_COUNT])
+    # Plain text keeps the labels servable by any static host.
+    with open(os.path.join(dst, "mnist-labels.txt"), "w") as f:
+        f.write("".join(str(y) for y in train_y[:TRAIN_COUNT] + test_y[:TEST_COUNT]) + "\n")
 
     print(f"wrote {TRAIN_COUNT} train + {TEST_COUNT} test digits to {os.path.abspath(dst)}")
 

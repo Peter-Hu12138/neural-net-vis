@@ -71,7 +71,7 @@ learnable 10-class dataset:
 
 Decodes the PNG sprites with a minimal reader, then checks:
 
-- 22,000 labels, every digit well represented.
+- 22,000 labels stored as a line of digits, every digit well represented.
 - The training split starts `5 0 4 1 9 2 1 3 1 4` and the test split starts `7 2 1 0 4 1 4 9 5 9`, matching canonical MNIST.
 - Sprites are 8-bit greyscale with no gamma or ICC chunks, so browsers decode exact pixel values.
 - Sampled digits have ink in the middle and almost none on the outer ring.

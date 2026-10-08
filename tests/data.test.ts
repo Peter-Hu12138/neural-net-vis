@@ -43,9 +43,11 @@ const digit = (sprite: ReturnType<typeof readPng>, i: number) => {
 };
 
 describe('bundled MNIST subset', () => {
-  const labels = readFileSync('public/data/mnist-labels.bin');
+  const text = readFileSync('public/data/mnist-labels.txt', 'utf8').trim();
+  const labels = Uint8Array.from(text, (ch) => ch.charCodeAt(0) - 48);
 
   it('has 20,000 training and 2,000 test labels, all digits 0–9', () => {
+    expect(text).toMatch(/^[0-9]{22000}$/);
     expect(labels.length).toBe(22_000);
     const counts = new Array(10).fill(0);
     for (const y of labels) counts[y]++;

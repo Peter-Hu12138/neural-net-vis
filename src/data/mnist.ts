@@ -42,14 +42,16 @@ export async function loadMnist(onProgress: (done: number, total: number) => voi
   const total = chunks + 2;
   let done = 0;
   const tick = () => onProgress(++done, total);
-  const labels = fetch(url('mnist-labels.bin'))
+  const labels = fetch(url('mnist-labels.txt'))
     .then((r) => {
       if (!r.ok) throw new Error(`labels: HTTP ${r.status}`);
-      return r.arrayBuffer();
+      return r.text();
     })
-    .then((b) => {
+    .then((t) => {
       tick();
-      return new Uint8Array(b);
+      const digits = t.trim();
+      if (digits.length !== TRAIN_COUNT + TEST_COUNT) throw new Error(`labels: expected ${TRAIN_COUNT + TEST_COUNT}, got ${digits.length}`);
+      return Uint8Array.from(digits, (ch) => ch.charCodeAt(0) - 48);
     });
   const jobs: Promise<void>[] = [];
   for (let c = 0; c < chunks; c++) jobs.push(loadSprite(`mnist-train-${c}.png`, CHUNK, trainX, c * CHUNK).then(tick));
