@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>Raster Net Lab</title>
-    <meta name="description" content="Build a small neural network, train it on MNIST in the browser, and inspect every weight and gradient." />
+    <meta name="description" content="Build a small neural network, train it in the browser on digits, clothes, photos or 2-D and 3-D points, and inspect every weight, gradient and decision boundary." />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..900&family=IBM+Plex+Mono:wght@400;500;600&display=swap" />
@@ -13,7 +13,7 @@
     <div class="page">
       <header class="masthead">
         <h1 class="wordmark">Raster<span class="wordmark-dot" aria-hidden="true"></span></h1>
-        <p class="tagline">Build a neural network, train it on handwritten digits, and watch every weight and gradient move.</p>
+        <p class="tagline">Build a neural network, train it on digits, clothes, photos or points, and watch every weight, gradient and decision boundary move.</p>
         <dl class="facts" id="facts">
           <div><dt>Dataset</dt><dd id="fact-data">MNIST, loading…</dd></div>
           <div><dt>Input</dt><dd id="fact-input">28 × 28 px, grey</dd></div>
@@ -67,7 +67,7 @@
         <section class="sec sec-data" id="data" aria-labelledby="h-data">
           <header class="sec-head">
             <span class="sec-num">07</span><h2 id="h-data">Data</h2>
-            <p class="sec-note">Pick any digit as the network's input, or add your own images to the training set.</p>
+            <p class="sec-note" id="note-data">Pick any digit as the network's input, or add your own images to the training set.</p>
           </header>
           <div id="datapanel"></div>
         </section>
@@ -83,7 +83,7 @@
         <section class="sec sec-units" id="units" aria-labelledby="h-units">
           <header class="sec-head">
             <span class="sec-num">09</span><h2 id="h-units">Units</h2>
-            <p class="sec-note">What each filter and unit responds to: the test digits that excite it most, and an input synthesised to excite it.</p>
+            <p class="sec-note" id="note-units">What each filter and unit responds to: the test digits that excite it most, and an input synthesised to excite it.</p>
           </header>
           <div id="units-root"></div>
         </section>
@@ -91,7 +91,7 @@
         <section class="sec sec-attr" id="attribution" aria-labelledby="h-attr">
           <header class="sec-head">
             <span class="sec-num">10</span><h2 id="h-attr">Attribution</h2>
-            <p class="sec-note">Which pixels drive the prediction for the current input, measured four different ways.</p>
+            <p class="sec-note" id="note-attr">Which pixels drive the prediction for the current input, measured four different ways.</p>
           </header>
           <div id="attr-root"></div>
         </section>
@@ -99,14 +99,14 @@
         <section class="sec sec-embed" id="embedding" aria-labelledby="h-embed">
           <header class="sec-head">
             <span class="sec-num">11</span><h2 id="h-embed">Embedding</h2>
-            <p class="sec-note">How a layer arranges 1,000 test digits, flattened to two dimensions with PCA or t-SNE.</p>
+            <p class="sec-note" id="note-embed">How a layer arranges 1,000 test digits, flattened to two dimensions with PCA or t-SNE.</p>
           </header>
           <div id="embed-root"></div>
         </section>
       </main>
 
       <footer class="colophon">
-        <p>MNIST handwritten digits by Yann LeCun, Corinna Cortes and Christopher J.C. Burges (CC BY-SA 3.0). A 20,000 / 2,000 subset ships with this page. Everything trains locally in your browser.</p>
+        <p id="credits">MNIST by Yann LeCun, Corinna Cortes and Christopher J.C. Burges (CC BY-SA 3.0); Fashion-MNIST by Zalando Research (MIT licence); CIFAR-10 by Alex Krizhevsky, Vinod Nair and Geoffrey Hinton. Subsets of each ship with this page; the point datasets are generated in your browser. Everything trains locally.</p>
       </footer>
     </div>
     <div class="tip" id="tip" role="tooltip" hidden></div>

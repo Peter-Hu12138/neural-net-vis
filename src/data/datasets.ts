@@ -163,6 +163,12 @@ export function limitTraining(data: Data, limit: number | null): Data {
   };
 }
 
+/** What one sample is called in prose: "digit", "image" or "point" (plural with n ≠ 1). */
+export function noun(info: DatasetInfo, n = 1): string {
+  const one = info.id === 'mnist' ? 'digit' : info.kind === 'points' ? 'point' : 'image';
+  return n === 1 ? one : `${one}s`;
+}
+
 /** Caption for a sample, e.g. "Test digit #12 · label 7" or "Test image #3 · cat". */
 export function sampleCaption(info: DatasetInfo, split: 'train' | 'test', i: number, y: number): string {
   const which = split === 'test' ? 'Test' : 'Training';

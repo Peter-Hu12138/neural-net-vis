@@ -1,6 +1,7 @@
 import './styles.css';
 import * as actions from './actions';
 import { client, loading, setDataset } from './actions';
+import { noun } from './data/datasets';
 import { store } from './store';
 import { mountBackprop } from './ui/backprop';
 import { mountBuilder } from './ui/builder';
@@ -61,6 +62,25 @@ const tryTitle = () => {
 };
 store.on('dataset', tryTitle);
 tryTitle();
+
+// Section notes name the samples the way the dataset does ("digits", "images", "points").
+const notes = () => {
+  const info = store.info;
+  const many = noun(info, 2);
+  const pts = info.kind === 'points';
+  $('note-data').textContent = pts
+    ? 'Pick any point as the network’s input, and see the features it is turned into.'
+    : `Pick any ${noun(info)} as the network's input, or add your own images to the training set.`;
+  $('note-units').textContent = pts
+    ? 'What each unit responds to: the test points that excite it most, and its response over the whole plane.'
+    : `What each filter and unit responds to: the test ${many} that excite it most, and an input synthesised to excite it.`;
+  $('note-attr').textContent = pts
+    ? 'Which input features drive the prediction for the current point, measured several ways.'
+    : 'Which pixels drive the prediction for the current input, measured four different ways.';
+  $('note-embed').textContent = `How a layer arranges 1,000 test ${many}, flattened to two dimensions with PCA or t-SNE.`;
+};
+store.on('dataset', notes);
+notes();
 store.on('data', dataFact);
 
 setDataset('mnist').catch((err: unknown) => {
