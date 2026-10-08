@@ -1,0 +1,286 @@
+/* Section 03 for point datasets: decision boundary in 2-D and 3-D (src/ui/boundary*.ts). */
+
+/* On wide screens the boundary plot gets the room of section 02's image maps: point networks are
+   small, so 02 narrows and 03 widens while a point dataset is shown. */
+@media (min-width: 1320px) {
+  .grid:has(#boundary:not([hidden])) > .sec-net {
+    grid-column: 4 / span 4;
+  }
+  .grid:has(#boundary:not([hidden])) > .sec-draw {
+    grid-column: 8 / span 5;
+  }
+}
+
+.bd {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+}
+
+.bd-lead {
+  max-width: 64ch;
+}
+
+.bd-controls {
+  display: grid;
+  gap: 10px;
+}
+
+.bd-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+  min-width: 0;
+}
+
+/* Toggle buttons: a square that fills with the accent when on, like the checkboxes elsewhere. */
+.bd-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 30px;
+  padding: 0 10px;
+  border: 2px solid var(--ink);
+  background: transparent;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.bd-toggle i {
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--ink);
+  display: grid;
+  place-items: center;
+}
+
+.bd-toggle[aria-pressed='true'] i {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.bd-toggle[aria-pressed='true'] i::after {
+  content: '';
+  width: 4px;
+  height: 4px;
+  background: var(--on-accent);
+}
+
+.bd-toggle:hover {
+  background: var(--surface);
+}
+
+/* Class chips for new points: the class colour beside its glyph. */
+.chip.bd-class {
+  width: auto;
+  min-width: 40px;
+  padding: 0 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.chip.bd-class i {
+  width: 11px;
+  height: 11px;
+  background: var(--c);
+  outline: 1px solid var(--surface);
+}
+
+.bd-add-note {
+  font-size: 12.5px;
+}
+
+/* Key */
+.bd-key {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.bd-key-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.bd-swatch {
+  width: 11px;
+  height: 11px;
+}
+
+.bd-mark {
+  position: relative;
+  width: 10px;
+  height: 10px;
+  display: inline-block;
+}
+
+.bd-mark.is-train {
+  border-radius: 50%;
+  background: var(--muted);
+  border: 1px solid var(--ink);
+}
+
+.bd-mark.is-test {
+  border-radius: 50%;
+  border: 1.7px solid var(--muted);
+}
+
+.bd-mark.is-custom {
+  width: 9px;
+  height: 9px;
+  transform: rotate(45deg);
+  background: var(--muted);
+  border: 1.5px solid var(--ink);
+}
+
+.bd-mark.is-probe::before,
+.bd-mark.is-probe::after {
+  content: '';
+  position: absolute;
+  left: -1px;
+  top: 4px;
+  width: 12px;
+  height: 2.4px;
+  background: var(--accent);
+  transform: rotate(45deg);
+}
+
+.bd-mark.is-probe::after {
+  transform: rotate(-45deg);
+}
+
+/* Plots */
+.bd-body,
+.bd-plot,
+.bd-2d {
+  min-width: 0;
+}
+
+.bd-plot canvas,
+.bd-orbit-box canvas,
+.bd-slice-plot canvas {
+  display: block;
+  max-width: 100%;
+}
+
+.bd-plane {
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.bd-plane:focus-visible,
+.bd-orbit:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Training read-out */
+.bd-metrics {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--ink);
+}
+
+.bd-metrics .kpi b {
+  font-size: 18px;
+}
+
+@media (max-width: 560px) {
+  .bd-metrics {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+/* 3-D: the cube, its controls, and the slice beside it (stacked when narrow). */
+.bd-3d {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
+  container-type: inline-size;
+}
+
+.bd-3d-main,
+.bd-3d-side {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+  min-width: 0;
+}
+
+.bd-orbit {
+  cursor: grab;
+  touch-action: none;
+  background: transparent;
+}
+
+.bd-orbit:active {
+  cursor: grabbing;
+}
+
+.bd-hint-inline {
+  font-size: 12px;
+}
+
+.bd-slice-ctl {
+  display: grid;
+  gap: 8px;
+  align-content: start;
+  padding-top: 10px;
+  border-top: 1px solid var(--ink);
+}
+
+.bd-axis-seg button {
+  text-transform: none;
+  font-family: var(--sans);
+  font-size: 13px;
+  letter-spacing: 0;
+}
+
+.bd-slider {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.bd-slider input[type='range'] {
+  width: 100%;
+  min-width: 0;
+  accent-color: var(--ink);
+}
+
+.bd-slice-val {
+  font-size: 13px;
+  min-width: 8ch;
+  text-align: right;
+}
+
+@container (min-width: 600px) {
+  .bd-3d-side {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    align-items: start;
+  }
+}
+
+/* The three axis buttons stay on one row on phones (the page turns segmented controls into a
+   two-column grid there). */
+@media (max-width: 560px) {
+  .seg.bd-axis-seg {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .seg.bd-axis-seg button:last-child:nth-child(odd) {
+    grid-column: auto;
+  }
+}
