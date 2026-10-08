@@ -83,7 +83,7 @@ export function syncedSection(root: HTMLElement, refresh: () => void, opts: { au
   const setText = () => {
     btn.disabled = !store.data;
     if (!store.data) {
-      text.textContent = 'Waiting for MNIST to load…';
+      text.textContent = `Waiting for ${store.info.name} to load…`;
       return;
     }
     if (busy && (busyVisible || !shown)) {
