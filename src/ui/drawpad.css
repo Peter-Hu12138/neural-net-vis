@@ -1,0 +1,159 @@
+/* Section 03 for image datasets (src/ui/drawpad.ts): draw mode, photo mode, named predictions. */
+
+.dp-draw {
+  display: grid;
+  gap: 16px;
+}
+
+.dp-modes .seg {
+  display: inline-flex;
+}
+
+/* ── Photo mode ── */
+
+.dp-photo {
+  display: grid;
+  gap: 12px;
+}
+
+/* File inputs behind the drop zones (here and in 07): invisible, but still reachable with Tab;
+   the drop zone shows the focus. */
+.dp-file {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+
+.drop:has(+ .dp-file:focus-visible) {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.dp-photo-drop {
+  min-height: 0;
+  padding: 12px 14px;
+  gap: 4px;
+  font-size: 13px;
+}
+
+.dp-photo-drop b {
+  font-size: 15px;
+}
+
+.dp-photo-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.dp-figs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.dp-figs figure {
+  margin: 0;
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.dp-figs figcaption {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.dp-orig,
+.dp-input {
+  display: block;
+  border: 1px solid var(--hair);
+  background: var(--surface);
+}
+
+.dp-input {
+  image-rendering: pixelated;
+  border-color: var(--ink);
+}
+
+.dp-arrow {
+  font: 600 18px var(--mono);
+  color: var(--muted);
+}
+
+.dp-photo-caption {
+  margin: 0;
+  font: 500 12px var(--mono);
+  color: var(--muted);
+}
+
+.dp-nudges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 22px;
+}
+
+.dp-nudges .ds-range {
+  width: 100px;
+}
+
+.dp-field {
+  display: grid;
+  gap: 3px;
+}
+
+.dp-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dp-value {
+  min-width: 5ch;
+  font: 500 13px var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Named classes (Fashion-MNIST, CIFAR-10): the word on top, bars below, most likely first ── */
+
+.prediction.is-named {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+}
+
+.pred-digit.is-word {
+  font-size: 34px;
+  line-height: 1;
+  letter-spacing: -0.02em;
+  font-weight: 850;
+  overflow-wrap: anywhere;
+}
+
+.bars.is-named .bar-row {
+  grid-template-columns: 11ch minmax(0, 1fr) 48px;
+}
+
+.bar-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dp-add-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 8px 12px;
+}
+
+.dp-add-row .field {
+  min-width: 150px;
+}

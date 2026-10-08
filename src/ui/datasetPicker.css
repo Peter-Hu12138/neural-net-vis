@@ -1,0 +1,340 @@
+/* Dataset strip under the training bar (src/ui/datasetPicker.ts): a ruled index of datasets, the
+   "train on" control, and the point-data settings. */
+
+.dsp {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+/* One row of groups; scrolls sideways inside itself when the page is too narrow. */
+.dsp-index {
+  display: flex;
+  gap: 0 20px;
+  min-width: 0;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scroll-snap-type: x proximity;
+  scrollbar-width: thin;
+  /* Room for the focus outline of the first and last item. */
+  padding: 0 6px 6px;
+  margin: 0 -6px -2px;
+}
+
+/* Groups share the width by item count; on narrower screens names wrap onto two lines before the
+   index starts to scroll. */
+.dsp-group {
+  flex-basis: auto;
+  min-width: min-content;
+  border-top: 2px solid var(--ink);
+}
+
+.dsp-group-label {
+  /* Stays at the left edge while its group scrolls past on a narrow screen. */
+  position: sticky;
+  left: 0;
+  width: max-content;
+  margin: 0;
+  padding: 5px 0 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.dsp-items {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(min-content, 1fr);
+}
+
+.dsp-item {
+  position: relative;
+  display: grid;
+  grid-template-rows: auto 1fr;
+  justify-items: start;
+  align-content: start;
+  gap: 5px;
+  min-width: 0;
+  padding: 6px 8px 8px;
+  border: 0;
+  border-left: 1px solid var(--hair);
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+  scroll-snap-align: start;
+}
+
+.dsp-item:first-child {
+  border-left-color: transparent;
+}
+
+.dsp-item:hover:not([aria-pressed='true']) {
+  background: var(--surface);
+}
+
+.dsp-item[aria-pressed='true'] {
+  background: var(--ink);
+  color: var(--bg);
+  border-left-color: var(--ink);
+  cursor: default;
+}
+
+/* Each item is followed by its hidden description, then the next item. */
+.dsp-item[aria-pressed='true'] + [hidden] + .dsp-item {
+  border-left-color: transparent;
+}
+
+.dsp-preview {
+  display: block;
+  border: 1px solid var(--hair);
+  background: var(--surface);
+}
+
+.dsp-item[aria-pressed='true'] .dsp-preview {
+  border-color: var(--bg);
+}
+
+.dsp-name {
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.15;
+  letter-spacing: -0.005em;
+  text-wrap: balance;
+}
+
+.dsp-progress {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+}
+
+/* ── About the dataset · train on ── */
+
+.dsp-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 40px;
+  align-items: start;
+}
+
+.dsp-about-col {
+  flex: 1 1 380px;
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.dsp-about {
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.4;
+  color: var(--ink-2);
+  max-width: 78ch;
+  /* Two lines reserved, so hovering other datasets does not shift the page. */
+  min-height: 2.8em;
+}
+
+.dsp-about b {
+  color: var(--ink);
+}
+
+.dsp-facts {
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+
+.dsp-status {
+  margin: 0;
+  font: 500 12.5px var(--mono);
+  color: var(--ink);
+}
+
+.dsp-train {
+  flex: 0 1 760px;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 12px;
+  align-items: center;
+}
+
+.dsp-train > .label {
+  grid-row: 1;
+}
+
+.dsp-train-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+}
+
+.dsp-unit {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.dsp-train-hint {
+  grid-column: 1 / -1;
+  font-size: 12.5px;
+  max-width: none;
+}
+
+.dsp-seg button {
+  font-family: var(--mono);
+  letter-spacing: 0;
+  text-transform: none;
+  font-size: 12px;
+  padding: 4px 9px;
+}
+
+/* ── Point data ── */
+
+.dsp-points {
+  display: grid;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--hair);
+}
+
+.dsp-points-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 12px 28px;
+}
+
+.dsp-field {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.dsp-control {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.dsp-value {
+  min-width: 4ch;
+  font: 500 13px var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.dsp-feats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.dsp-feat-note {
+  font-size: 12.5px;
+  max-width: none;
+}
+
+/* Indices of feature labels (x₁², sin x₂) as real sub- and superscripts. */
+.dsp sub,
+.dsp sup {
+  font-size: 0.72em;
+  line-height: 0;
+}
+
+/* Feature toggles: chips wide enough for "sin x₁". */
+.ds-feat {
+  height: 28px;
+  min-width: 34px;
+  padding: 0 8px;
+  border: 1.5px solid var(--ink);
+  background: transparent;
+  color: var(--ink);
+  font: 500 13px/1 var(--mono);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.ds-feat:hover {
+  background: var(--hair);
+}
+
+.ds-feat[aria-pressed='true'] {
+  background: var(--ink);
+  color: var(--bg);
+}
+
+.ds-feat[aria-disabled='true'] {
+  cursor: not-allowed;
+}
+
+/* Range slider in the page's idiom: a 2 px ink rule with a square ink thumb. Also used in 03. */
+.ds-range {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 128px;
+  height: 22px;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.ds-range::-webkit-slider-runnable-track {
+  height: 2px;
+  background: var(--ink);
+}
+
+.ds-range::-moz-range-track {
+  height: 2px;
+  background: var(--ink);
+}
+
+.ds-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 18px;
+  margin-top: -8px;
+  border: 0;
+  border-radius: 0;
+  background: var(--ink);
+}
+
+.ds-range::-moz-range-thumb {
+  width: 12px;
+  height: 18px;
+  border: 0;
+  border-radius: 0;
+  background: var(--ink);
+}
+
+@media (max-width: 560px) {
+  .dsp-train {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .dsp-train > .label {
+    grid-row: auto;
+  }
+  /* The page-wide rule turns segmented controls into a two-column grid on phones; these short
+     numeric options read better in one row. */
+  .dsp-seg {
+    display: inline-flex;
+    flex-wrap: nowrap;
+    border-width: 2px;
+  }
+  .dsp-seg button,
+  .dsp-seg button + button {
+    border: 0;
+    border-bottom: 0;
+    border-right: 0;
+  }
+  .dsp-seg button + button {
+    border-left: 2px solid var(--ink);
+  }
+  .dsp-points-row {
+    gap: 12px 20px;
+  }
+}
