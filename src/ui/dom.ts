@@ -70,10 +70,19 @@ export function segmented<T extends string>(
   return wrap;
 }
 
-export function digitChips(selected: number | null, onPick: (d: number) => void, label = 'Label'): HTMLElement {
+/**
+ * One toggle chip per class. Chips show the class glyph (a digit); pass `names` to give each chip
+ * the class name as its tooltip and accessible name (Fashion-MNIST, CIFAR-10, point classes).
+ */
+export function digitChips(selected: number | null, onPick: (d: number) => void, label = 'Label', count = 10, names?: string[]): HTMLElement {
   const wrap = h('div', { class: 'chips', role: 'group', 'aria-label': label });
-  for (let d = 0; d < 10; d++) {
-    const b = h('button', { type: 'button', class: 'chip', 'aria-pressed': String(selected === d) }, String(d));
+  for (let d = 0; d < count; d++) {
+    const attrs: Record<string, string> = { type: 'button', class: 'chip', 'aria-pressed': String(selected === d) };
+    if (names && names[d] !== String(d)) {
+      attrs.title = names[d];
+      attrs['aria-label'] = `${d}: ${names[d]}`;
+    }
+    const b = h('button', attrs, String(d));
     b.addEventListener('click', () => {
       for (const x of Array.from(wrap.children)) x.setAttribute('aria-pressed', 'false');
       b.setAttribute('aria-pressed', 'true');

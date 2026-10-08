@@ -9,7 +9,9 @@ export interface Palette {
   hair: string;
   accent: string;
   neg: string;
-  rgb: { surface: RGB; ink: RGB; accent: RGB; neg: RGB; hair: RGB };
+  /** Class colours --cat-0 … --cat-9 (class k uses cat[k % 10]). */
+  cat: string[];
+  rgb: { surface: RGB; ink: RGB; accent: RGB; neg: RGB; hair: RGB; cat: RGB[] };
 }
 
 export type RGB = [number, number, number];
@@ -41,12 +43,17 @@ export function palette(): Palette {
     accent: v('--accent'),
     neg: v('--neg'),
   };
+  const cat = Array.from({ length: 10 }, (_, k) => cs.getPropertyValue(`--cat-${k}`).trim() || p.ink);
   cached = {
     ...p,
-    rgb: { surface: parse(p.surface), ink: parse(p.ink), accent: parse(p.accent), neg: parse(p.neg), hair: parse(p.hair) },
+    cat,
+    rgb: { surface: parse(p.surface), ink: parse(p.ink), accent: parse(p.accent), neg: parse(p.neg), hair: parse(p.hair), cat: cat.map(parse) },
   };
   return cached;
 }
+
+/** Colour of class `k` in the current theme. */
+export const classColor = (k: number): string => palette().cat[k % 10];
 
 export function onThemeChange(fn: () => void): void {
   listeners.add(fn);

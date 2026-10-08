@@ -1,3 +1,4 @@
+import type { Shape } from '../nn/types';
 import { formatCell } from './format';
 import { css, diverging, palette, sequential, type RGB } from './theme';
 
@@ -169,4 +170,50 @@ export function frame(ctx: CanvasRenderingContext2D, x: number, y: number, w: nu
   ctx.strokeStyle = color;
   ctx.lineWidth = lw;
   ctx.strokeRect(x + lw / 2, y + lw / 2, w - lw, h - lw);
+}
+
+let rgbScratch: HTMLCanvasElement | null = null;
+
+/**
+ * Draws one network input as an image into (x, y, dw, dh): grey images (c = 1) in ink on the
+ * surface like the digits elsewhere on the page, colour images (c = 3, channel-major, values 0–1)
+ * in their own colours.
+ */
+export function drawSample(ctx: CanvasRenderingContext2D, x: ArrayLike<number>, shape: Shape, dx: number, dy: number, dw: number, dh: number): void {
+  const { c, h: H, w: W } = shape;
+  if (c !== 3) {
+    drawMap(ctx, x, 0, H, W, dx, dy, dw, dh, false, 1);
+    return;
+  }
+  if (!rgbScratch) rgbScratch = document.createElement('canvas');
+  if (rgbScratch.width < W) rgbScratch.width = W;
+  if (rgbScratch.height < H) rgbScratch.height = H;
+  const sctx = rgbScratch.getContext('2d')!;
+  const img = sctx.createImageData(W, H);
+  const d = img.data;
+  const HW = H * W;
+  for (let i = 0; i < HW; i++) {
+    d[4 * i] = Math.max(0, Math.min(255, x[i] * 255));
+    d[4 * i + 1] = Math.max(0, Math.min(255, x[HW + i] * 255));
+    d[4 * i + 2] = Math.max(0, Math.min(255, x[2 * HW + i] * 255));
+    d[4 * i + 3] = 255;
+  }
+  sctx.putImageData(img, 0, 0);
+  const smooth = ctx.imageSmoothingEnabled;
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(rgbScratch, 0, 0, W, H, dx, dy, dw, dh);
+  ctx.imageSmoothingEnabled = smooth;
+}
+
+/** Paints a whole canvas, `px` CSS pixels wide, with one input image (see drawSample). */
+export function paintSample(canvas: HTMLCanvasElement, x: ArrayLike<number>, shape: Shape, px = 28): void {
+  const ctx = fitCanvas(canvas, px, px * (shape.h / shape.w));
+  drawSample(ctx, x, shape, 0, 0, px, px * (shape.h / shape.w));
+}
+
+/** A new canvas showing one input image (see drawSample). */
+export function sampleCanvas(x: ArrayLike<number>, shape: Shape, px = 28): HTMLCanvasElement {
+  const c = document.createElement('canvas');
+  paintSample(c, x, shape, px);
+  return c;
 }
