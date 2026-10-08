@@ -1,4 +1,5 @@
 import { describe as suite, expect, it } from 'vitest';
+import { mnistArch } from '../src/nn/types';
 import { Network, describe } from '../src/nn/network';
 import { Optimizer } from '../src/nn/optim';
 import { Rng } from '../src/nn/rng';
@@ -13,7 +14,7 @@ function randomInput(rng: Rng): Float32Array {
 /** Relative error between analytic and central-difference gradients over sampled parameters. */
 function gradCheck(spec: LayerSpec[], seed = 1): { params: number; input: number } {
   const rng = new Rng(seed + 100);
-  const net = new Network(spec, seed);
+  const net = new Network(mnistArch(spec), seed);
   const x = randomInput(rng);
   const label = 3;
   net.zeroGrad();
@@ -100,11 +101,11 @@ suite('gradients', () => {
 
 suite('shapes', () => {
   it('propagates shapes through pooling and flattening', () => {
-    const info = describe([
+    const info = describe(mnistArch([
       { kind: 'conv', filters: 8, kernel: 3, act: 'relu', pool: true },
       { kind: 'conv', filters: 16, kernel: 3, act: 'relu', pool: true },
       { kind: 'dense', units: 32, act: 'relu' },
-    ]);
+    ]));
     expect(info.map((l) => [l.outShape.h, l.outShape.w, l.outShape.c])).toEqual([
       [14, 14, 8],
       [7, 7, 16],
@@ -116,7 +117,7 @@ suite('shapes', () => {
 
   it('flags pooling a 1×1 map', () => {
     const spec: LayerSpec[] = Array.from({ length: 6 }, () => ({ kind: 'conv', filters: 1, kernel: 3, act: 'relu', pool: true }));
-    const info = describe(spec);
+    const info = describe(mnistArch(spec));
     expect(info.some((l) => l.error)).toBe(true);
   });
 });
@@ -127,7 +128,7 @@ suite('training', () => {
       const rng = new Rng(5);
       const xs = Array.from({ length: 20 }, () => randomInput(rng));
       const ys = xs.map((_, i) => i % 10);
-      const net = new Network([{ kind: 'conv', filters: 2, kernel: 3, act: 'relu', pool: true }, { kind: 'dense', units: 16, act: 'relu' }], 3);
+      const net = new Network(mnistArch([{ kind: 'conv', filters: 2, kernel: 3, act: 'relu', pool: true }, { kind: 'dense', units: 16, act: 'relu' }]), 3);
       const o = new Optimizer(net, opt, { sgd: 0.1, momentum: 0.02, adam: 0.003 }[opt]);
       const total = () => xs.reduce((s, x, i) => (net.forward(x), s + net.loss(ys[i])), 0);
       const before = total();
@@ -148,27 +149,27 @@ suite('weights', () => {
   const spec: LayerSpec[] = [{ kind: 'conv', filters: 4, kernel: 5, act: 'relu', pool: true }, { kind: 'dense', units: 8, act: 'sigmoid' }];
 
   it('the same seed builds the same network, a different seed does not', () => {
-    const a = new Network(spec, 9).getWeights();
-    const b = new Network(spec, 9).getWeights();
-    const c = new Network(spec, 10).getWeights();
+    const a = new Network(mnistArch(spec), 9).getWeights();
+    const b = new Network(mnistArch(spec), 9).getWeights();
+    const c = new Network(mnistArch(spec), 10).getWeights();
     expect(a).toEqual(b);
     expect(a[0]).not.toEqual(c[0]);
   });
 
   it('round-trips weights between two copies (worker ↔ page)', () => {
-    const src = new Network(spec, 1);
-    const dst = new Network(spec, 2);
+    const src = new Network(mnistArch(spec), 1);
+    const dst = new Network(mnistArch(spec), 2);
     dst.setWeights(src.getWeights());
     const x = randomInput(new Rng(3));
     expect(Array.from(dst.forward(x))).toEqual(Array.from(src.forward(x)));
   });
 
   it('outputs a probability distribution', () => {
-    const net = new Network(spec, 4);
+    const net = new Network(mnistArch(spec), 4);
     const p = net.forward(randomInput(new Rng(8)));
     expect(p.reduce((s, v) => s + v, 0)).toBeCloseTo(1, 5);
     expect(Math.min(...p)).toBeGreaterThan(0);
-    expect(net.paramCount).toBe(describe(spec).reduce((s, l) => s + l.params, 0));
+    expect(net.paramCount).toBe(describe(mnistArch(spec)).reduce((s, l) => s + l.params, 0));
   });
 });
 
@@ -182,7 +183,7 @@ suite('input gradients', () => {
   /** Finite-difference check of ∂(seed·z_block)/∂x for random seeds at every block. */
   for (const block of [0, 1, 2, 3]) {
     it(`matches finite differences for a seed at block ${block}`, () => {
-      const net = new Network(spec, 21);
+      const net = new Network(mnistArch(spec), 21);
       const rng = new Rng(block + 1);
       const x = randomInput(rng);
       const zLen = net.blocks[block].z.length;
@@ -219,7 +220,7 @@ suite('input gradients', () => {
   }
 
   it('agrees with the loss gradient at the logits', () => {
-    const net = new Network(spec, 5);
+    const net = new Network(mnistArch(spec), 5);
     const x = randomInput(new Rng(9));
     net.zeroGrad();
     const p = net.forward(x).slice();
@@ -235,7 +236,7 @@ suite('input gradients', () => {
 suite('symmetric input gradients (analyses)', () => {
   it('splits a tied max-pool window evenly instead of favouring its top-left element', () => {
     // Zero kernels: every activation equals relu(bias), so every 2×2 window is a four-way tie.
-    const net = new Network([{ kind: 'conv', filters: 2, kernel: 3, act: 'relu', pool: true }], 1);
+    const net = new Network(mnistArch([{ kind: 'conv', filters: 2, kernel: 3, act: 'relu', pool: true }]), 1);
     const conv = net.blocks[0];
     conv.W.fill(0);
     conv.b.set([0.5, 0.3]);
@@ -268,7 +269,7 @@ suite('symmetric input gradients (analyses)', () => {
 
   it('uses the midpoint slope exactly at the ReLU kink and leaves other inputs unchanged', () => {
     const spec: LayerSpec[] = [{ kind: 'dense', units: 4, act: 'relu' }];
-    const net = new Network(spec, 2);
+    const net = new Network(mnistArch(spec), 2);
     const dense = net.blocks[0];
     dense.b.fill(0);
     const x = new Float32Array(784); // blank input: every hidden z is exactly 0

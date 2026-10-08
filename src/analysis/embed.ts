@@ -107,9 +107,9 @@ const now = () => performance.now();
  * The first ⌊n/10⌋ test digits of each class, in ascending index order. Deterministic, balanced,
  * and the order interleaves classes, so no digit is always drawn on top of another.
  */
-export function balancedIndices(labels: ArrayLike<number>, n: number): Int32Array {
-  const per = Math.max(1, Math.floor(n / 10));
-  const seen = new Array<number>(10).fill(0);
+export function balancedIndices(labels: ArrayLike<number>, n: number, classes = 10): Int32Array {
+  const per = Math.max(1, Math.floor(n / classes));
+  const seen = new Array<number>(classes).fill(0);
   const out: number[] = [];
   for (let i = 0; i < labels.length; i++) {
     const y = labels[i];
@@ -123,7 +123,7 @@ export function balancedIndices(labels: ArrayLike<number>, n: number): Int32Arra
 
 /** Number of values per digit at `layer` (−1 = the 784 input pixels). */
 export function layerDim(net: Network, layer: number): number {
-  return layer < 0 ? 784 : net.blocks[layer].out.length;
+  return layer < 0 ? net.inputSize : net.blocks[layer].out.length;
 }
 
 /** The layer's values for the last forward pass (a live buffer: copy it). */
@@ -930,7 +930,7 @@ function* collect(ctx: JobContext, layer: number, indices: Int32Array, d: number
   const X = new Float32Array(n * k);
   const labels = new Uint8Array(n);
   const preds = new Uint8Array(n);
-  const img = new Float32Array(784);
+  const img = new Float32Array(ctx.inputSize);
   const acc = new Float64Array(k);
   let t0 = now();
   for (let s = 0; s < n; s++) {
@@ -955,7 +955,7 @@ const embed: Job<EmbedParams, EmbedResult> = function* (ctx, params): Generator<
   const layer = Math.max(-1, Math.min(net.blocks.length - 1, Math.round(params.layer ?? -1)));
   const method: EmbedMethod = params.method === 'tsne' ? 'tsne' : 'pca';
   const want = Math.max(10, Math.min(ctx.testY.length, Math.round(params.n ?? DEFAULT_N)));
-  const indices = balancedIndices(ctx.testY, want);
+  const indices = balancedIndices(ctx.testY, want, ctx.classes);
   const n = indices.length;
   const d = layerDim(net, layer);
   const wide = method === 'tsne' && d > TSNE_MAX_DIM;
@@ -1021,7 +1021,7 @@ const embed: Job<EmbedParams, EmbedResult> = function* (ctx, params): Generator<
   }
 
   if (reduce === 'pca') {
-    const img = new Float32Array(784);
+    const img = new Float32Array(ctx.inputSize);
     const row = keep
       ? (s: number) => keep.subarray(s * d, (s + 1) * d)
       : (s: number) => {

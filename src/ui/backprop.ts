@@ -766,7 +766,7 @@ function convBackwardSteps(steps: Step[], bt: BT, first: boolean): void {
 function renderUpdate(el: HTMLElement, t: Trace, ui: { eta: number; onEta: (v: number) => void; apply: () => void }): void {
   const eta = ui.eta;
   const next = t.blocks.flatMap((b) => [b.W.map((w, i) => w - eta * b.gW[i]), b.b.map((w, i) => w - eta * b.gb[i])]);
-  const probe = new Network(store.spec, 0);
+  const probe = new Network(store.arch, 0);
   probe.setWeights(next);
   const after = probe.forward(t.x);
   const lossAfter = -Math.log(Math.max(after[t.label], 1e-12));

@@ -41,7 +41,7 @@ export class TrainerClient {
     if (this.local) return;
     this.worker?.terminate();
     this.worker = null;
-    this.local = new Trainer((m) => setTimeout(() => this.onMessage(m), 0), 12);
+    this.local = new Trainer((m) => setTimeout(() => this.onMessage(m), 0), 12, { pointMs: 50, evalMs: 250 });
     this.ready = true;
     this.mode = 'main-thread';
     for (const m of this.queue) this.local.handle(m);

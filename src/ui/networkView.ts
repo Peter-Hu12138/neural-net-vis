@@ -1,5 +1,5 @@
-import { select, setProbe } from '../actions';
-import { sampleToFloat } from '../data/mnist';
+import { select, setProbe, testProbe } from '../actions';
+import { sampleInput } from '../data/datasets';
 import type { Block } from '../nn/network';
 import { store } from '../store';
 import { layerName } from './builder';
@@ -138,7 +138,7 @@ export function mountNetworkView(): void {
     if (!d) return;
     for (let digit = 0; digit < 10; digit++) {
       const i = d.testY.indexOf(digit);
-      const x = sampleToFloat(d.testX, i);
+      const x = sampleInput(d, 'test', i);
       addThumb(`test:${i}`, x, String(digit), `Test digit #${i} (a ${digit})`, () =>
         setProbe({ x, label: digit, caption: `Test digit #${i} · label ${digit}`, key: `test:${i}` }),
       );
@@ -149,7 +149,7 @@ export function mountNetworkView(): void {
   randomBtn.addEventListener('click', () => {
     const d = store.data!;
     const i = Math.floor(Math.random() * d.testY.length);
-    setProbe({ x: sampleToFloat(d.testX, i), label: d.testY[i], caption: `Test digit #${i} · label ${d.testY[i]}`, key: `test:${i}` });
+    setProbe(testProbe(d, i));
   });
 
   const syncStrip = () => {

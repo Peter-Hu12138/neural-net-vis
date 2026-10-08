@@ -28,7 +28,7 @@ export function mountBuilder(): void {
   const render = () => {
     clear(root);
     const spec = store.spec;
-    const info = describe(spec);
+    const info = describe(store.arch);
     const nConv = spec.filter((l) => l.kind === 'conv').length;
     const nDense = spec.length - nConv;
 

@@ -52,7 +52,7 @@ bugs found during verification, and measured speed and accuracy.
 - **Training** (`src/train/`). A `Trainer` class speaks a small message protocol and runs inside a worker. It streams status, metrics and weight snapshots to the page several times per second. Test-set evaluation runs five times per epoch, in slices, so pausing is instant.
 - **Analyses** (`src/analysis/`). Each analysis is a generator job: a small piece of work per step, run in time slices by an `Analyzer` in its own worker. Every job gets a private copy of the network with the weights it was asked about. A newer request on the same channel cancels the older one. `Network.inputGradient` backpropagates from any unit to the pixels, which drives activation maximisation and attribution.
 - **UI** (`src/ui/`). Plain TypeScript and canvas, with no framework. Colours come from CSS tokens, so every canvas follows the light or dark theme.
-- **Data** (`public/data/`). A 20,000 training / 2,000 test subset of MNIST, packed as PNG sprite sheets (3.5 MB) by `scripts/build-mnist.py` from the original files.
+- **Data** (`public/data/`). Subsets of MNIST (20,000 / 2,000), Fashion-MNIST (10,000 / 2,000) and CIFAR-10 (10,000 / 2,000), packed as sprite sheets by `scripts/build-datasets.py` from the original files. The synthetic point datasets are generated in the browser (`src/data/synthetic.ts`).
 
 ```
 src/

@@ -43,13 +43,16 @@ export class Trainer {
   private running = false;
   private stopAtEpochEnd = false;
   private timer: ReturnType<typeof setTimeout> | null = null;
-  private x = new Float32Array(784);
+  private x = new Float32Array(0);
+  private frozen: boolean[] = [];
 
   private winLoss = 0;
   private winAcc = 0;
   private winN = 0;
   private nextPointStep = 0;
   private nextEvalEpoch = 0;
+  private lastPointAt = -Infinity;
+  private lastEvalAt = -Infinity;
   private evalJob: EvalJob | null = null;
   private points: TrainPoint[] = [];
   private evals: EvalPoint[] = [];
@@ -57,24 +60,38 @@ export class Trainer {
   private lastStatus = 0;
   private lastWeights = 0;
   private rate = 0;
+  /** Speed cap (samples per second) and the samples it currently allows (a token bucket). */
+  private maxRate: number | null = null;
+  private allowance = 0;
+  private lastTick = 0;
+  private capSeen = 0;
+  private capFrom = 0;
 
+  /**
+   * `pace` sets wall-clock floors between recorded curve points and between test-set evaluations.
+   * Tiny datasets (a few hundred points) finish an epoch in milliseconds; without the floors the
+   * curves would get thousands of points per second. Tests use the default 0 for exact counts.
+   */
   constructor(
     private emit: (msg: FromTrainer, transfer?: Transferable[]) => void,
     private sliceMs = 40,
+    private pace: { pointMs: number; evalMs: number } = { pointMs: 0, evalMs: 0 },
   ) {}
 
   handle(msg: ToTrainer): void {
     switch (msg.type) {
       case 'data':
         this.data = msg.data;
+        this.x = new Float32Array(msg.data.inputSize);
         this.rebuildOrder();
         this.startEval();
         this.schedule();
         break;
       case 'model':
         this.version = msg.version;
-        this.net = new Network(msg.spec, 0);
+        this.net = new Network(msg.arch, 0);
         this.net.setWeights(msg.weights);
+        this.frozen = msg.frozen.slice();
         this.hyper = msg.hyper;
         this.opt = new Optimizer(this.net, msg.hyper.optimizer, msg.hyper.lr);
         this.running = this.stopAtEpochEnd = false;
@@ -102,6 +119,16 @@ export class Trainer {
         this.startEval();
         this.schedule();
         break;
+      case 'frozen':
+        this.frozen = msg.frozen.slice();
+        break;
+      case 'speed':
+        this.maxRate = msg.samplesPerSec;
+        this.allowance = 0;
+        this.lastTick = this.capFrom = performance.now();
+        this.capSeen = 0;
+        this.rate = 0;
+        break;
       case 'custom':
         this.custom = msg.samples;
         this.rebuildOrder(true);
@@ -109,6 +136,9 @@ export class Trainer {
       case 'play':
         this.running = true;
         this.stopAtEpochEnd = false;
+        this.allowance = 0;
+        this.lastTick = this.capFrom = performance.now();
+        this.capSeen = 0;
         this.sendStatus(true);
         this.schedule();
         break;
@@ -133,8 +163,11 @@ export class Trainer {
     }
   }
 
+  /** Data and network agree on input size and classes (they arrive separately on a dataset switch). */
   private ready(): boolean {
-    return !!(this.data && this.net && this.opt);
+    const d = this.data;
+    const net = this.net;
+    return !!(d && net && this.opt && net.inputSize === d.inputSize && net.classes === d.classes);
   }
 
   private get poolSize(): number {
@@ -157,13 +190,13 @@ export class Trainer {
   private load(idx: number): number {
     const d = this.data!;
     const n = d.trainY.length;
-    let src: Uint8Array;
+    let src: Uint8Array | Float32Array;
     let off: number;
     let y: number;
     if (idx < n || this.custom.length === 0) {
       const i = idx % n;
       src = d.trainX;
-      off = i * 784;
+      off = i * d.inputSize;
       y = d.trainY[i];
     } else {
       const s = this.custom[(idx - n) % this.custom.length];
@@ -172,7 +205,9 @@ export class Trainer {
       y = s.y;
     }
     const x = this.x;
-    for (let j = 0; j < 784; j++) x[j] = src[off + j] / 255;
+    const len = d.inputSize;
+    const scale = d.scale;
+    for (let j = 0; j < len; j++) x[j] = src[off + j] * scale;
     return y;
   }
 
@@ -187,21 +222,26 @@ export class Trainer {
       const y = this.load(this.order[this.cursor++]);
       const p = net.forward(this.x);
       if (argmax(p) === y) correct++;
-      loss += net.backward(y);
+      loss += net.backward(y, false, this.frozen);
     }
-    this.opt!.step(1 / B);
+    this.opt!.step(1 / B, this.frozen);
     if (this.cursor >= this.order.length) this.endEpoch();
     this.step++;
     this.seen += B;
     this.winLoss += loss;
     this.winAcc += correct;
     this.winN += B;
-    if (this.step >= this.nextPointStep) {
+    const now = this.pace.pointMs || this.pace.evalMs ? performance.now() : 0;
+    if (this.step >= this.nextPointStep && now - this.lastPointAt >= this.pace.pointMs) {
+      this.lastPointAt = now;
       this.points.push({ epoch: this.epochFraction(), step: this.step, loss: this.winLoss / this.winN, acc: this.winAcc / this.winN });
       this.winLoss = this.winAcc = this.winN = 0;
       this.nextPointStep = this.step + Math.max(1, Math.round(this.stepsPerEpoch() / POINTS_PER_EPOCH));
     }
-    if (this.epochFraction() >= this.nextEvalEpoch) this.startEval();
+    if (this.epochFraction() >= this.nextEvalEpoch && !this.evalJob && now - this.lastEvalAt >= this.pace.evalMs) {
+      this.lastEvalAt = now;
+      this.startEval();
+    }
   }
 
   private endEpoch(): void {
@@ -221,7 +261,7 @@ export class Trainer {
   private startEval(): void {
     if (!this.ready()) return;
     const ef = this.epochFraction();
-    this.evalJob = { i: 0, loss: 0, correct: 0, confusion: new Array(100).fill(0), epoch: ef, step: this.step };
+    this.evalJob = { i: 0, loss: 0, correct: 0, confusion: new Array(this.data!.classes * this.data!.classes).fill(0), epoch: ef, step: this.step };
     this.nextEvalEpoch = (Math.floor(ef * EVALS_PER_EPOCH + 1e-9) + 1) / EVALS_PER_EPOCH;
   }
 
@@ -233,14 +273,14 @@ export class Trainer {
     const n = d.testY.length;
     const end = Math.min(n, job.i + budget);
     for (; job.i < end; job.i++) {
-      const off = job.i * 784;
-      for (let j = 0; j < 784; j++) this.x[j] = d.testX[off + j] / 255;
+      const off = job.i * d.inputSize;
+      for (let j = 0; j < d.inputSize; j++) this.x[j] = d.testX[off + j] * d.scale;
       const y = d.testY[job.i];
       const p = net.forward(this.x);
       const pred = argmax(p);
       job.loss += -Math.log(Math.max(p[y], 1e-12));
       if (pred === y) job.correct++;
-      job.confusion[y * 10 + pred]++;
+      job.confusion[y * d.classes + pred]++;
     }
     if (job.i >= n) {
       this.evals.push({ epoch: job.epoch, step: job.step, loss: job.loss / n, acc: job.correct / n, confusion: job.confusion });
@@ -248,10 +288,17 @@ export class Trainer {
     }
   }
 
-  private schedule(): void {
+  private schedule(delay = 0): void {
     if (this.timer !== null) return;
     if (!this.ready() || (!this.running && !this.evalJob)) return;
-    this.timer = setTimeout(this.loop, 0);
+    this.timer = setTimeout(this.loop, delay);
+  }
+
+  /** With a speed cap: milliseconds until the cap allows the next batch (0 = now). */
+  private capWait(): number {
+    if (this.maxRate === null || !this.running || this.evalJob) return 0;
+    const need = this.hyper.batchSize - this.allowance;
+    return need <= 0 ? 0 : Math.min(100, Math.max(4, Math.ceil((need / this.maxRate) * 1000)));
   }
 
   private loop = (): void => {
@@ -259,13 +306,32 @@ export class Trainer {
     if (!this.ready()) return;
     const t0 = performance.now();
     const seen0 = this.seen;
+    if (this.maxRate !== null) {
+      // Refill the bucket; never bank more than a tenth of a second (or one batch) of samples.
+      this.allowance = Math.min(this.allowance + ((t0 - this.lastTick) / 1000) * this.maxRate, Math.max(this.hyper.batchSize, this.maxRate / 10));
+      this.lastTick = t0;
+    }
     while (performance.now() - t0 < this.sliceMs) {
       if (this.evalJob) this.evalChunk(40);
-      else if (this.running) this.trainBatch();
-      else break;
+      else if (this.running) {
+        if (this.maxRate !== null && this.allowance < this.hyper.batchSize) break;
+        const before = this.seen;
+        this.trainBatch();
+        if (this.maxRate !== null) this.allowance -= this.seen - before;
+      } else break;
     }
     const dt = performance.now() - t0;
-    if (this.seen > seen0 && dt > 0) {
+    if (this.maxRate !== null) {
+      // Capped: measure over wall-clock time, idle waits included.
+      this.capSeen += this.seen - seen0;
+      const wall = t0 + dt - this.capFrom;
+      if (wall >= 500) {
+        const r = (this.capSeen * 1000) / wall;
+        this.rate = this.rate ? 0.5 * this.rate + 0.5 * r : r;
+        this.capSeen = 0;
+        this.capFrom = t0 + dt;
+      }
+    } else if (this.seen > seen0 && dt > 0) {
       const r = ((this.seen - seen0) * 1000) / dt;
       this.rate = this.rate ? 0.8 * this.rate + 0.2 * r : r;
     }
@@ -275,8 +341,10 @@ export class Trainer {
       return;
     }
     if (now - this.lastStatus > 120) this.sendStatus(false);
-    if (now - this.lastWeights > 300 && this.running) this.sendWeights();
-    this.schedule();
+    // Small networks (point datasets) are cheap to copy: send them often so the boundary animates.
+    const every = this.net && this.net.paramCount < 20_000 ? 100 : 300;
+    if (now - this.lastWeights > every && this.running) this.sendWeights();
+    this.schedule(this.capWait());
   };
 
   private flush(): void {

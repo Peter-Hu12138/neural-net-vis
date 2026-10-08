@@ -1,5 +1,4 @@
 import type { Block, Network } from '../nn/network';
-import { CLASSES } from '../nn/types';
 import type { Job, Progress } from './protocol';
 
 /**
@@ -78,7 +77,7 @@ export interface Kinks {
 export const DEFAULT_IG_STEPS = 32;
 export const DEFAULT_OCCLUSION: OcclusionParams = { size: 6, stride: 2 };
 
-export function oneHot(k: number, n = CLASSES): Float32Array {
+export function oneHot(k: number, n = 10): Float32Array {
   const v = new Float32Array(n);
   v[k] = 1;
   return v;
@@ -103,7 +102,7 @@ export function logitGradient(net: Network, x: Float32Array, target: number): { 
   const probs = net.forward(x).slice();
   const last = net.blocks.length - 1;
   const logit = net.blocks[last].z[target];
-  const grad = net.inputGradient(last, oneHot(target)).slice();
+  const grad = net.inputGradient(last, oneHot(target, net.classes)).slice();
   return { logit, prob: probs[target], probs, grad };
 }
 
@@ -253,7 +252,7 @@ export function* attribution(net: Network, params: AttributionParams): Generator
   const x = params.x;
   if (!x || x.length !== PIXELS) throw new Error(`Attribution needs a 28×28 image, got ${x ? x.length : 0} values`);
   const target = params.target;
-  if (!Number.isInteger(target) || target < 0 || target >= CLASSES) throw new Error(`Target must be a digit 0–9, got ${target}`);
+  if (!Number.isInteger(target) || target < 0 || target >= net.classes) throw new Error(`Target must be a class 0–${net.classes - 1}, got ${target}`);
   const m = clampInt(params.igSteps, 1, 1024, DEFAULT_IG_STEPS);
   const size = clampInt(params.occlusion?.size, 1, SIDE, DEFAULT_OCCLUSION.size);
   const stride = clampInt(params.occlusion?.stride, 1, SIDE, DEFAULT_OCCLUSION.stride);
@@ -264,13 +263,13 @@ export function* attribution(net: Network, params: AttributionParams): Generator
   const total = 2 + m + evaluated;
   let done = 0;
   const last = net.blocks.length - 1;
-  const seed = oneHot(target);
+  const seed = oneHot(target, net.classes);
 
   // 1. The gradient at x.
   const at = logitGradient(net, x, target);
   const kinks = countKinks(net); // the network still holds the activations of x
   let pred = 0;
-  for (let j = 1; j < CLASSES; j++) if (at.probs[j] > at.probs[pred]) pred = j;
+  for (let j = 1; j < at.probs.length; j++) if (at.probs[j] > at.probs[pred]) pred = j;
   const saliency = saliencyOf(at.grad);
   const gradInput = gradTimesInput(x, at.grad);
   yield { done: ++done, total };

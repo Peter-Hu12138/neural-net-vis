@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { inflateSync } from 'node:zlib';
 import { describe, expect, it } from 'vitest';
+import { mnistArch } from '../src/nn/types';
 import {
   attribution,
   completenessGap,
@@ -93,7 +94,7 @@ function trained(spec: LayerSpec[], samples: number, seed = 3): Network {
   const key = JSON.stringify([spec, samples, seed]);
   const hit = trainedCache.get(key);
   if (hit) return hit;
-  const net = new Network(spec, seed);
+  const net = new Network(mnistArch(spec), seed);
   trainedCache.set(key, net);
   const opt = new Optimizer(net, 'adam', 0.003);
   const batch = 16;
@@ -177,10 +178,10 @@ describe('gradient of the target logit', () => {
       { kind: 'dense', units: 32, act: 'tanh' },
     ];
     const cases: [Network, number, number][] = [
-      [new Network(conv, 5), 0, 7],
-      [new Network(conv, 6), 1, 3],
-      [new Network(SIGMOID_MLP, 2), 1, 2],
-      [new Network(LENET.map((l) => (l.kind === 'conv' ? { ...l, pool: false } : l)), 3), 4, 4],
+      [new Network(mnistArch(conv), 5), 0, 7],
+      [new Network(mnistArch(conv), 6), 1, 3],
+      [new Network(mnistArch(SIGMOID_MLP), 2), 1, 2],
+      [new Network(mnistArch(LENET.map((l) => (l.kind === 'conv' ? { ...l, pool: false } : l))), 3), 4, 4],
     ];
     for (const [net, i, target] of cases) {
       const x = testDigit(i);
@@ -206,7 +207,7 @@ describe('gradient of the target logit', () => {
       [SMALL_CNN, 4, 2],
     ];
     for (const [spec, seed, target] of cases) {
-      const net = new Network(spec, seed);
+      const net = new Network(mnistArch(spec), seed);
       const rng = new Rng(seed);
       const x = Float32Array.from({ length: 784 }, () => rng.next());
       const { grad } = logitGradient(net, x, target);
@@ -245,7 +246,7 @@ describe('gradient of the target logit', () => {
     // The page's first state: Small CNN, seed 1, untrained. Biases start at 0, so over the blank
     // background every conv unit sits exactly at the ReLU kink z = 0. The training convention
     // (slope 0 there) blanks out pixels whose score does move when they are brightened.
-    const net = new Network(SMALL_CNN, 1);
+    const net = new Network(mnistArch(SMALL_CNN), 1);
     for (const [d, target] of [[0, 7], [1, 2]]) {
       const x = testDigit(d);
       net.forward(x);
@@ -301,10 +302,10 @@ describe('gradient of the target logit', () => {
   }, 30_000);
 
   it('counts kinks only where they exist, and the Saliency hint mentions them only then', () => {
-    const smooth = new Network(SIGMOID_MLP, 2);
+    const smooth = new Network(mnistArch(SIGMOID_MLP), 2);
     smooth.forward(testDigit(0));
     expect(countKinks(smooth)).toEqual({ relu: 0, pool: 0 });
-    const linear = new Network(SOFTMAX, 1);
+    const linear = new Network(mnistArch(SOFTMAX), 1);
     linear.forward(testDigit(0));
     expect(countKinks(linear)).toEqual({ relu: 0, pool: 0 });
     expect(kinkText({ relu: 0, pool: 0 })).toBe('');
@@ -315,7 +316,7 @@ describe('gradient of the target logit', () => {
     );
     expect(kinkText({ relu: 2, pool: 5 })).toContain('ReLUs at exactly 0 and tied max-pool windows');
     // A ReLU tie among dead units (all z < 0) is flat on both sides: not a kink.
-    const net = new Network([{ kind: 'conv', filters: 1, kernel: 3, act: 'relu', pool: true }], 1);
+    const net = new Network(mnistArch([{ kind: 'conv', filters: 1, kernel: 3, act: 'relu', pool: true }]), 1);
     net.blocks[0].W.fill(0);
     net.blocks[0].b.fill(-0.5);
     net.forward(new Float32Array(784));
@@ -324,11 +325,11 @@ describe('gradient of the target logit', () => {
     net.forward(new Float32Array(784));
     expect(countKinks(net)).toEqual({ relu: 0, pool: 196 });
     // The job reports them.
-    expect(run(new Network(SMALL_CNN, 1), testDigit(0), 7, 2).kinks.relu).toBeGreaterThan(1000);
+    expect(run(new Network(mnistArch(SMALL_CNN), 1), testDigit(0), 7, 2).kinks.relu).toBeGreaterThan(1000);
   });
 
   it('saliency is |g| and gradient × input is x ⊙ g', () => {
-    const net = new Network(SMALL_CNN, 1);
+    const net = new Network(mnistArch(SMALL_CNN), 1);
     const x = testDigit(4);
     const r = run(net, x, 4, 4);
     const { grad, logit, prob } = logitGradient(net, x, 4);
@@ -345,7 +346,7 @@ describe('gradient of the target logit', () => {
 
 describe('integrated gradients', () => {
   it('equals x ⊙ W_t exactly for the Softmax preset (no hidden layer), as does gradient × input', () => {
-    const net = new Network(SOFTMAX, 7);
+    const net = new Network(mnistArch(SOFTMAX), 7);
     const W = net.output.W; // 10 × 784
     const x = testDigit(2);
     for (const t of [0, 1, 9]) {
@@ -364,9 +365,9 @@ describe('integrated gradients', () => {
 
   it('completeness: Σ IG is within 5% of z(x) − z(blank) at 32 steps, random and trained networks', () => {
     const nets: [string, Network][] = [
-      ['random Small CNN', new Network(SMALL_CNN, 11)],
-      ['random LeNet-ish', new Network(LENET, 12)],
-      ['random MLP', new Network(MLP, 13)],
+      ['random Small CNN', new Network(mnistArch(SMALL_CNN), 11)],
+      ['random LeNet-ish', new Network(mnistArch(LENET), 12)],
+      ['random MLP', new Network(mnistArch(MLP), 13)],
       ['trained MLP', trained(MLP, 1600)],
       ['trained Small CNN', trained(SMALL_CNN, 1200)],
     ];
@@ -400,7 +401,7 @@ describe('integrated gradients', () => {
     // ReLU, max-pool and bias-free layers are positively homogeneous: f(αx) = α·f(x), so the
     // gradient is the same all along the path and Σ x ⊙ g = f(x) − f(0) (Euler's theorem).
     for (const spec of [MLP, SMALL_CNN]) {
-      const net = new Network(spec, 31); // biases start at 0
+      const net = new Network(mnistArch(spec), 31); // biases start at 0
       const x = testDigit(9);
       for (const m of [1, 5]) {
         const r = run(net, x, 4, m, { size: 28, stride: 28 });
@@ -480,7 +481,7 @@ describe('integrated gradients', () => {
 
 describe('occlusion', () => {
   it('gives exactly 0 wherever every covering patch is already blank', () => {
-    const net = new Network(SMALL_CNN, 3);
+    const net = new Network(mnistArch(SMALL_CNN), 3);
     // ink only in the top-left 10×10 corner: a crop of a real digit
     const d = testDigit(0);
     const x = new Float32Array(784);
@@ -504,7 +505,7 @@ describe('occlusion', () => {
   });
 
   it('matches a brute-force sweep that erases every patch (logit map and probability map)', () => {
-    const net = new Network(LENET, 9);
+    const net = new Network(mnistArch(LENET), 9);
     const x = testDigit(6);
     const t = testLabel(6);
     const size = 7;
@@ -561,9 +562,9 @@ describe('occlusion', () => {
 
 describe('attribution job', () => {
   it('validates its parameters', () => {
-    const net = new Network(SOFTMAX, 1);
+    const net = new Network(mnistArch(SOFTMAX), 1);
     expect(() => computeAttribution(net, { x: new Float32Array(10), target: 1 })).toThrow(/28×28/);
-    expect(() => computeAttribution(net, { x: new Float32Array(784), target: 10 })).toThrow(/digit/);
+    expect(() => computeAttribution(net, { x: new Float32Array(784), target: 10 })).toThrow(/class/);
     const r = computeAttribution(net, { x: testDigit(0), target: 7, igSteps: 0, occlusion: { size: 99, stride: 0 } });
     expect(r.igSteps).toBe(1);
     expect(r.occlusionSize).toBe(28);
@@ -571,7 +572,7 @@ describe('attribution job', () => {
   });
 
   it('yields once per forward pass and reports exact progress', () => {
-    const net = new Network(SMALL_CNN, 1);
+    const net = new Network(mnistArch(SMALL_CNN), 1);
     const x = testDigit(0);
     const gen = attribution(net, { x, target: 7, igSteps: 8 });
     const seen: number[] = [];
@@ -602,10 +603,10 @@ describe('attribution job', () => {
     const testY = labels.slice(20_000, 22_000);
     const log: FromAnalyzer[] = [];
     const a = new Analyzer((m) => log.push(m), jobs, 30);
-    a.handle({ type: 'data', testX, testY });
+    a.handle({ type: 'data', testX, testY, inputSize: 784, scale: 1 / 255, classes: 10 });
     const x = testDigit(0);
     const t0 = performance.now();
-    a.handle({ type: 'run', id: 1, channel: 'attribution', kind: 'attribution', params: { x, target: 7, igSteps: 32, occlusion: { size: 6, stride: 2 } }, spec, weights: source.getWeights() });
+    a.handle({ type: 'run', id: 1, channel: 'attribution', kind: 'attribution', params: { x, target: 7, igSteps: 32, occlusion: { size: 6, stride: 2 } }, arch: mnistArch(spec), weights: source.getWeights() });
     while (!log.some((m) => m.type === 'result' || m.type === 'error') && performance.now() - t0 < 10_000) await new Promise((r) => setTimeout(r, 2));
     const ms = performance.now() - t0;
     const msg = log.find((m) => m.type === 'result' || m.type === 'error')!;

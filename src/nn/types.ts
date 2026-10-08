@@ -31,8 +31,21 @@ export interface Shape {
   w: number;
 }
 
-export const INPUT_SHAPE: Shape = { c: 1, h: 28, w: 28 };
-export const CLASSES = 10;
+/** A whole model: what goes in, the hidden layers, and how many classes come out. */
+export interface Arch {
+  input: Shape;
+  layers: LayerSpec[];
+  classes: number;
+}
+
+/** MNIST's input: 28×28 greyscale. */
+export const MNIST_INPUT: Shape = { c: 1, h: 28, w: 28 };
+
+/** An MNIST-shaped model (28×28×1 in, 10 classes out) with the given hidden layers. */
+export const mnistArch = (layers: LayerSpec[]): Arch => ({ input: MNIST_INPUT, layers, classes: 10 });
+
+/** True when the input is an image (convolutions apply), false for a plain feature vector. */
+export const isImage = (s: Shape) => s.h > 1 || s.w > 1;
 
 export const size = (s: Shape) => s.c * s.h * s.w;
 export const fmtShape = (s: Shape) => (s.h === 1 && s.w === 1 ? `${s.c}` : `${s.h}×${s.w}×${s.c}`);

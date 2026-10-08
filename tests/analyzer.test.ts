@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest';
+import { mnistArch } from '../src/nn/types';
 import { Analyzer } from '../src/analysis/analyzer';
 import type { FromAnalyzer, Job } from '../src/analysis/protocol';
 import { Network } from '../src/nn/network';
 
 const spec = [{ kind: 'dense' as const, units: 4, act: 'relu' as const }];
-const weights = new Network(spec, 1).getWeights();
+const weights = new Network(mnistArch(spec), 1).getWeights();
 
 /** Counts to `n`, one step per yield, and reports which test labels it saw. */
 const count: Job<{ n: number }, { n: number; firstLabel: number; pixel: number }> = function* (ctx, p) {
@@ -20,7 +21,7 @@ function harness() {
   const log: FromAnalyzer[] = [];
   const a = new Analyzer((m) => log.push(m), { count, boom }, 5);
   const run = (id: number, channel: string, kind: string, params: unknown) =>
-    a.handle({ type: 'run', id, channel, kind, params, spec, weights });
+    a.handle({ type: 'run', id, channel, kind, params, arch: mnistArch(spec), weights });
   const until = async (pred: () => boolean) => {
     for (let t = 0; t < 2000 && !pred(); t++) await new Promise((r) => setTimeout(r, 2));
     expect(pred()).toBe(true);
@@ -28,7 +29,7 @@ function harness() {
   return { a, log, run, until, results: () => log.filter((m) => m.type === 'result') as { id: number; result: any }[] };
 }
 
-const data = { testX: new Uint8Array(784 * 2).fill(255), testY: new Uint8Array([7, 3]) };
+const data = { testX: new Uint8Array(784 * 2).fill(255), testY: new Uint8Array([7, 3]), inputSize: 784, scale: 1 / 255, classes: 10 };
 
 describe('Analyzer', () => {
   it('waits for data, then runs the job to completion', async () => {
