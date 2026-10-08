@@ -3,18 +3,25 @@ import { inflateSync } from 'node:zlib';
 import { describe, expect, it } from 'vitest';
 import {
   attribution,
+  completenessGap,
+  completenessText,
   computeAttribution,
+  countKinks,
+  exact,
   gradTimesInput,
   igAlphas,
   jobs,
+  kinkText,
   logitGradient,
   occlusionMap,
   oneHot,
   patchGrid,
   patchIsBlank,
   patchOrigins,
+  percentText,
   relativeGap,
   saliencyOf,
+  sig,
   targetLogit,
   type AttributionResult,
 } from '../src/analysis/attribution';
@@ -215,6 +222,111 @@ describe('gradient of the target logit', () => {
     }
   });
 
+  /** One-sided derivatives (+ε, −ε) of z_t at every blank pixel of x, and the gradients there. */
+  function blankPixels(net: Network, x: Float32Array, target: number, eps = 1e-3) {
+    const last = net.blocks.length - 1;
+    const sym = logitGradient(net, x, target).grad; // the attribution job's gradient (symmetric)
+    net.forward(x);
+    const train = net.inputGradient(last, oneHot(target), false).slice(); // what training uses
+    const z0 = targetLogit(net, x, target);
+    const out: { i: number; sym: number; train: number; right: number; left: number }[] = [];
+    for (let i = 0; i < 784; i++) {
+      if (x[i] !== 0) continue;
+      const xp = x.slice();
+      const xm = x.slice();
+      xp[i] += eps;
+      xm[i] -= eps;
+      out.push({ i, sym: sym[i], train: train[i], right: (targetLogit(net, xp, target) - z0) / eps, left: (z0 - targetLogit(net, xm, target)) / eps });
+    }
+    return { pixels: out, max: Math.max(...Array.from(sym, Math.abs)) };
+  }
+
+  it('on blank pixels of a real digit, ReLU kinks no longer zero out the saliency (ATTR-2)', () => {
+    // The page's first state: Small CNN, seed 1, untrained. Biases start at 0, so over the blank
+    // background every conv unit sits exactly at the ReLU kink z = 0. The training convention
+    // (slope 0 there) blanks out pixels whose score does move when they are brightened.
+    const net = new Network(SMALL_CNN, 1);
+    for (const [d, target] of [[0, 7], [1, 2]]) {
+      const x = testDigit(d);
+      net.forward(x);
+      const kinks = countKinks(net);
+      expect(kinks.relu, `digit ${d}`).toBeGreaterThan(1000);
+      const { pixels, max } = blankPixels(net, x, target);
+      const tol = 0.02 * max;
+      const moves = (p: (typeof pixels)[number]) => Math.max(Math.abs(p.right), Math.abs(p.left)) > tol;
+      const zeroTrain = pixels.filter((p) => p.train === 0 && moves(p)).length;
+      const zeroSym = pixels.filter((p) => p.sym === 0 && moves(p)).length;
+      expect(zeroTrain, `digit ${d}: the artefact is there with the training convention`).toBeGreaterThan(300);
+      expect(zeroSym, `digit ${d}: and gone with the symmetric one`).toBe(0);
+      // The symmetric slope lies between the two one-sided slopes on the vast majority of pixels.
+      const between = (g: number, p: (typeof pixels)[number]) => g >= Math.min(p.left, p.right) - tol && g <= Math.max(p.left, p.right) + tol;
+      expect(pixels.filter((p) => between(p.sym, p)).length / pixels.length, `digit ${d}`).toBeGreaterThan(0.8);
+    }
+  }, 30_000);
+
+  it('on blank pixels of a real digit, tied max-pool windows leave no lattice (ATTR-2)', () => {
+    // Trained LeNet-ish (tanh, so the only kinks are max-pool ties). Over the background the four
+    // values of a pooling window are exactly equal; sending the whole gradient to the top-left one
+    // made a period-2 lattice: (odd row, odd column) pixels got much less. Finite differences show
+    // no such pattern, and neither does the symmetric gradient.
+    const net = trained(LENET, 1200);
+    for (const d of [1, 2]) {
+      const x = testDigit(d);
+      net.forward(x);
+      expect(countKinks(net).pool, `digit ${d}`).toBeGreaterThan(100);
+      const { pixels, max } = blankPixels(net, x, testLabel(d));
+      const oddOdd = (i: number) => Math.floor(i / 28) % 2 === 1 && (i % 28) % 2 === 1;
+      const ratio = (f: (p: (typeof pixels)[number]) => number) => {
+        const sum = [0, 0];
+        const n = [0, 0];
+        for (const p of pixels) {
+          const k = oddOdd(p.i) ? 0 : 1;
+          sum[k] += Math.abs(f(p));
+          n[k]++;
+        }
+        return sum[0] / n[0] / (sum[1] / n[1]);
+      };
+      const fd = ratio((p) => (p.left + p.right) / 2);
+      expect(fd, `digit ${d}: finite differences are flat`).toBeGreaterThan(0.9);
+      expect(fd).toBeLessThan(1.1);
+      expect(ratio((p) => p.train), `digit ${d}: lattice with the training convention`).toBeLessThan(0.75);
+      expect(Math.abs(ratio((p) => p.sym) - fd), `digit ${d}: symmetric gradient as flat as the finite differences`).toBeLessThan(0.1);
+      // ...and closer to the finite differences pixel by pixel.
+      const err = (f: (p: (typeof pixels)[number]) => number) => pixels.reduce((s, p) => s + Math.abs(f(p) - (p.left + p.right) / 2), 0) / pixels.length;
+      expect(err((p) => p.sym)).toBeLessThan(0.6 * err((p) => p.train));
+      const tol = 0.02 * max;
+      const between = pixels.filter((p) => p.sym >= Math.min(p.left, p.right) - tol && p.sym <= Math.max(p.left, p.right) + tol).length;
+      expect(between / pixels.length, `digit ${d}`).toBeGreaterThan(0.95);
+    }
+  }, 30_000);
+
+  it('counts kinks only where they exist, and the Saliency hint mentions them only then', () => {
+    const smooth = new Network(SIGMOID_MLP, 2);
+    smooth.forward(testDigit(0));
+    expect(countKinks(smooth)).toEqual({ relu: 0, pool: 0 });
+    const linear = new Network(SOFTMAX, 1);
+    linear.forward(testDigit(0));
+    expect(countKinks(linear)).toEqual({ relu: 0, pool: 0 });
+    expect(kinkText({ relu: 0, pool: 0 })).toBe('');
+    expect(kinkText({ relu: 3, pool: 0 })).toContain('ReLUs at exactly 0');
+    expect(kinkText({ relu: 3, pool: 0 })).not.toContain('max-pool');
+    expect(kinkText({ relu: 0, pool: 5 })).toBe(
+      'Where the input leaves tied max-pool windows (mostly the blank background), brightening and darkening a pixel differ; the map shows the average slope.',
+    );
+    expect(kinkText({ relu: 2, pool: 5 })).toContain('ReLUs at exactly 0 and tied max-pool windows');
+    // A ReLU tie among dead units (all z < 0) is flat on both sides: not a kink.
+    const net = new Network([{ kind: 'conv', filters: 1, kernel: 3, act: 'relu', pool: true }], 1);
+    net.blocks[0].W.fill(0);
+    net.blocks[0].b.fill(-0.5);
+    net.forward(new Float32Array(784));
+    expect(countKinks(net)).toEqual({ relu: 0, pool: 0 });
+    net.blocks[0].b.fill(0.5);
+    net.forward(new Float32Array(784));
+    expect(countKinks(net)).toEqual({ relu: 0, pool: 196 });
+    // The job reports them.
+    expect(run(new Network(SMALL_CNN, 1), testDigit(0), 7, 2).kinks.relu).toBeGreaterThan(1000);
+  });
+
   it('saliency is |g| and gradient × input is x ⊙ g', () => {
     const net = new Network(SMALL_CNN, 1);
     const x = testDigit(4);
@@ -298,6 +410,72 @@ describe('integrated gradients', () => {
       }
     }
   });
+
+  it('the completeness gap is measured against Σ|IG|, so it cannot blow up when z(x) − z(blank) ≈ 0 (ATTR-1)', () => {
+    // Trained MLP, test digit 1 (a 2), target 8: the network neither likes nor rejects an 8 here,
+    // so positive and negative attributions cancel and z(x) − z(blank) is close to 0. Relative to
+    // that difference, the gap read "78% apart"; relative to the attributions it is tiny.
+    const net = trained(MLP, 1600);
+    const r = run(net, testDigit(1), 8, 32, { size: 28, stride: 28 });
+    expect(Math.abs(r.igExpected)).toBeLessThan(0.01);
+    expect(relativeGap(r.igSum, r.igExpected)).toBeGreaterThan(0.5); // the old measure
+    let abs = 0;
+    for (const v of r.integrated) abs += Math.abs(v);
+    expect(r.igAbsSum).toBeCloseTo(abs, 4);
+    expect(r.igAbsSum).toBeGreaterThan(1);
+    const g = completenessGap(r.igSum, r.igExpected, r.igAbsSum);
+    expect(g.ref).toBe('ig');
+    expect(g.diff).toBeCloseTo(Math.abs(r.igSum - r.igExpected), 12);
+    expect(g.rel).toBeLessThan(0.005);
+    // The line shows both numbers with three significant digits (not "0.00" twice) and says what
+    // the percentage is of.
+    const c = completenessText(r);
+    expect(c.sum).toBe(`Σ IG = ${sig(r.igSum)};`);
+    expect(c.expected).toBe(`z(x) − z(blank) = ${sig(r.igExpected)}`);
+    expect(c.sum).not.toMatch(/= −?0(\.0+)?;$/);
+    expect(c.expected).not.toMatch(/= −?0(\.0+)?$/);
+    expect(c.sum).not.toBe(c.expected.replace('z(x) − z(blank)', 'Σ IG') + ';');
+    expect(c.gap).toMatch(/^\(off by [\d.e−]+, (<0\.1|0\.\d)% of Σ\|IG\|\)$/);
+    expect(c.title).toContain(`Σ|IG| = ${exact(r.igAbsSum)}`);
+  }, 30_000);
+
+  it('the completeness gap stays under 1% of Σ|IG| for every target, trained MLP and Small CNN (ATTR-1)', () => {
+    for (const [name, net, digits] of [
+      ['trained MLP', trained(MLP, 1600), 30],
+      ['trained Small CNN', trained(SMALL_CNN, 1200), 20],
+    ] as const) {
+      let nearZero = 0;
+      for (let d = 0; d < digits; d++) {
+        for (let t = 0; t < 10; t++) {
+          const r = run(net, testDigit(d), t, 32, { size: 28, stride: 28 });
+          if (Math.abs(r.igExpected) < 0.1) nearZero++;
+          const g = completenessGap(r.igSum, r.igExpected, r.igAbsSum);
+          expect(g.rel, `${name}, digit ${d}, target ${t}`).toBeLessThan(0.01);
+          expect(Number.isFinite(g.rel)).toBe(true);
+        }
+      }
+      expect(nearZero, `${name}: the scan reaches the near-zero case`).toBeGreaterThan(0);
+    }
+  }, 60_000);
+
+  it('completeness text: a match, the score as reference, and number formatting', () => {
+    expect(completenessText({ igSum: 0, igExpected: 0, igAbsSum: 0 })).toMatchObject({ sum: 'Σ IG = 0;', expected: 'z(x) − z(blank) = 0', gap: '(a match)' });
+    // IG missing most of a real score change: the gap is measured against the score instead.
+    const g = completenessGap(0.1, 2, 0.1);
+    expect(g).toEqual({ diff: 1.9, rel: 0.95, ref: 'score' });
+    expect(completenessText({ igSum: 0.1, igExpected: 2, igAbsSum: 0.1 }).gap).toBe('(off by 1.9, 95% of |z(x) − z(blank)|)');
+    expect(completenessText({ igSum: 8.3912, igExpected: 8.4301, igAbsSum: 12.07 }).gap).toBe('(off by 0.0389, 0.3% of Σ|IG|)');
+    expect(completenessGap(0, 0, 0).rel).toBe(0);
+    expect(sig(-0.000173)).toBe('−1.7e−4');
+    expect(sig(0.00528)).toBe('0.00528');
+    expect(sig(-8.3912)).toBe('−8.39');
+    expect(sig(0.31, true)).toBe('+0.31');
+    expect(sig(-0)).toBe('0');
+    expect(exact(-0.00528312)).toBe('−0.00528312');
+    expect(percentText(0.0004)).toBe('<0.1%');
+    expect(percentText(0.0312)).toBe('3.1%');
+    expect(percentText(0.123)).toBe('12%');
+  });
 });
 
 describe('occlusion', () => {
@@ -325,7 +503,7 @@ describe('occlusion', () => {
     expect(blank.igExpected).toBe(0);
   });
 
-  it('matches a brute-force sweep that erases every patch', () => {
+  it('matches a brute-force sweep that erases every patch (logit map and probability map)', () => {
     const net = new Network(LENET, 9);
     const x = testDigit(6);
     const t = testLabel(6);
@@ -333,24 +511,51 @@ describe('occlusion', () => {
     const stride = 4;
     const r = run(net, x, t, 2, { size, stride });
     const p0 = net.forward(x)[t];
+    const z0 = net.blocks[net.blocks.length - 1].z[t];
     const patches = patchGrid(28, size, stride);
-    const drops = patches.map((p) => {
+    const zDrops: number[] = [];
+    const pDrops: number[] = [];
+    for (const p of patches) {
       const e = x.slice();
       for (let rr = p.y; rr < Math.min(28, p.y + size); rr++) for (let cc = p.x; cc < Math.min(28, p.x + size); cc++) e[rr * 28 + cc] = 0;
-      return p0 - net.forward(e)[t];
-    });
-    const want = occlusionMap(patches, drops, size);
-    for (let i = 0; i < 784; i++) expect(r.occlusion[i]).toBeCloseTo(want[i], 6);
+      pDrops.push(p0 - net.forward(e)[t]);
+      zDrops.push(z0 - net.blocks[net.blocks.length - 1].z[t]);
+    }
+    const want = occlusionMap(patches, zDrops, size);
+    const wantP = occlusionMap(patches, pDrops, size);
+    for (let i = 0; i < 784; i++) {
+      expect(r.occlusion[i]).toBeCloseTo(want[i], 5);
+      expect(r.occlusionProb[i]).toBeCloseTo(wantP[i], 6);
+    }
     expect(r.occlusionSize).toBe(size);
     expect(r.occlusionStride).toBe(stride);
   });
 
-  it('erasing ink of a confidently classified digit lowers its probability somewhere', () => {
+  it('erasing ink of a confidently classified digit lowers its score somewhere', () => {
     const net = trained(SMALL_CNN, 1200);
     const i = 0;
     const r = run(net, testDigit(i), testLabel(i));
     expect(r.pred).toBe(testLabel(i));
-    expect(Math.max(...r.occlusion)).toBeGreaterThan(0.01);
+    expect(Math.max(...r.occlusion)).toBeGreaterThan(0.1);
+  }, 30_000);
+
+  it('the logit map keeps its detail where the probability saturates (ATTR-5)', () => {
+    // A confident digit (p ≈ 1) and a rejected one (p ≈ 0): erasing a patch barely moves p, so a
+    // probability map would be noise stretched to full contrast. The logit still moves clearly.
+    const net = trained(SMALL_CNN, 1200);
+    const x = testDigit(0);
+    const label = testLabel(0);
+    const confident = run(net, x, label);
+    expect(confident.prob).toBeGreaterThan(0.98);
+    const rejectedTarget = Array.from(confident.probs.keys()).sort((a, b) => confident.probs[a] - confident.probs[b])[0];
+    const rejected = run(net, x, rejectedTarget);
+    expect(rejected.prob).toBeLessThan(1e-3);
+    for (const r of [confident, rejected]) {
+      const zMax = Math.max(...Array.from(r.occlusion, Math.abs));
+      const pMax = Math.max(...Array.from(r.occlusionProb, Math.abs));
+      expect(zMax, `target ${r.target}: erasing a patch moves the logit by a sizeable amount`).toBeGreaterThan(0.3);
+      expect(pMax, `target ${r.target}: but the probability barely`).toBeLessThan(0.05 * zMax);
+    }
   }, 30_000);
 });
 

@@ -41,30 +41,6 @@
   white-space: nowrap;
 }
 
-/* Progress lives in the status row and keeps its place while idle, so nothing jumps. */
-.embed-run {
-  display: inline-flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px 12px;
-  min-height: 18px;
-}
-
-.embed-run.is-idle {
-  visibility: hidden;
-}
-
-.embed-run .progress {
-  width: 160px;
-  flex: 0 0 auto;
-}
-
-.embed-run-text {
-  font: 500 12px/1.4 var(--mono);
-  font-variant-numeric: tabular-nums;
-  color: var(--ink-2);
-}
-
 .embed-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -79,7 +55,24 @@
 }
 
 .embed-plot {
+  position: relative;
   min-width: 0;
+}
+
+/* t-SNE's iteration and KL, laid over the top-left of the map while it runs (left/top set from
+   the plot frame in draw()), so the status row keeps one line and nothing below moves. */
+.embed-run-text {
+  position: absolute;
+  padding: 2px 6px;
+  font: 500 12px/1.4 var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-2);
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  pointer-events: none;
+}
+
+.embed-run-text.is-error {
+  color: var(--accent);
 }
 
 .embed-plot canvas {
@@ -116,10 +109,7 @@
 }
 
 .embed-preview-title {
-  font-size: 16px;
-  font-weight: 800;
-  letter-spacing: -0.01em;
-  line-height: 1.2;
+  overflow-wrap: anywhere;
 }
 
 .embed-preview-meta {

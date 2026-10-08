@@ -24,6 +24,8 @@ export interface Hit {
   /** Conv filters: row and column of the strongest position in the pre-pool map; −1 otherwise. */
   y: number;
   x: number;
+  /** The pre-activation behind `value` (the unit fires when it is above 0). */
+  z: number;
 }
 
 export interface UnitSummary {
@@ -33,8 +35,16 @@ export interface UnitSummary {
   /** Weakest responses first. */
   bottom: Hit[];
   mean: number;
-  /** Share of test digits with a response above 0. */
-  activeFraction: number;
+  /**
+   * How often the unit fires, where firing means a pre-activation z above 0 (a > 0 for ReLU,
+   * leaky ReLU, tanh and linear units; a > 0.5 for sigmoid):
+   * conv filter → the share of map positions that fire, averaged over the test digits;
+   * dense unit → the share of test digits that make it fire;
+   * output unit → the share of test digits predicted as this digit (its logit is the largest).
+   */
+  coverage: number;
+  /** Every scanned digit's response, ascending, for exact ranks (see `rankIn`). */
+  sorted: Float32Array;
   /** HIST_BINS equal-width bins over [lo, hi]. */
   hist: { lo: number; hi: number; counts: number[] };
   /** How many of the TOP_LABELS strongest digits carry each label 0–9. */
@@ -116,8 +126,18 @@ export function forwardTo(net: Network, x: Float32Array, block: number): void {
  * position in `pos`); dense hidden unit → its activation a_j; output unit → its logit z_k.
  * `pre` receives the matching pre-activation, used to break ties (several ReLU zeros).
  * Activations never decrease with z, so the arg-max of z is also an arg-max of a.
+ * `cover`, when given, receives how much of the unit fires for this input (see
+ * `UnitSummary.coverage`): the share of positions with z > 0 for a conv filter, 1 or 0 (z > 0)
+ * for a dense unit, and 1 for the output unit with the largest logit (the prediction), else 0.
  */
-export function responses(net: Network, block: number, values: Float32Array, pre: Float32Array, pos: Int32Array | null): void {
+export function responses(
+  net: Network,
+  block: number,
+  values: Float32Array,
+  pre: Float32Array,
+  pos: Int32Array | null,
+  cover: Float32Array | null = null,
+): void {
   const b = net.blocks[block];
   if (b.kind === 'conv') {
     const F = b.spec.filters;
@@ -126,18 +146,30 @@ export function responses(net: Network, block: number, values: Float32Array, pre
     for (let f = 0; f < F; f++) {
       const o = f * HW;
       let best = o;
-      for (let i = o + 1; i < o + HW; i++) if (z[i] > z[best]) best = i;
+      let on = z[o] > 0 ? 1 : 0;
+      for (let i = o + 1; i < o + HW; i++) {
+        if (z[i] > z[best]) best = i;
+        if (z[i] > 0) on++;
+      }
       values[f] = b.a[best];
       pre[f] = z[best];
       if (pos) pos[f] = best - o;
+      if (cover) cover[f] = on / HW;
     }
     return;
   }
   const out = block === net.blocks.length - 1;
-  for (let j = 0; j < b.spec.units; j++) {
+  const n = b.spec.units;
+  for (let j = 0; j < n; j++) {
     values[j] = out ? b.z[j] : b.a[j];
     pre[j] = b.z[j];
   }
+  if (!cover) return;
+  if (out) {
+    let best = 0;
+    for (let j = 1; j < n; j++) if (b.z[j] > b.z[best]) best = j;
+    for (let j = 0; j < n; j++) cover[j] = j === best ? 1 : 0;
+  } else for (let j = 0; j < n; j++) cover[j] = b.z[j] > 0 ? 1 : 0;
 }
 
 /** The response of one unit of `block` to input `x` (full forward pass; for the page's network). */
@@ -160,7 +192,7 @@ function checkBlock(net: Network, block: number): void {
   if (!Number.isInteger(block) || block < 0 || block >= net.blocks.length) throw new Error(`No layer ${block}`);
 }
 
-/** Per unit: strongest and weakest digits, mean, active share, histogram and top-50 labels. */
+/** Per unit: strongest and weakest digits, mean, coverage, sorted responses, histogram and top-50 labels. */
 export const topk: Job<TopkParams, TopkResult> = function* (ctx, p) {
   const { net, spec } = ctx;
   const block = p.block;
@@ -179,12 +211,15 @@ export const topk: Job<TopkParams, TopkResult> = function* (ctx, p) {
   const values = new Float32Array(U);
   const pre = new Float32Array(U);
   const pos = conv ? new Int32Array(U) : null;
+  const cover = new Float32Array(U);
+  const coverSum = new Float64Array(U);
 
   let last = now();
   for (let i = 0; i < N; i++) {
     ctx.image(i, x);
     forwardTo(net, x, block);
-    responses(net, block, values, pre, pos);
+    responses(net, block, values, pre, pos, cover);
+    for (let u = 0; u < U; u++) coverSum[u] += cover[u];
     resp.set(values, i * U);
     preAll.set(pre, i * U);
     if (posAll && pos) posAll.set(pos, i * U);
@@ -196,11 +231,12 @@ export const topk: Job<TopkParams, TopkResult> = function* (ctx, p) {
 
   const hit = (i: number, u: number): Hit => {
     const value = resp[i * U + u];
-    if (!posAll) return { index: i, value, box: null, y: -1, x: -1 };
+    const z = preAll[i * U + u];
+    if (!posAll) return { index: i, value, box: null, y: -1, x: -1, z };
     const at = posAll[i * U + u];
     const y = Math.floor(at / mapW);
     const xx = at % mapW;
-    return { index: i, value, box: receptiveBox(spec, block, y, xx, 'z'), y, x: xx };
+    return { index: i, value, box: receptiveBox(spec, block, y, xx, 'z'), y, x: xx, z };
   };
 
   const order = new Int32Array(N);
@@ -209,14 +245,15 @@ export const topk: Job<TopkParams, TopkResult> = function* (ctx, p) {
     let lo = Infinity;
     let hi = -Infinity;
     let sum = 0;
-    let active = 0;
+    const sorted = new Float32Array(N);
     for (let i = 0; i < N; i++) {
       const v = resp[i * U + u];
       if (v < lo) lo = v;
       if (v > hi) hi = v;
       sum += v;
-      if (v > 0) active++;
+      sorted[i] = v;
     }
+    sorted.sort();
     for (let i = 0; i < N; i++) order[i] = i;
     // Strongest first; ties (for example ReLU zeros) by pre-activation, then by index.
     order.sort((a, c) => resp[c * U + u] - resp[a * U + u] || preAll[c * U + u] - preAll[a * U + u] || a - c);
@@ -236,7 +273,7 @@ export const topk: Job<TopkParams, TopkResult> = function* (ctx, p) {
     const scale = HIST_BINS / (hi - lo);
     for (let i = 0; i < N; i++) counts[Math.min(HIST_BINS - 1, Math.max(0, Math.floor((resp[i * U + u] - lo) * scale)))]++;
 
-    units.push({ unit: u, top, bottom, mean: N ? sum / N : 0, activeFraction: N ? active / N : 0, hist: { lo, hi, counts }, labelCounts });
+    units.push({ unit: u, top, bottom, mean: N ? sum / N : 0, coverage: N ? coverSum[u] / N : 0, sorted, hist: { lo, hi, counts }, labelCounts });
     yield { done: N + u + 1, total: N + U };
   }
   return { block, kind: unitKind(net, block), count: N, k, units };
@@ -348,6 +385,85 @@ export const actmax: Job<ActmaxParams, ActmaxResult> = function* (ctx, p) {
   }
   return { block, kind: unitKind(net, block), steps, units: out };
 };
+
+/** Where a value falls among the scanned responses. */
+export interface Rank {
+  /** Responses strictly below, equal to, and strictly above the value. */
+  below: number;
+  tied: number;
+  above: number;
+  n: number;
+}
+
+/**
+ * Exact rank of `v` among the ascending responses `sorted` (float32 values; `v` is compared as a
+ * float32 too, so a test digit's own response ties with itself).
+ */
+export function rankIn(sorted: ArrayLike<number>, v: number): Rank {
+  const n = sorted.length;
+  if (Number.isNaN(v)) return { below: 0, tied: 0, above: 0, n };
+  const t = Math.fround(v);
+  // First index with sorted[i] >= t, then first with sorted[i] > t.
+  const bound = (strict: boolean) => {
+    let lo = 0;
+    let hi = n;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (strict ? sorted[mid] <= t : sorted[mid] < t) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  };
+  const lo = bound(false);
+  const hi = bound(true);
+  return { below: lo, tied: hi - lo, above: n - hi, n };
+}
+
+/** A share as a percentage that only reads 0% or 100% when it is exactly that. */
+export function sharePct(f: number, decimals = 0): string {
+  if (!(f > 0)) return '0%';
+  if (f >= 1) return '100%';
+  const step = 10 ** -decimals;
+  const p = f * 100;
+  if (p < step) return `<${step.toFixed(decimals)}%`;
+  if (p > 100 - step) return `>${(100 - step).toFixed(decimals)}%`;
+  return `${p.toFixed(decimals)}%`;
+}
+
+/**
+ * Plain-language rank against the test digits, for "This input: 0.42, <phrase>." Ties count
+ * when they cover at least 1% of the digits (for example a ReLU unit that is 0 for most of them).
+ */
+export function rankPhrase(r: Rank): string {
+  const { below, tied, above, n } = r;
+  if (!n) return 'with no test digits to compare';
+  if (below + tied + above !== n) return 'not comparable with the test digits';
+  const all = `${n.toLocaleString('en-US')} test digit${n === 1 ? '' : 's'}`;
+  const share = (k: number) => sharePct(k / n, 1);
+  if (tied === n) return `the same as all ${all}`;
+  if (tied > 1 && tied >= 0.01 * n) {
+    if (below === 0) return `tied with ${share(tied)} of the ${all} at the lowest response`;
+    if (above === 0) return `tied with ${share(tied)} of the ${all} at the highest response`;
+    return `higher than ${share(below)} of the ${all} and tied with another ${share(tied)}`;
+  }
+  const s = (k: number) => (k === 1 ? 's' : '');
+  if (above === 0) return tied ? `as high as the strongest of the ${all}` : `higher than all ${all}`;
+  if (below === 0) return tied ? `as low as the weakest of the ${all}` : `lower than all ${all}`;
+  if (above < 10) return `only ${above} of the ${all} respond${s(above)} more strongly`;
+  if (below < 10) return `only ${below} of the ${all} respond${s(below)} more weakly`;
+  return `higher than ${share(below)} of the ${all}`;
+}
+
+/** "fires at 23% of positions" (conv), "fires on 37% of digits" (dense), "predicted for 10% of digits" (output). */
+export function coveragePhrase(kind: UnitKind, f: number, decimals = 0): string {
+  const p = sharePct(f, decimals);
+  if (kind === 'conv') return `fires at ${p} of positions`;
+  if (kind === 'dense') return `fires on ${p} of digits`;
+  return `predicted for ${p} of digits`;
+}
+
+/** True when every one of `hits` leaves the unit off (pre-activation at or below 0). */
+export const allOff = (hits: Hit[]): boolean => hits.length > 0 && hits.every((h) => h.z <= 0);
 
 const plural = (d: number) => `${d}s`;
 

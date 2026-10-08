@@ -34,6 +34,7 @@ export interface Synced {
   request(): void;
   /** Recompute now, regardless of visibility or training state. */
   refreshNow(): void;
+
   /** Stamp of the result on screen, or null. */
   readonly shown: Stamp | null;
   /** True while the section is on screen (or close to it). */
@@ -60,6 +61,15 @@ export function syncedSection(root: HTMLElement, refresh: () => void, opts: { au
   const status = h('div', { class: 'synced-status' }, text, btn, progress);
   let shown: Stamp | null = null;
   let busy: Stamp | null = null;
+  // Short computations (live attribution while drawing) should not flash "Computing…".
+  let busyVisible = false;
+  let busyTimer: ReturnType<typeof setTimeout> | null = null;
+  const clearBusy = () => {
+    busy = null;
+    busyVisible = false;
+    if (busyTimer) clearTimeout(busyTimer);
+    busyTimer = null;
+  };
   let visible = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
 
@@ -72,8 +82,8 @@ export function syncedSection(root: HTMLElement, refresh: () => void, opts: { au
       text.textContent = 'Waiting for MNIST to load…';
       return;
     }
-    if (busy && stale()) {
-      text.textContent = shown ? `Updating to step ${fmtStep(busy.step)}…` : 'Computing…';
+    if (busy && (busyVisible || !shown)) {
+      text.textContent = shown && stale() ? `Updating to step ${fmtStep(busy.step)}…` : 'Computing…';
       return;
     }
     if (!shown) {
@@ -125,22 +135,30 @@ export function syncedSection(root: HTMLElement, refresh: () => void, opts: { au
   return {
     status,
     begin() {
+      clearBusy();
       busy = stampNow();
+      busyTimer = setTimeout(() => {
+        busyTimer = null;
+        busyVisible = true;
+        update();
+      }, 300);
       update();
       return busy;
     },
     done(stamp) {
       shown = stamp;
-      busy = null;
+      clearBusy();
       progress.hidden = true;
       update();
       request(); // the network may have moved on while this was computing
     },
     fail() {
-      busy = null;
+      clearBusy();
       progress.hidden = true;
       update();
+      request();
     },
+
     setProgress(f) {
       progress.hidden = f === null;
       if (f !== null) {

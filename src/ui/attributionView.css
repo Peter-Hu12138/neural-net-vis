@@ -11,21 +11,6 @@
   margin-bottom: 0;
 }
 
-.attr-busy {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  visibility: hidden;
-}
-
-.attr-busy.is-on {
-  visibility: visible;
-}
-
-.attr-busy .progress {
-  width: 96px;
-}
-
 .attr-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -93,7 +78,7 @@
 }
 
 .attr-tag {
-  font: 600 8.5px/1 var(--mono);
+  font: 600 9px/1 var(--mono);
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--ink-2);
@@ -133,10 +118,54 @@
 /* ── Panels ── */
 
 .attr-panels {
+  position: relative;
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 26px 20px;
   min-width: 0;
+}
+
+/* While a new target, input or network is computing, the old maps fade and a label says what is
+   coming. Both wait 200 ms, so quick runs (live drawing on a small network) never flicker. */
+.attr-panel {
+  transition: opacity 120ms ease;
+}
+
+.attr-panels.is-stale .attr-panel {
+  opacity: 0.35;
+  transition: opacity 200ms ease 200ms;
+}
+
+.attr-wait {
+  position: absolute;
+  top: 44px;
+  left: 50%;
+  z-index: 1;
+  transform: translateX(-50%);
+  margin: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--ink);
+  background: var(--surface);
+  color: var(--ink);
+  font: 500 12px/1.3 var(--mono);
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.attr-panels.is-waiting .attr-wait {
+  opacity: 1;
+  transition: opacity 200ms ease 200ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .attr-panel,
+  .attr-panels.is-stale .attr-panel,
+  .attr-wait,
+  .attr-panels.is-waiting .attr-wait {
+    transition-duration: 0s;
+  }
 }
 
 @media (max-width: 760px) {
@@ -163,20 +192,17 @@
   margin: 0;
 }
 
+/* Size and weight come from the shared .panel-title. */
 .attr-title {
-  margin: 0;
   padding-top: 6px;
   border-top: 1px solid var(--ink);
-  font-size: 14px;
-  font-weight: 700;
-  line-height: 1.25;
-  letter-spacing: -0.005em;
   align-self: end;
 }
 
 .attr-title .mono {
   font-weight: 500;
-  font-size: 12.5px;
+  font-size: 13px;
+  letter-spacing: 0;
   color: var(--ink-2);
 }
 
@@ -209,13 +235,10 @@
 
 .attr-text {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 8px;
   align-content: start;
   min-width: 0;
-}
-
-.attr-text .hint {
-  font-size: 12.5px;
 }
 
 .attr-check {

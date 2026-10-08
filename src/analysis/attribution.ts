@@ -1,4 +1,4 @@
-import type { Network } from '../nn/network';
+import type { Block, Network } from '../nn/network';
 import { CLASSES } from '../nn/types';
 import type { Job, Progress } from './protocol';
 
@@ -10,8 +10,14 @@ import type { Job, Progress } from './protocol';
  * - gradInput     x ⊙ g(x)
  * - integrated    x ⊙ mean_k g(α_k·x), α_k = (k + ½)/m: integrated gradients from a blank image,
  *                 midpoint Riemann sum. Its total should match z_t(x) − z_t(0) (completeness).
- * - occlusion     erase a size×size patch (set it to 0), record the drop in p_t; each pixel gets
- *                 the mean drop over the patches that cover it.
+ * - occlusion     erase a size×size patch (set it to 0), record the drop in z_t; each pixel gets
+ *                 the mean drop over the patches that cover it. The logit, like the other three
+ *                 maps, so all four share units; the probability saturates near 0 and 1, where
+ *                 erasing anything barely moves it. The drop in p_t is kept too, for tooltips.
+ *
+ * The gradients come from Network.inputGradient in its symmetric mode: blank MNIST pixels leave
+ * many units exactly on a kink (a ReLU at z = 0, a max-pool window of equal values), where the
+ * slope differs on either side; there it takes the average. `kinks` counts those units.
  */
 
 const SIDE = 28;
@@ -43,9 +49,16 @@ export interface AttributionResult {
   /** Σ integrated, and what it should equal: z_t(x) − z_t(0). */
   igSum: number;
   igExpected: number;
+  /** Σ |integrated|: the total size of the attributions, the scale for the completeness gap. */
+  igAbsSum: number;
   /** z_t of the blank image. */
   baseLogit: number;
+  /** Mean drop in z_t when a covering patch is erased. */
   occlusion: Float32Array;
+  /** The same for p_t. */
+  occlusionProb: Float32Array;
+  /** Units sitting exactly on a kink for this input (see above). */
+  kinks: Kinks;
   /** The settings actually used, after clamping. */
   igSteps: number;
   occlusionSize: number;
@@ -53,6 +66,13 @@ export interface AttributionResult {
   /** Number of patches tried, and how many needed a forward pass (the rest were already blank). */
   patches: number;
   patchesEvaluated: number;
+}
+
+export interface Kinks {
+  /** ReLU / leaky ReLU units with z exactly 0. */
+  relu: number;
+  /** Max-pool windows whose maximum is shared by two or more live entries. */
+  pool: number;
 }
 
 export const DEFAULT_IG_STEPS = 32;
@@ -158,12 +178,71 @@ export function occlusionMap(patches: Patch[], drops: ArrayLike<number>, size: n
   return out;
 }
 
-/** |a − b| relative to |b|; 0 when both are (near) zero. */
+/** |a − b| relative to |b|; 0 when both are (near) zero. Blows up as b → 0: see completenessGap. */
 export function relativeGap(a: number, b: number): number {
   const d = Math.abs(a - b);
   const s = Math.abs(b);
   if (s < 1e-9) return d < 1e-9 ? 0 : Infinity;
   return d / s;
+}
+
+export interface CompletenessGap {
+  /** |Σ IG − (z(x) − z(blank))| */
+  diff: number;
+  /** diff relative to `ref` (never infinite). */
+  rel: number;
+  /** 'ig': Σ|IG|, the total size of the attributions; 'score': |z(x) − z(blank)|, the larger. */
+  ref: 'ig' | 'score';
+}
+
+/**
+ * How far integrated gradients are from adding up to the score change. Measured against Σ|IG|
+ * (or |z(x) − z(blank)| if larger), not the score change alone: for a digit the network neither
+ * likes nor rejects, large positive and negative attributions cancel, z(x) − z(blank) is close to
+ * 0 and a relative gap would read hundreds of percent although the sum is accurate.
+ */
+export function completenessGap(igSum: number, igExpected: number, igAbsSum: number): CompletenessGap {
+  const diff = Math.abs(igSum - igExpected);
+  const score = Math.abs(igExpected);
+  const ref = igAbsSum >= score ? 'ig' : 'score';
+  const s = Math.max(igAbsSum, score);
+  // s = 0 means no attribution and no score change, so diff = 0 too.
+  return { diff, rel: s > 0 ? diff / s : 0, ref };
+}
+
+/** Counts the units of the last forward pass that sit exactly on a kink (hidden blocks only). */
+export function countKinks(net: Network): Kinks {
+  let relu = 0;
+  let pool = 0;
+  for (let k = 0; k < net.blocks.length - 1; k++) {
+    const b: Block = net.blocks[k];
+    const act = b.spec.act;
+    if (act === 'relu' || act === 'leaky') for (let i = 0; i < b.z.length; i++) if (b.z[i] === 0) relu++;
+    if (b.kind !== 'conv' || !b.spec.pool) continue;
+    const { c: F, h: H, w: W } = b.zShape;
+    const { h: PH, w: PW } = b.outShape;
+    const a = b.a;
+    for (let f = 0; f < F; f++) {
+      for (let py = 0; py < PH; py++) {
+        for (let px = 0; px < PW; px++) {
+          const i0 = f * H * W + 2 * py * W + 2 * px;
+          const idx = [i0, i0 + 1, i0 + W, i0 + W + 1];
+          let m = -Infinity;
+          for (const j of idx) if (a[j] > m) m = a[j];
+          let ties = 0;
+          let live = false;
+          for (const j of idx) {
+            if (a[j] !== m) continue;
+            ties++;
+            // A ReLU tie of dead units (z < 0) has slope 0 on both sides: no kink.
+            if (act !== 'relu' || b.z[j] >= 0) live = true;
+          }
+          if (ties > 1 && live) pool++;
+        }
+      }
+    }
+  }
+  return { relu, pool };
 }
 
 const clampInt = (v: number | undefined, lo: number, hi: number, dflt: number) =>
@@ -189,6 +268,7 @@ export function* attribution(net: Network, params: AttributionParams): Generator
 
   // 1. The gradient at x.
   const at = logitGradient(net, x, target);
+  const kinks = countKinks(net); // the network still holds the activations of x
   let pred = 0;
   for (let j = 1; j < CLASSES; j++) if (at.probs[j] > at.probs[pred]) pred = j;
   const saliency = saliencyOf(at.grad);
@@ -210,14 +290,17 @@ export function* attribution(net: Network, params: AttributionParams): Generator
   }
   const integrated = new Float32Array(PIXELS);
   let igSum = 0;
+  let igAbsSum = 0;
   for (let i = 0; i < PIXELS; i++) {
     const v = (x[i] * acc[i]) / m;
     integrated[i] = v;
     igSum += v;
+    igAbsSum += Math.abs(v);
   }
 
   // 4. Occlusion: erase one patch at a time.
   const drops = new Float64Array(patches.length);
+  const probDrops = new Float64Array(patches.length);
   const work = x.slice();
   const saved = new Float32Array(size * size);
   for (let k = 0; k < patches.length; k++) {
@@ -232,7 +315,8 @@ export function* attribution(net: Network, params: AttributionParams): Generator
         work[o + c] = 0;
       }
     }
-    drops[k] = at.prob - net.forward(work)[target];
+    probDrops[k] = at.prob - net.forward(work)[target];
+    drops[k] = at.logit - net.blocks[last].z[target];
     for (let r = 0; r < h; r++) {
       const o = (p.y + r) * SIDE + p.x;
       for (let c = 0; c < w; c++) work[o + c] = saved[r * size + c];
@@ -240,6 +324,7 @@ export function* attribution(net: Network, params: AttributionParams): Generator
     yield { done: ++done, total };
   }
   const occlusion = occlusionMap(patches, drops, size);
+  const occlusionProb = occlusionMap(patches, probDrops, size);
 
   return {
     target,
@@ -252,8 +337,11 @@ export function* attribution(net: Network, params: AttributionParams): Generator
     integrated,
     igSum,
     igExpected: at.logit - baseLogit,
+    igAbsSum,
     baseLogit,
     occlusion,
+    occlusionProb,
+    kinks,
     igSteps: m,
     occlusionSize: size,
     occlusionStride: stride,
@@ -269,6 +357,57 @@ export function computeAttribution(net: Network, params: AttributionParams): Att
     const r = gen.next();
     if (r.done) return r.value;
   }
+}
+
+// ── Text for the view (pure, so the unit tests can read it) ──
+
+const MINUS = '−';
+
+/** Three significant digits, a true minus sign (exponents too), '+' on request; never "−0". */
+export function sig(v: number, plus = false): string {
+  if (!Number.isFinite(v)) return '–';
+  if (v === 0) return '0';
+  const a = Math.abs(v);
+  const body = a >= 1000 ? a.toFixed(0) : a >= 0.001 ? String(Number(a.toPrecision(3))) : a.toExponential(1).replace('e-', `e${MINUS}`);
+  return (v < 0 ? MINUS : plus ? '+' : '') + body;
+}
+
+/** Six significant digits for tooltips, with a true minus sign. */
+export function exact(v: number): string {
+  if (!Number.isFinite(v)) return '–';
+  if (v === 0) return '0';
+  return String(Number(v.toPrecision(6))).replace(/-/g, MINUS);
+}
+
+/** "0.3%", "<0.1%", "12%" */
+export function percentText(fraction: number): string {
+  const p = fraction * 100;
+  return `${p < 0.05 ? '<0.1' : p < 10 ? p.toFixed(1) : p.toFixed(0)}%`;
+}
+
+/**
+ * The completeness line under the integrated-gradients map, in three clauses the view may wrap
+ * between: "Σ IG = 8.39;" "z(x) − z(blank) = 8.43" "(off by 0.0389, 0.3% of Σ|IG|)".
+ */
+export function completenessText(r: Pick<AttributionResult, 'igSum' | 'igExpected' | 'igAbsSum'>): { sum: string; expected: string; gap: string; title: string } {
+  const g = completenessGap(r.igSum, r.igExpected, r.igAbsSum);
+  const ref = g.ref === 'ig' ? 'Σ|IG|' : `|z(x) ${MINUS} z(blank)|`;
+  return {
+    sum: `Σ IG = ${sig(r.igSum)};`,
+    expected: `z(x) ${MINUS} z(blank) = ${sig(r.igExpected)}`,
+    gap: g.diff === 0 ? '(a match)' : `(off by ${sig(g.diff)}, ${percentText(g.rel)} of ${ref})`,
+    title:
+      `Completeness: integrated gradients should add up to the change in the score from a blank image to this one. ` +
+      `Σ IG = ${exact(r.igSum)}, z(x) ${MINUS} z(blank) = ${exact(r.igExpected)}, Σ|IG| = ${exact(r.igAbsSum)}. ` +
+      `The gap is measured against Σ|IG|, the total size of all the pixel attributions, so it stays meaningful when positive and negative attributions cancel out.`,
+  };
+}
+
+/** Saliency hint addition when the input leaves units on a kink; '' when there are none. */
+export function kinkText(k: Kinks): string {
+  const kinds = [k.relu ? 'ReLUs at exactly 0' : '', k.pool ? 'tied max-pool windows' : ''].filter(Boolean);
+  if (!kinds.length) return '';
+  return `Where the input leaves ${kinds.join(' and ')} (mostly the blank background), brightening and darkening a pixel differ; the map shows the average slope.`;
 }
 
 const attributionJob: Job<AttributionParams, AttributionResult> = (ctx, params) => attribution(ctx.net, params);

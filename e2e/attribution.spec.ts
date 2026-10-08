@@ -71,14 +71,29 @@ const colours = (page: Page, id: string) =>
     return set.size;
   });
 
-/** Parses "Σ IG = 4.21; z(x) − z(blank) = 4.30 (2.1% apart)". */
+/** Parses "Σ IG = 8.39; z(x) − z(blank) = 8.43 (off by 0.0389, 0.3% of Σ|IG|)". */
 async function completeness(page: Page) {
   const text = (await page.locator('#attr-check').textContent())!;
-  const m = text.match(/Σ IG = (−?[\d.]+); z\(x\) − z\(blank\) = (−?[\d.]+) \((.+)\)/);
+  const m = text.match(/^Σ IG = (\S+); z\(x\) − z\(blank\) = (\S+) \((.+)\)$/);
   expect(m, text).not.toBeNull();
-  const num = (s: string) => Number(s.replace('−', '-'));
+  const num = (s: string) => Number(s.replace(/−/g, '-'));
   return { sum: num(m![1]), expected: num(m![2]), gap: m![3] };
 }
+
+/**
+ * Height of the status row and the top of what sits below it; with `recompute`, measured right
+ * after clicking Recompute, in the same task, while the job runs.
+ */
+const statusLayout = (page: Page, recompute = false) =>
+  page.evaluate((click) => {
+    const r = document.getElementById('attr-root')!;
+    if (click) r.querySelector<HTMLButtonElement>('.synced-status button')!.click();
+    return {
+      statusHeight: r.querySelector('.synced-status')!.getBoundingClientRect().height,
+      layoutTop: r.querySelector('.attr-layout')!.getBoundingClientRect().top,
+      state: r.dataset.state,
+    };
+  }, recompute);
 
 test('explains the prediction four ways, pins a chosen digit and follows the input', async ({ page }) => {
   await open(page);
@@ -106,13 +121,38 @@ test('explains the prediction four ways, pins a chosen digit and follows the inp
     await expect(page.locator(`[data-panel="${key}"] .attr-scale`)).toHaveText(/^−[\d.e−]+\+[\d.e−]+$/);
   }
   await expect(page.locator('[data-panel="input"] .attr-scale')).toHaveText('01');
-  await expect(page.locator('[data-panel="occlusion"] .hint')).toContainText(`Erases a 6×6 patch at a time: red where that lowers the probability of ${pred}`);
+  // Occlusion explains the logit like the other three maps, so it does not saturate: erasing part
+  // of a confidently classified 7 moves its score by a clear amount.
+  await expect(page.locator('[data-panel="occlusion"] .hint')).toContainText(`Erases a 6×6 patch at a time: red where that lowers the score for ${pred}`);
+  const occMax = Number((await page.locator('[data-panel="occlusion"] .attr-scale span').last().textContent())!.replace('+', ''));
+  expect(occMax).toBeGreaterThan(0.1);
+  // Small CNN over a blank background: tied max-pool windows, and the hint says what that means.
+  await expect(page.locator('[data-panel="saliency"] .hint')).toContainText('Where the input leaves tied max-pool windows (mostly the blank background)');
+  await expect(page.locator('[data-panel="saliency"] .hint')).toContainText('the map shows the average slope.');
 
-  // Completeness: the integrated gradients add up to z(x) − z(blank), within 5%.
+  // Completeness: the integrated gradients add up to z(x) − z(blank), within 5%, and the line says
+  // how far off they are and relative to what.
   const c = await completeness(page);
   expect(Math.abs(c.expected)).toBeGreaterThan(0.5);
   expect(Math.abs(c.sum - c.expected) / Math.abs(c.expected)).toBeLessThan(0.05);
-  expect(c.gap).toMatch(/apart|match/);
+  expect(c.gap).toMatch(/^off by [\d.e−]+, (<0\.1|\d+(\.\d)?)% of Σ\|IG\|$/);
+  await expect(page.locator('#attr-check')).toHaveAttribute('title', /Σ\|IG\| = [\d.]+\. The gap is measured against Σ\|IG\|/);
+
+  // One type scale with the other sections: 16/800 panel titles, 13 px hints, tags ≥ 9 px.
+  const type = await page.evaluate(() => {
+    const f = (sel: string) => getComputedStyle(document.querySelector(sel)!);
+    return { title: [f('#attr-root .attr-title').fontSize, f('#attr-root .attr-title').fontWeight], hint: f('#attr-root .attr-text .hint').fontSize, tag: f('#attr-root .attr-tag').fontSize };
+  });
+  expect(type).toEqual({ title: ['16px', '800'], hint: '13px', tag: '9px' });
+
+  // The shared status row is one 28 px line, busy or not, and nothing below it moves.
+  const idle = await statusLayout(page);
+  const busy = await statusLayout(page, true);
+  expect(idle.statusHeight).toBe(28);
+  expect(busy).toEqual({ state: 'busy', statusHeight: 28, layoutTop: idle.layoutTop });
+  await expect(page.locator('#attr-root .synced-progress')).toBeVisible();
+  await resultFor(page, /^test:0\|\d$/);
+  await expect(page.locator('#attr-root .synced-progress')).toBeHidden();
 
   // Hover: row, column, pixel value and the attribution of that pixel.
   const ig = (await page.locator('#attr-map-integrated').boundingBox())!;
@@ -125,16 +165,33 @@ test('explains the prediction four ways, pins a chosen digit and follows the inp
   const occ = (await page.locator('#attr-map-occlusion').boundingBox())!;
   await page.mouse.move(occ.x + cell * 3.5, occ.y + cell * 20.5);
   await expect(page.locator('#tip')).toContainText('Row 20, column 3');
+  // The map is in logit units; the tooltip also gives the (saturating) probability change.
+  await expect(page.locator('#tip')).toContainText(new RegExp(`Mean drop in z${'₀₁₂₃₄₅₆₇₈₉'[pred]} [+−]?[\\d.]`));
   await expect(page.locator('#tip')).toContainText(`Mean drop in p(${pred})`);
   await page.mouse.move(ig.x + cell * 14.5, ig.y + cell * 12.5);
   await shot(page, '12-attribution-light.png');
   await page.mouse.move(0, 0);
   await expect(page.locator('#tip')).toBeHidden();
 
-  // Pick another digit: the maps explain it instead, and the line names its probability.
+  // Pick another digit: the chip and the line switch at once, while the maps, still for the old
+  // digit, fade and say what they are waiting for (the fade itself waits 200 ms, against flicker).
   const other = (pred + 3) % 10;
-  await page.click(`#attr-target-${other}`);
+  const during = await page.evaluate((d) => {
+    document.getElementById(`attr-target-${d}`)!.click();
+    const grid = document.querySelector('#attr-root .attr-panels')!;
+    return {
+      stale: grid.classList.contains('is-stale'),
+      waiting: grid.classList.contains('is-waiting'),
+      busy: grid.getAttribute('aria-busy'),
+      label: document.getElementById('attr-wait')!.textContent,
+      key: document.getElementById('attr-root')!.dataset.resultKey,
+      pressed: document.getElementById(`attr-target-${d}`)!.getAttribute('aria-pressed'),
+    };
+  }, other);
+  expect(during).toEqual({ stale: true, waiting: true, busy: 'true', label: `Updating for digit ${other}…`, key: `test:0|${pred}`, pressed: 'true' });
   await resultFor(page, new RegExp(`^test:0\\|${other}$`));
+  await expect(page.locator('#attr-root .attr-panels')).not.toHaveClass(/is-stale|is-waiting/);
+  await expect(page.locator('#attr-root .attr-panels')).toHaveAttribute('aria-busy', 'false');
   await expect(page.locator('#attr-pred')).toHaveText(new RegExp(`^Predicted ${pred} at [\\d.]+%; explaining digit ${other} \\([\\d.]+%\\)$`));
   await expect(page.locator(`#attr-target-${other}`)).toHaveAttribute('aria-pressed', 'true');
   await expect(page.locator(`#attr-target-${pred}`)).toHaveAttribute('aria-pressed', 'false');
@@ -146,6 +203,13 @@ test('explains the prediction four ways, pins a chosen digit and follows the inp
   await page.waitForFunction((s) => (window as unknown as { raster: Raster }).raster.store.weightsStep > s, step);
   await expect(page.locator('#attr-root .synced-status')).toContainText(`Based on the weights at step ${(step + 1).toLocaleString('en-US')}.`);
   await resultFor(page, new RegExp(`^test:0\\|${other}$`));
+
+  // ...and re-selecting the same input (its thumb in 02 Network, already pressed) keeps it.
+  await page.locator('#network button.thumb[title="Test digit #0 (a 7)"]').click();
+  await page.locator('#attribution').scrollIntoViewIfNeeded();
+  await resultFor(page, new RegExp(`^test:0\\|${other}$`));
+  await expect(page.locator(`#attr-target-${other}`)).toHaveAttribute('aria-pressed', 'true');
+  await expect(root(page)).toHaveAttribute('data-target', String(other));
 
   // ...but a new input resets it to the prediction. Swap the input while the section is on screen.
   await raster(page, (r) => {
@@ -216,10 +280,68 @@ test('follows the drawing pad, and says so when the input is blank', async ({ pa
   await page.locator('#attribution').scrollIntoViewIfNeeded();
   await expect(page.locator('#attr-notice')).toBeVisible({ timeout: 30_000 });
   await expect(page.locator('#attr-notice')).toContainText('The input is blank');
-  await expect(page.locator('#attr-check')).toHaveText('Σ IG = 0.00; z(x) − z(blank) = 0.00 (a match)');
+  await expect(page.locator('#attr-check')).toHaveText('Σ IG = 0; z(x) − z(blank) = 0 (a match)');
   for (const key of ['gradInput', 'integrated', 'occlusion']) {
     await expect(page.locator(`[data-panel="${key}"] .attr-scale`)).toHaveText('00');
   }
+});
+
+test('a new network clears the maps at once; an invalid one waits, keeping the pick', async ({ page }) => {
+  await open(page);
+  await page.locator('#attribution').scrollIntoViewIfNeeded();
+  await resultFor(page, /^test:0\|\d$/);
+  await page.click('#attr-target-3');
+  await resultFor(page, /^test:0\|3$/);
+  expect(await colours(page, 'attr-map-saliency')).toBeGreaterThan(8);
+
+  /** Clicks a preset in 01 without scrolling there, and reads section 10 in the same task. */
+  const preset = (name: string) =>
+    page.evaluate((n) => {
+      const b = Array.from(document.querySelectorAll<HTMLButtonElement>('.presets button')).find((e) => e.textContent === n)!;
+      b.click();
+      const r = document.getElementById('attr-root')!;
+      const c = document.getElementById('attr-map-saliency') as HTMLCanvasElement;
+      const d = c.getContext('2d')!.getImageData(0, 0, c.width, c.height).data;
+      const set = new Set<number>();
+      for (let i = 0; i < d.length; i += 4) set.add((d[i] << 16) | (d[i + 1] << 8) | d[i + 2]);
+      return { key: r.dataset.resultKey, colours: set.size, pred: document.getElementById('attr-pred')!.textContent, notice: document.getElementById('attr-notice')!.hidden };
+    }, name);
+
+  // MLP: the Small CNN's maps go at once; the line already shows the MLP's prediction; the pick stays.
+  const mlp = await preset('MLP');
+  expect(mlp.key).toBe('');
+  expect(mlp.colours).toBeLessThanOrEqual(3);
+  expect(mlp.pred).toMatch(/^Predicted \d at [\d.]+%; explaining digit 3( \([\d.]+%\))?$/);
+  await expect(page.locator('#attr-map-saliency')).toHaveAttribute('aria-label', 'Saliency: not computed yet');
+  await resultFor(page, /^test:0\|3$/);
+  await expect(page.locator('#attr-root .synced-status')).toContainText('Based on the weights at step 0.');
+  expect(await colours(page, 'attr-map-saliency')).toBeGreaterThan(8);
+  // A plain dense ReLU network on this digit has no kinks to explain.
+  await expect(page.locator('[data-panel="saliency"] .hint')).toHaveText('How strongly the score for 3 reacts to a small change in each pixel, in either direction.');
+
+  // An invalid architecture: no maps, a notice, and a pick waits for a fix instead of claiming a result.
+  await raster(page, (r) => {
+    (r.store as unknown as { spec: unknown }).spec = [
+      { kind: 'dense', units: 32, act: 'relu' },
+      { kind: 'conv', filters: 4, kernel: 3, act: 'relu', pool: false },
+    ];
+    r.store.emit('model');
+  });
+  await expect(page.locator('#attr-notice')).toHaveText('Fix the architecture in 01 to see attributions.');
+  await expect(root(page)).toHaveAttribute('data-result-key', '');
+  expect(await colours(page, 'attr-map-integrated')).toBeLessThanOrEqual(3);
+  await expect(page.locator('#attr-pred')).toHaveText('Will explain digit 3 once the architecture is fixed.');
+  await page.click('#attr-target-5');
+  await expect(page.locator('#attr-pred')).toHaveText('Will explain digit 5 once the architecture is fixed.');
+  await expect(page.locator('#attr-target-5')).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('#attr-target-3')).toHaveAttribute('aria-pressed', 'false');
+  await expect(root(page)).toHaveAttribute('data-state', 'idle');
+
+  // A valid preset: the notice goes at once, and the waiting pick is explained.
+  const fixed = await preset('Small CNN');
+  expect(fixed.notice).toBe(true);
+  expect(fixed.pred).toMatch(/explaining digit 5/);
+  await resultFor(page, /^test:0\|5$/);
 });
 
 test('390 px phone screen: panels wrap two per row, no sideways scrolling', async ({ page }) => {
@@ -240,6 +362,12 @@ test('390 px phone screen: panels wrap two per row, no sideways scrolling', asyn
   const w = await page.locator('#attr-map-integrated').evaluate((c) => c.getBoundingClientRect().width);
   expect(w).toBeGreaterThanOrEqual(112);
   await expect(page.locator('#attr-pred')).toBeVisible();
+  // The status row stays one 28 px line on a phone too, also while computing.
+  const idle = await statusLayout(page);
+  const busy = await statusLayout(page, true);
+  expect(idle.statusHeight).toBe(28);
+  expect(busy).toEqual({ state: 'busy', statusHeight: 28, layoutTop: idle.layoutTop });
+  await resultFor(page, /^test:0\|\d$/);
   await shot(page, '12-attribution-phone.png');
 
   // Tablet and laptop widths: three, then five panels per row, and nothing in the section sticks out.

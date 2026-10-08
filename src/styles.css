@@ -11,8 +11,9 @@
   --neg: #1747d1;
   --on-accent: #ffffff;
   /* Digit identity in scatter plots, drawn as numeral glyphs (the numeral carries identity, colour
-     is secondary): eight validated hues for 0–7 (no red, which marks state), two neutrals for 8–9.
-     Every token clears 4.5:1 against --surface in its theme. */
+     is secondary): eight hues for 0–7 (no red, which marks state), two neutrals for 8–9. Every token
+     clears 4.5:1 against --surface; every pair of hues is ≥ 15 ΔE (OKLab×100) apart and ≥ 23 from
+     --accent. 7 (plum / pink) sits slightly outside the usual fill lightness band to stay distinct. */
   --cat-0: #1f6fd0;
   --cat-1: #b8501a;
   --cat-2: #11805a;
@@ -20,7 +21,7 @@
   --cat-4: #c2447a;
   --cat-5: #1c7a1c;
   --cat-6: #4a3aa7;
-  --cat-7: #985a12;
+  --cat-7: #820057;
   --cat-8: #3f3f3b;
   --cat-9: #6e6e67;
   --sans: 'Archivo', 'Helvetica Neue', Helvetica, Arial, sans-serif;
@@ -48,7 +49,7 @@
     --cat-4: #d55181;
     --cat-5: #3aae4e;
     --cat-6: #9085e9;
-    --cat-7: #c48633;
+    --cat-7: #fd8de4;
     --cat-8: #c6c6be;
     --cat-9: #8d8d85;
     color-scheme: dark;
@@ -63,7 +64,7 @@
   --cat-4: #d55181;
   --cat-5: #3aae4e;
   --cat-6: #9085e9;
-  --cat-7: #c48633;
+  --cat-7: #fd8de4;
   --cat-8: #c6c6be;
   --cat-9: #8d8d85;
   --bg: #0e0e0d;

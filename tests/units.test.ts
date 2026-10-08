@@ -2,9 +2,26 @@ import { readFileSync } from 'node:fs';
 import { inflateSync } from 'node:zlib';
 import { describe as suite, expect, it } from 'vitest';
 import type { JobContext, Progress } from '../src/analysis/protocol';
-import { receptiveBox, receptiveSize, type Box } from '../src/analysis/receptive';
-import { actmax, forwardTo, HIST_BINS, jobs, labelSummary, topk, unitResponse, type ActmaxPartial, type ActmaxResult, type TopkResult } from '../src/analysis/units';
+import { centreFieldSize, cropBox, receptiveBox, receptiveSize, WHOLE_IMAGE, type Box } from '../src/analysis/receptive';
+import {
+  actmax,
+  allOff,
+  coveragePhrase,
+  forwardTo,
+  HIST_BINS,
+  jobs,
+  labelSummary,
+  rankIn,
+  rankPhrase,
+  sharePct,
+  topk,
+  unitResponse,
+  type ActmaxPartial,
+  type ActmaxResult,
+  type TopkResult,
+} from '../src/analysis/units';
 import { Network } from '../src/nn/network';
+import { Optimizer } from '../src/nn/optim';
 import { Rng } from '../src/nn/rng';
 import type { LayerSpec } from '../src/nn/types';
 import { PRESETS } from '../src/store';
@@ -125,6 +142,37 @@ suite('receptiveBox', () => {
     expect(receptiveBox(SMALL_CNN, 3, 0, 0)).toBeNull();
     expect(receptiveSize(SMALL_CNN, 2)).toBe(28);
     expect(receptiveSize(SMALL_CNN, 3)).toBe(28);
+    expect(centreFieldSize(SMALL_CNN, 2)).toBe(28);
+    expect(cropBox(SMALL_CNN, 2, 0, 0)).toBeNull();
+  });
+
+  it('deep stacks: the field shown and cropped never exceeds the 28×28 image (U6)', () => {
+    const conv = (kernel: 3 | 5, pool: boolean): LayerSpec => ({ kind: 'conv', filters: 2, kernel, act: 'relu', pool });
+    const deepA = [conv(3, true), conv(5, true), conv(3, true), conv(5, false)];
+    const deepB = [conv(3, true), conv(3, true), conv(3, true), conv(3, true)];
+    // The nominal field outgrows the image: 58 and 38 pixels.
+    expect(receptiveSize(deepA, 3)).toBe(58);
+    expect(receptiveSize(deepB, 3)).toBe(38);
+    for (const spec of [deepA, deepB]) {
+      // What the centre unit really sees is the whole image, and crops are the image itself.
+      expect(centreFieldSize(spec, 3)).toBe(28);
+      const map = 3; // 28 → 14 → 7 → 3
+      for (let y = 0; y < map; y++) for (let x = 0; x < map; x++) expect(cropBox(spec, 3, y, x)).toEqual(WHOLE_IMAGE);
+    }
+    // Shallower layers keep their nominal, same-size crops (blank past the edge).
+    expect(cropBox(SMALL_CNN, 1, 0, 0)).toEqual(box(-3, 4, -3, 4));
+    expect(cropBox(SMALL_CNN, 1, 5, 5)).toEqual(box(7, 14, 7, 14));
+    expect(centreFieldSize(SMALL_CNN, 1)).toBe(8);
+    expect(centreFieldSize(LENET, 1)).toBe(14);
+    // Every crop of every buildable layer is at most 28 pixels wide.
+    for (const spec of [SMALL_CNN, LENET, deepA, deepB]) {
+      spec.forEach((l, block) => {
+        if (l.kind !== 'conv') return;
+        const crop = cropBox(spec, block, 0, 0)!;
+        expect(crop.y1 - crop.y0 + 1).toBeLessThanOrEqual(28);
+        expect(centreFieldSize(spec, block)).toBeLessThanOrEqual(28);
+      });
+    }
   });
 
   /**
@@ -219,26 +267,39 @@ suite('receptiveBox', () => {
   });
 });
 
-/** Every unit's response to every test digit, computed the slow, obvious way. */
+/**
+ * Every unit's response to every test digit, computed the slow, obvious way, plus how often each
+ * unit fires: conv → mean share of positions with z > 0; dense → share of digits with z > 0;
+ * output → share of digits predicted as this digit.
+ */
 function bruteResponses(net: Network, block: number, n: number) {
   const b = net.blocks[block];
   const out = block === net.blocks.length - 1;
   const U = b.kind === 'conv' ? b.spec.filters : b.spec.units;
   const r: number[][] = Array.from({ length: U }, () => []);
+  const coverage = new Array<number>(U).fill(0);
   const x = new Float32Array(784);
   for (let i = 0; i < n; i++) {
     for (let j = 0; j < 784; j++) x[j] = data.testX[i * 784 + j] / 255;
-    net.forward(x);
+    const pred = net.predict(x);
     for (let u = 0; u < U; u++) {
       if (b.kind === 'conv') {
         const HW = b.zShape.h * b.zShape.w;
         let m = -Infinity;
-        for (let q = 0; q < HW; q++) m = Math.max(m, b.a[u * HW + q]);
+        let on = 0;
+        for (let q = 0; q < HW; q++) {
+          m = Math.max(m, b.a[u * HW + q]);
+          if (b.z[u * HW + q] > 0) on++;
+        }
         r[u].push(m);
-      } else r[u].push(out ? b.z[u] : b.a[u]);
+        coverage[u] += on / HW / n;
+      } else {
+        r[u].push(out ? b.z[u] : b.a[u]);
+        coverage[u] += (out ? pred === u : b.z[u] > 0) ? 1 / n : 0;
+      }
     }
   }
-  return r;
+  return Object.assign(r, { coverage });
 }
 
 suite('topk job', () => {
@@ -268,7 +329,9 @@ suite('topk job', () => {
         });
         u.bottom.forEach((hit, i) => expect(hit.value).toBeCloseTo(sorted[n - 1 - i], 5));
         expect(u.mean).toBeCloseTo(r.reduce((a, b) => a + b, 0) / n, 4);
-        expect(u.activeFraction).toBeCloseTo(r.filter((v) => v > 0).length / n, 6);
+        expect(u.coverage).toBeCloseTo(brute.coverage[u.unit], 6);
+        expect(u.sorted).toBeInstanceOf(Float32Array);
+        expect(Array.from(u.sorted)).toEqual([...r].map(Math.fround).sort((a, b) => a - b));
         expect(u.hist.counts).toHaveLength(HIST_BINS);
         expect(u.hist.counts.reduce((a, b) => a + b, 0)).toBe(n);
         expect(u.hist.lo).toBeLessThanOrEqual(sorted[n - 1]);
@@ -299,6 +362,7 @@ suite('topk job', () => {
         expect(hit.box).toEqual(receptiveBox(SMALL_CNN, 1, hit.y, hit.x, 'z'));
         const x = context(probe).image(hit.index);
         const r = unitResponse(probe, 1, u.unit, x);
+        expect(hit.z).toBeCloseTo(probe.blocks[1].z[u.unit * 196 + hit.y * 14 + hit.x], 6);
         expect(r.value).toBeCloseTo(hit.value, 6);
         expect([r.y, r.x]).toEqual([hit.y, hit.x]);
         // The value at that position is the filter's activation there.
@@ -476,6 +540,174 @@ it('results survive structured cloning', () => {
   const a = drain(actmax(context(net), { block: 1, units: [0], steps: 4 })).result;
   expect(structuredClone(t) as TopkResult).toEqual(t);
   expect((structuredClone(a) as ActmaxResult).units[0].x).toBeInstanceOf(Float32Array);
+});
+
+/** A few Adam steps on the first test digits: enough to move every weight. */
+function train(net: Network, steps: number, from = 0) {
+  const opt = new Optimizer(net, 'adam', 0.003);
+  const x = new Float32Array(784);
+  for (let s = 0; s < steps; s++) {
+    net.zeroGrad();
+    for (let b = 0; b < 16; b++) {
+      const i = (from + s * 16 + b) % 2000;
+      for (let j = 0; j < 784; j++) x[j] = data.testX[i * 784 + j] / 255;
+      net.forward(x);
+      net.backward(data.testY[i]);
+    }
+    opt.step(1 / 16);
+  }
+}
+
+suite('ranks against the scan (U1, U2)', () => {
+  it('rankIn counts lower, equal and higher responses exactly', () => {
+    const sorted = Float32Array.from([0, 0, 0, 0, 0.5, 1, 1, 2]);
+    expect(rankIn(sorted, 0)).toEqual({ below: 0, tied: 4, above: 4, n: 8 });
+    expect(rankIn(sorted, 0.25)).toEqual({ below: 4, tied: 0, above: 4, n: 8 });
+    expect(rankIn(sorted, 1)).toEqual({ below: 5, tied: 2, above: 1, n: 8 });
+    expect(rankIn(sorted, 3)).toEqual({ below: 8, tied: 0, above: 0, n: 8 });
+    expect(rankIn(sorted, -1)).toEqual({ below: 0, tied: 0, above: 8, n: 8 });
+    // Values are compared as float32, the way the scan stores them.
+    const f = Float32Array.from([0.1, 0.2, 0.3]);
+    expect(rankIn(f, 0.2)).toEqual({ below: 1, tied: 1, above: 1, n: 3 });
+    expect(rankIn(f, f[1])).toEqual({ below: 1, tied: 1, above: 1, n: 3 });
+  });
+
+  it('rankPhrase is exact and calls out ties instead of interpolating', () => {
+    const r = (below: number, tied: number, above: number) => rankPhrase({ below, tied, above, n: below + tied + above });
+    // 1,266 of 2,000 digits are exactly 0 (a ReLU unit) and the input is 0 too.
+    expect(r(0, 1266, 734)).toBe('tied with 63.3% of the 2,000 test digits at the lowest response');
+    // A small positive response sits above all those zeros (the old text said "about 2%").
+    expect(r(1474, 1, 525)).toBe('higher than 73.7% of the 2,000 test digits');
+    expect(r(1474, 0, 526)).toBe('higher than 73.7% of the 2,000 test digits');
+    expect(r(100, 300, 1600)).toBe('higher than 5.0% of the 2,000 test digits and tied with another 15.0%');
+    expect(r(1200, 800, 0)).toBe('tied with 40.0% of the 2,000 test digits at the highest response');
+    // A dead unit: every digit gives the same value.
+    expect(r(0, 2000, 0)).toBe('the same as all 2,000 test digits');
+    // The extremes, and digits near them, by count rather than a rounded share.
+    expect(r(1999, 1, 0)).toBe('as high as the strongest of the 2,000 test digits');
+    expect(r(2000, 0, 0)).toBe('higher than all 2,000 test digits');
+    expect(r(0, 1, 1999)).toBe('as low as the weakest of the 2,000 test digits');
+    expect(r(0, 0, 2000)).toBe('lower than all 2,000 test digits');
+    expect(r(1996, 1, 3)).toBe('only 3 of the 2,000 test digits respond more strongly');
+    expect(r(1998, 1, 1)).toBe('only 1 of the 2,000 test digits responds more strongly');
+    expect(r(2, 1, 1997)).toBe('only 2 of the 2,000 test digits respond more weakly');
+    expect(r(1989, 1, 10)).toBe('higher than 99.5% of the 2,000 test digits');
+  });
+
+  it('sharePct never rounds to 0% or 100% unless exact', () => {
+    expect(sharePct(0)).toBe('0%');
+    expect(sharePct(1)).toBe('100%');
+    expect(sharePct(0.9996)).toBe('>99%');
+    expect(sharePct(0.004)).toBe('<1%');
+    expect(sharePct(0.274)).toBe('27%');
+    expect(sharePct(0.9996, 1)).toBe('>99.9%');
+    expect(sharePct(0.1036, 1)).toBe('10.4%');
+  });
+
+  it('a dense ReLU unit: ranks from the sorted responses count the exact zeros', () => {
+    const net = new Network(SMALL_CNN, 3);
+    const { result } = drain(topk(context(net), { block: 2, k: 4 }));
+    const copy = new Network(SMALL_CNN, 0);
+    copy.setWeights(net.getWeights());
+    let checked = 0;
+    for (const u of result.units) {
+      const zeros = u.sorted.filter((v) => v === 0).length;
+      if (zeros < 200 || zeros > 1800) continue;
+      // The digit just above the zeros: everything at 0 is below it.
+      const above = u.sorted[zeros];
+      expect(above).toBeGreaterThan(0);
+      expect(rankIn(u.sorted, above).below).toBe(zeros);
+      // A digit whose response is 0 ties with every zero.
+      const zeroHit = u.bottom[0];
+      expect(zeroHit.value).toBe(0);
+      const v = unitResponse(copy, 2, u.unit, context(copy).image(zeroHit.index)).value;
+      expect(rankIn(u.sorted, v)).toEqual({ below: 0, tied: zeros, above: 2000 - zeros, n: 2000 });
+      expect(rankPhrase(rankIn(u.sorted, v))).toMatch(/^tied with \d+\.\d% of the 2,000 test digits at the lowest response$/);
+      checked++;
+    }
+    expect(checked).toBeGreaterThan(3);
+  });
+
+  it('the current input measured with a copy of the scan weights ranks consistently, even after training moves on', () => {
+    const live = new Network(SMALL_CNN, 1);
+    const { result } = drain(topk(context(live), { block: 1, k: 16 }));
+    // What the page keeps beside the scan: a network holding the weights the scan used.
+    const scanNet = new Network(SMALL_CNN, 0);
+    scanNet.setWeights(live.getWeights());
+    train(live, 25);
+    const x0 = context(live).image(0);
+    let liveClaims = 0;
+    for (const u of result.units) {
+      // The scan's own top digit ranks first, and digit #0 ranks where the scan puts it.
+      const best = u.top[0];
+      const vb = unitResponse(scanNet, 1, u.unit, context(scanNet).image(best.index)).value;
+      expect(vb).toBe(best.value);
+      expect(rankIn(u.sorted, vb)).toMatchObject({ above: 0 });
+      const v0 = unitResponse(scanNet, 1, u.unit, x0).value;
+      const r0 = rankIn(u.sorted, v0);
+      expect(r0.tied).toBeGreaterThanOrEqual(1); // digit #0 is one of the scanned digits
+      const inTop = u.top.some((h) => h.index === 0);
+      if (!inTop) expect(r0.above).toBeGreaterThanOrEqual(16);
+      // The live weights, by contrast, put digit #0 off the scan's scale for several filters.
+      const vLive = unitResponse(live, 1, u.unit, x0).value;
+      if (rankIn(u.sorted, vLive).above === 0 && !inTop) liveClaims++;
+    }
+    expect(liveClaims, 'the bug this guards against: live weights against a stale scan').toBeGreaterThan(0);
+  });
+});
+
+suite('coverage (U4)', () => {
+  it('conv filters report the share of positions that fire, not "some position fired"', () => {
+    const net = new Network(SMALL_CNN, 1);
+    train(net, 40);
+    const { result } = drain(topk(context(net), { block: 1, k: 2, count: 300 }));
+    const brute = bruteResponses(net, 1, 300);
+    for (const u of result.units) {
+      expect(u.coverage).toBeCloseTo(brute.coverage[u.unit], 6);
+      // The old "active" share (strongest response above 0) is 1 for almost every filter.
+      expect(u.coverage).toBeLessThan(1);
+    }
+    expect(new Set(result.units.map((u) => u.coverage.toFixed(3))).size).toBeGreaterThan(8);
+    expect(coveragePhrase('conv', 0.2741)).toBe('fires at 27% of positions');
+  });
+
+  it('sigmoid units are not "active" on every digit: firing means z > 0 (a > 0.5)', () => {
+    const spec: LayerSpec[] = [{ kind: 'dense', units: 16, act: 'sigmoid' }];
+    const net = new Network(spec, 2);
+    const { result } = drain(topk(context(net), { block: 0, k: 2, count: 400 }));
+    const brute = bruteResponses(net, 0, 400);
+    for (const u of result.units) {
+      expect(u.coverage).toBeCloseTo(brute.coverage[u.unit], 6);
+      expect(Math.min(...u.sorted)).toBeGreaterThan(0); // every activation is above 0…
+    }
+    expect(result.units.some((u) => u.coverage < 0.9)).toBe(true); // …but they do not all fire
+    expect(coveragePhrase('dense', 0.37)).toBe('fires on 37% of digits');
+  });
+
+  it('output units report how often each digit is predicted; the shares sum to 1', () => {
+    const net = new Network(SMALL_CNN, 5);
+    const { result } = drain(topk(context(net), { block: 3, k: 2, count: 500 }));
+    const brute = bruteResponses(net, 3, 500);
+    result.units.forEach((u) => expect(u.coverage).toBeCloseTo(brute.coverage[u.unit], 9));
+    expect(result.units.reduce((a, u) => a + u.coverage, 0)).toBeCloseTo(1, 9);
+    expect(coveragePhrase('output', 0.104, 1)).toBe('predicted for 10.4% of digits');
+  });
+});
+
+suite('weakest digits heading (U7)', () => {
+  it('conv filters still fire on their weakest digits; dense ReLU units can be switched off', () => {
+    const net = new Network(SMALL_CNN, 1);
+    const conv = drain(topk(context(net), { block: 1, k: 8, count: 500 })).result;
+    for (const u of conv.units) {
+      expect(u.bottom[0].value).toBeGreaterThan(0);
+      expect(allOff(u.bottom)).toBe(false);
+    }
+    const dense = drain(topk(context(net), { block: 2, k: 8, count: 500 })).result;
+    const off = dense.units.filter((u) => allOff(u.bottom));
+    expect(off.length).toBeGreaterThan(0);
+    for (const u of off) for (const hit of u.bottom) expect(hit.value).toBe(0); // ReLU: z ≤ 0 means a = 0
+    expect(allOff([])).toBe(false);
+  });
 });
 
 suite('labelSummary', () => {

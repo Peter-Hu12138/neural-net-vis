@@ -17,6 +17,11 @@ export interface EmbedParams {
   /** −1 = raw pixels; otherwise a block index (its `out`: pooled maps, or activations). */
   layer: number;
   method: EmbedMethod;
+  /**
+   * t-SNE on a layer wider than TSNE_MAX_DIM: 'pca' (default) keeps its TSNE_PCA_DIM main
+   * directions; 'projection' uses the random sketch alone (faster, blurs neighbours more).
+   */
+  reduce?: 'pca' | 'projection';
   /** Number of test digits, split evenly over the ten classes. */
   n?: number;
   perplexity?: number;
@@ -57,16 +62,28 @@ export interface EmbedResult {
   iterations: number;
   /** Values per digit at the layer. */
   dim: number;
-  /** t-SNE only: dimensions after the random projection (equals `dim` when none was needed). */
+  /** t-SNE only: dimensions it worked in (equals `dim` when no reduction was needed). */
   inputDim?: number;
+  /** t-SNE only: how a wide layer was reduced to `inputDim` dimensions. */
+  reduced?: 'pca' | 'projection';
   perplexity?: number;
+  /**
+   * Every digit gives (practically) the same values at this layer, so there is nothing to spread
+   * out: the coordinates are all 0 and t-SNE is skipped. See isFlat.
+   */
+  flat?: boolean;
 }
 
 export const DEFAULT_N = 1000;
 export const DEFAULT_PERPLEXITY = 30;
 export const DEFAULT_ITERATIONS = 500;
-/** t-SNE inputs wider than this are randomly projected down to it first. */
+/** t-SNE inputs wider than this are reduced first (see randomizedPca): a random sketch this wide… */
 export const TSNE_MAX_DIM = 64;
+/** …from which this many principal directions are kept. */
+export const TSNE_PCA_DIM = 50;
+/** Up to this many feature values in all (n × d), the collected rows stay in memory for the PCA
+ * step; wider layers (unpooled conv maps) are read a second time instead of holding up to 50 MB. */
+export const KEEP_LIMIT = 4_000_000;
 export const EXAGGERATION = 12;
 export const EXAGGERATION_ITERS = 100;
 export const MOMENTUM_SWITCH = 250;
@@ -131,14 +148,13 @@ export function projectPca(f: ArrayLike<number>, pca: PcaInfo): [number, number]
 /**
  * A d × k Gaussian random projection, entries N(0, 1/k), seeded.
  *
- * Why t-SNE reduces wide layers to 64 dimensions first: exact t-SNE needs all n² pairwise
- * distances, which costs O(n²·d) and, for an unpooled conv layer (up to 12,544 values per digit),
- * many seconds and 50 MB just to hold the features. A random projection is the cheapest reduction
- * that keeps distances: each projected squared distance is an unbiased estimate of the original,
- * within roughly ±25% for most pairs at k = 64 (Johnson–Lindenstrauss), and features are projected
- * as they are collected, so no n × d matrix is ever stored. It does blur the nearest neighbours a
- * little: on 1,000 raw-pixel digits, the share whose 5 nearest neighbours in the final map are
- * mostly the same digit drops from 0.86 (exact distances) to 0.81. The seed keeps maps repeatable.
+ * Why t-SNE reduces wide layers first: exact t-SNE needs all n² pairwise distances, which costs
+ * O(n²·d) and, for an unpooled conv layer (up to 12,544 values per digit), many seconds. A random
+ * projection is the cheapest reduction that keeps distances: each projected squared distance is an
+ * unbiased estimate of the original, within roughly ±25% for most pairs at k = 64
+ * (Johnson–Lindenstrauss), and features are projected as they are collected. On its own it blurs
+ * the nearest neighbours, so it serves as the sketch for randomizedPca, which keeps the main
+ * directions instead. The seed keeps maps repeatable.
  */
 export function gaussianProjection(d: number, k: number, seed = 0x7a5e): Float32Array {
   const g = projectionChunks(d, k, seed);
@@ -193,6 +209,12 @@ export interface PcaFit extends PcaInfo {
  * rows. The second component iterates on C deflated by the first (v ← v − (u₁·v) u₁ each step,
  * which equals Hotelling's C − λ₁u₁u₁ᵀ restricted to u₁'s complement). Start vectors are seeded,
  * so results are reproducible; signs are fixed so each component's entries sum to ≥ 0.
+ *
+ * That sign rule is only a cold start: any rule flips when its input crosses 0, and the page keeps
+ * a recomputed map facing the way the previous one did (alignPca). Among the rules tried, it flips
+ * least often between recomputes 64 training digits apart (Small CNN, MLP and LeNet-ish, their
+ * last two or three layers, 39 recomputes each): entry sum 16 flips, largest loading 32, sum of cubed
+ * loadings 25, skewness of the projected digits 37, mean·component 23.
  *
  * Centres X in place. Yields its progress (0–1) after every few milliseconds of work.
  */
@@ -307,6 +329,220 @@ export function* pcaFit(X: Float32Array, n: number, d: number, opts: { maxIter?:
   components.set(comps[1], d);
   const explained: [number, number] = total > 0 ? [variance[0] / total, variance[1] / total] : [0, 0];
   return { mean: Float32Array.from(mean64), components, explained, variance, total, iterations: iters, coords };
+}
+
+/**
+ * A principal direction has no sign of its own: v and −v explain the same variance. pcaFit picks
+ * one by a fixed rule, which a tiny weight change can tip over (on the logits layer the rule's
+ * input is ~0 by construction, since softmax ignores the all-ones direction). Recomputing the map
+ * after a training step would then mirror it. This orients each new component like the previous
+ * component it matches (|cos| ≥ 0.5, so a PC1/PC2 swap keeps its orientation too), negating the
+ * component and its coordinates in place. Components without a clear match keep pcaFit's sign.
+ *
+ * Returns, per component, whether it was flipped.
+ */
+export function alignPca(pca: PcaInfo, coords: Float32Array, prev: Float32Array | null): [boolean, boolean] {
+  const flipped: [boolean, boolean] = [false, false];
+  const c = pca.components;
+  const d = c.length / 2;
+  if (!prev || prev.length !== c.length) return flipped;
+  for (let k = 0; k < 2; k++) {
+    let best = 0;
+    for (let m = 0; m < 2; m++) {
+      let dot = 0;
+      for (let j = 0; j < d; j++) dot += c[k * d + j] * prev[m * d + j];
+      if (Math.abs(dot) > Math.abs(best)) best = dot;
+    }
+    if (best > -0.5) continue;
+    flipped[k] = true;
+    for (let j = 0; j < d; j++) c[k * d + j] = -c[k * d + j];
+    for (let i = k; i < coords.length; i += 2) coords[i] = -coords[i];
+  }
+  return flipped;
+}
+
+/**
+ * True when the rows hardly differ: the total variance is below 1e-12 of the mean squared value
+ * (or both are 0), i.e. the differences are at the level of float32 rounding. This happens when
+ * every unit of a layer is inactive for every digit (dead ReLUs, saturated tanh or sigmoid), and
+ * then no projection has anything to show.
+ */
+export function isFlat(total: number, meanSquare: number): boolean {
+  return !(total > 0 && total > 1e-12 * meanSquare);
+}
+
+/** Total variance and mean squared value of the n × d rows of X. */
+export function spread(X: ArrayLike<number>, n: number, d: number): { total: number; meanSquare: number } {
+  let total = 0;
+  let sq = 0;
+  for (let j = 0; j < d; j++) {
+    let m = 0;
+    for (let i = 0; i < n; i++) m += X[i * d + j];
+    m /= n;
+    let v = 0;
+    for (let i = 0; i < n; i++) v += (X[i * d + j] - m) ** 2;
+    total += v / n;
+    sq += m * m;
+  }
+  return { total, meanSquare: sq + total };
+}
+
+/**
+ * Eigen-decomposition of a small symmetric matrix (row-major l × l, copied) by cyclic Jacobi
+ * rotations. Returns the eigenvalues in decreasing order and the eigenvectors as the columns of
+ * `vectors` (row-major l × l, column c belongs to values[c]). Yields after each sweep.
+ */
+export function* jacobiEigen(A0: Float64Array, l: number): Generator<void, { values: Float64Array; vectors: Float64Array }, void> {
+  const A = A0.slice();
+  const V = new Float64Array(l * l);
+  for (let i = 0; i < l; i++) V[i * l + i] = 1;
+  let scale = 0;
+  for (let i = 0; i < l * l; i++) scale += A[i] * A[i];
+  for (let sweep = 0; sweep < 60; sweep++) {
+    let off = 0;
+    for (let p = 0; p < l; p++) for (let q = p + 1; q < l; q++) off += A[p * l + q] ** 2;
+    if (!(off > 1e-26 * scale)) break;
+    for (let p = 0; p < l; p++) {
+      for (let q = p + 1; q < l; q++) {
+        const apq = A[p * l + q];
+        if (apq === 0) continue;
+        const theta = (A[q * l + q] - A[p * l + p]) / (2 * apq);
+        const t = Math.sign(theta || 1) / (Math.abs(theta) + Math.sqrt(theta * theta + 1));
+        const c = 1 / Math.sqrt(t * t + 1);
+        const s = t * c;
+        for (let k = 0; k < l; k++) {
+          const akp = A[k * l + p];
+          const akq = A[k * l + q];
+          A[k * l + p] = c * akp - s * akq;
+          A[k * l + q] = s * akp + c * akq;
+        }
+        for (let k = 0; k < l; k++) {
+          const apk = A[p * l + k];
+          const aqk = A[q * l + k];
+          A[p * l + k] = c * apk - s * aqk;
+          A[q * l + k] = s * apk + c * aqk;
+        }
+        for (let k = 0; k < l; k++) {
+          const vkp = V[k * l + p];
+          const vkq = V[k * l + q];
+          V[k * l + p] = c * vkp - s * vkq;
+          V[k * l + q] = s * vkp + c * vkq;
+        }
+      }
+    }
+    yield;
+  }
+  const order = Array.from({ length: l }, (_, i) => i).sort((a, b) => A[b * l + b] - A[a * l + a]);
+  const values = Float64Array.from(order, (i) => A[i * l + i]);
+  const vectors = new Float64Array(l * l);
+  for (let r = 0; r < l; r++) for (let c = 0; c < l; c++) vectors[r * l + c] = V[r * l + order[c]];
+  return { values, vectors };
+}
+
+/**
+ * Randomized PCA (Halko, Martinsson & Tropp, 2011; one sketch, no power iterations) of n rows of
+ * width d, from their sketch Y = X·R (n × l, as collected with projectRow):
+ *   Q = orth(Y − column means)   (n × l; its columns are centred, so QᵀX = QᵀXc)
+ *   B = QᵀX                      (l × d, one more pass over the rows, which `row(s)` supplies)
+ *   B·Bᵀ = Û·S²·Ûᵀ
+ * and the result is the n × m matrix Q·Û[:, :m]·S[:m]: each row's coordinates along (an estimate
+ * of) the top m principal directions. Unlike the sketch itself, this keeps the directions with
+ * the most variance and drops the rest, so nearest neighbours survive much better: on 1,000 raw
+ * pixel digits 5-NN label purity is 0.862 in 784-d, 0.795 after the 64-d sketch and 0.840 after
+ * this (Conv 1 of a trained Small CNN: 0.900, 0.856, 0.874).
+ *
+ * `row(s)` is called once per row, in order. Yields progress 0–1.
+ */
+export function* randomizedPca(Y: ArrayLike<number>, n: number, l: number, d: number, m: number, row: (s: number) => ArrayLike<number>): Generator<number, Float32Array<ArrayBuffer>, void> {
+  let t0 = now();
+  const Q = Float64Array.from({ length: n * l }, (_, i) => Y[i]);
+  for (let c = 0; c < l; c++) {
+    let mean = 0;
+    for (let i = 0; i < n; i++) mean += Q[i * l + c];
+    mean /= n;
+    for (let i = 0; i < n; i++) Q[i * l + c] -= mean;
+  }
+  // Modified Gram–Schmidt, twice for orthogonality; columns with nothing left become 0.
+  let first = 0;
+  for (let c = 0; c < l; c++) {
+    let s = 0;
+    for (let i = 0; i < n; i++) s += Q[i * l + c] ** 2;
+    first = Math.max(first, Math.sqrt(s));
+  }
+  for (let c = 0; c < l; c++) {
+    for (let pass = 0; pass < 2; pass++) {
+      for (let p = 0; p < c; p++) {
+        let dot = 0;
+        for (let i = 0; i < n; i++) dot += Q[i * l + c] * Q[i * l + p];
+        for (let i = 0; i < n; i++) Q[i * l + c] -= dot * Q[i * l + p];
+      }
+    }
+    let s = 0;
+    for (let i = 0; i < n; i++) s += Q[i * l + c] ** 2;
+    const norm = Math.sqrt(s);
+    const inv = norm > 1e-9 * first ? 1 / norm : 0;
+    for (let i = 0; i < n; i++) Q[i * l + c] *= inv;
+    if (now() - t0 > SLICE_MS) {
+      yield (0.1 * (c + 1)) / l;
+      t0 = now();
+    }
+  }
+  // Bᵀ (d × l), accumulated row by row: Bᵀ[j] += x_s[j] · Q[s].
+  const Bt = new Float64Array(d * l);
+  for (let s = 0; s < n; s++) {
+    const f = row(s);
+    const o = s * l;
+    for (let j = 0; j < d; j++) {
+      const v = f[j];
+      if (v === 0) continue;
+      const r = j * l;
+      for (let c = 0; c < l; c++) Bt[r + c] += v * Q[o + c];
+    }
+    if (now() - t0 > SLICE_MS) {
+      yield 0.1 + (0.75 * (s + 1)) / n;
+      t0 = now();
+    }
+  }
+  // G = B·Bᵀ (l × l).
+  const G = new Float64Array(l * l);
+  for (let j = 0; j < d; j++) {
+    const r = j * l;
+    for (let a = 0; a < l; a++) {
+      const ba = Bt[r + a];
+      if (ba === 0) continue;
+      for (let b = a; b < l; b++) G[a * l + b] += ba * Bt[r + b];
+    }
+    if (now() - t0 > SLICE_MS) {
+      yield 0.85 + (0.1 * (j + 1)) / d;
+      t0 = now();
+    }
+  }
+  for (let a = 0; a < l; a++) for (let b = 0; b < a; b++) G[a * l + b] = G[b * l + a];
+  const ge = jacobiEigen(G, l);
+  let e = ge.next();
+  while (!e.done) {
+    if (now() - t0 > SLICE_MS) {
+      yield 0.95;
+      t0 = now();
+    }
+    e = ge.next();
+  }
+  const { values, vectors } = e.value;
+  const keep = Math.min(m, l);
+  const out = new Float32Array(n * keep);
+  for (let c = 0; c < keep; c++) {
+    const sv = Math.sqrt(Math.max(0, values[c]));
+    for (let i = 0; i < n; i++) {
+      let s = 0;
+      for (let a = 0; a < l; a++) s += Q[i * l + a] * vectors[a * l + c];
+      out[i * keep + c] = s * sv;
+    }
+    if (now() - t0 > SLICE_MS) {
+      yield 0.95 + (0.05 * (c + 1)) / keep;
+      t0 = now();
+    }
+  }
+  return out;
 }
 
 // ── t-SNE (exact) ──────────────────────────────────────────────────────
@@ -484,8 +720,23 @@ export function tsneKL(P: Float64Array, Y: Float64Array, n: number): number {
 export interface TsneOpts {
   perplexity?: number;
   iterations?: number;
+  /** Seed of the random start (used when `init` is 'random', or when the data has no spread). */
   seed?: number;
+  /** Start layout: the data's first two principal directions (default) or Gaussian noise. */
+  init?: 'pca' | 'random';
+  /** Standard deviation of the start layout's first coordinate (default TSNE_INIT_STD). */
+  initStd?: number;
 }
+
+/**
+ * Spread of the start layout: its first coordinate has this standard deviation. Small enough that
+ * every pair starts in the kernel's flat middle (distances ≪ 1), as with the usual 1e-4, but on
+ * the Small CNN's Conv 1 (1,568 values, trained for 3,200 digits, n = 1,000) it gives the
+ * exaggerated steps more to work with: 5-NN label purity after 100 steps 0.51 (two networks),
+ * against 0.41/0.35 at 1e-4 and 0.36/0.42 from a random start; final KL 1.00/0.94 against
+ * 1.01/1.05 from a random start.
+ */
+export const TSNE_INIT_STD = 1e-2;
 
 export interface TsneStep {
   /** Progress within t-SNE, 0–1. */
@@ -508,7 +759,8 @@ export interface TsneFit {
  * probabilities matched to the perplexity, symmetrised; Student-t similarities in 2-D; early
  * exaggeration ×12 for 100 steps; momentum 0.5 then 0.8 from step 250; learning rate
  * max(n/12, 50) with per-coordinate gains (+0.2 when the gradient flips sign against the last
- * step, ×0.8 otherwise, at least 0.01); the layout is recentred every step.
+ * step, ×0.8 otherwise, at least 0.01); the layout is recentred every step. It starts from the
+ * first two principal components scaled to TSNE_INIT_STD (or Gaussian noise, see TsneOpts).
  */
 export function* tsneRun(X: ArrayLike<number>, n: number, k: number, opts: TsneOpts = {}): Generator<TsneStep, TsneFit, void> {
   const iterations = Math.max(1, Math.round(opts.iterations ?? DEFAULT_ITERATIONS));
@@ -536,9 +788,35 @@ export function* tsneRun(X: ArrayLike<number>, n: number, k: number, opts: TsneO
   symmetrise(P, n);
   const num = D; // distances are no longer needed
 
-  const rng = new Rng(opts.seed ?? 0x75e1);
+  // Start from the data's own two main directions, shrunk to a speck (as scikit-learn and openTSNE
+  // do). A random speck carries no structure, and on wide inputs early exaggeration barely finds
+  // any from it, so the first frames were a jittering cloud; from PCA they show the linear map
+  // being refined. While the layout is this small every q is about 1/(n(n−1)), so the KL of the
+  // frames stays near KL(P‖uniform) until exaggeration ends, whatever the arrangement.
   const Y = new Float64Array(2 * n);
-  for (let p = 0; p < 2 * n; p++) Y[p] = rng.normal() * 1e-4;
+  const initStd = opts.initStd ?? TSNE_INIT_STD;
+  let started = false;
+  if ((opts.init ?? 'pca') === 'pca') {
+    const Xc = Float32Array.from({ length: n * k }, (_, i) => X[i]);
+    const g = pcaFit(Xc, n, k, { maxIter: 100, tol: 1e-7 });
+    let r = g.next();
+    while (!r.done) {
+      if (now() - t0 > SLICE_MS) {
+        yield { frac: prepShare, preparing: true };
+        t0 = now();
+      }
+      r = g.next();
+    }
+    const sd = Math.sqrt(r.value.variance[0]);
+    if (sd > 0 && Number.isFinite(sd)) {
+      for (let p = 0; p < 2 * n; p++) Y[p] = (r.value.coords[p] / sd) * initStd;
+      started = true;
+    }
+  }
+  if (!started) {
+    const rng = new Rng(opts.seed ?? 0x75e1);
+    for (let p = 0; p < 2 * n; p++) Y[p] = rng.normal() * initStd;
+  }
   const grad = new Float64Array(2 * n);
   const update = new Float64Array(2 * n);
   const gains = new Float64Array(2 * n).fill(1);
@@ -593,6 +871,47 @@ export function* tsneRun(X: ArrayLike<number>, n: number, k: number, opts: TsneO
   return { coords: Float32Array.from(Y), kl: klFromKernel(P, num, Z, n), iterations, perplexity };
 }
 
+// ── Axis labels ────────────────────────────────────────────────────────
+
+/** Tick values with a 1–2–5 step that fall inside [lo, hi]. */
+export function niceTicks(lo: number, hi: number, count: number): { ticks: number[]; step: number } {
+  const span = hi - lo;
+  if (!(span > 0) || !Number.isFinite(span)) return { ticks: [], step: 1 };
+  const raw = span / count;
+  const mag = 10 ** Math.floor(Math.log10(raw));
+  const e = raw / mag;
+  const step = (e >= 7.5 ? 10 : e >= 3.5 ? 5 : e >= 1.5 ? 2 : 1) * mag;
+  const ticks: number[] = [];
+  for (let v = Math.ceil(lo / step) * step; v <= hi + step * 1e-9; v += step) ticks.push(Math.abs(v) < step * 1e-9 ? 0 : v);
+  return { ticks, step };
+}
+
+/** A true minus sign, and never a negative zero ("-0.00" becomes "0.00"). */
+const minus = (s: string): string => (/^-[0.]*$/.test(s) ? s.slice(1) : s.replace(/-/g, '−'));
+
+/**
+ * Axis label for tick `v` with spacing `step`: just enough decimals to tell neighbours apart (at
+ * most 4), scientific notation for smaller steps (rather than printing every tick of a tiny span
+ * as "0.0000"), and a plain "0" at zero.
+ */
+export function tickLabel(v: number, step: number): string {
+  if (v === 0 || Math.abs(v) < Math.abs(step) * 1e-6) return '0';
+  if (step >= 1) return minus(v.toFixed(0));
+  if (step >= 1e-4) return minus(v.toFixed(Math.ceil(-Math.log10(step) - 1e-9)));
+  const digits = Math.floor(Math.log10(Math.abs(v)) + 1e-9) - Math.floor(Math.log10(step) + 1e-9);
+  return minus(v.toExponential(Math.max(0, Math.min(6, digits))).replace('e+', 'e'));
+}
+
+/**
+ * A coordinate for tooltips: `d` decimals (scientific below 10^−d), a true minus sign, never a
+ * negative zero.
+ */
+export function signedValue(v: number, d = 2): string {
+  if (!Number.isFinite(v)) return '—';
+  if (v !== 0 && Math.abs(v) < 10 ** -d) return minus(v.toExponential(1));
+  return minus(v.toFixed(d));
+}
+
 // ── The job ────────────────────────────────────────────────────────────
 
 const argmax = (a: ArrayLike<number>) => {
@@ -603,9 +922,10 @@ const argmax = (a: ArrayLike<number>) => {
 
 /**
  * Collects the layer's features for the balanced test digits (projected to `k` dims when R is
- * given), plus labels and predictions. Yields progress in 0–1.
+ * given; the full rows also go to `keep` when it is given), plus labels and predictions. Yields
+ * progress in 0–1.
  */
-function* collect(ctx: JobContext, layer: number, indices: Int32Array, d: number, k: number, R: Float32Array | null) {
+function* collect(ctx: JobContext, layer: number, indices: Int32Array, d: number, k: number, R: Float32Array | null, keep: Float32Array | null = null) {
   const n = indices.length;
   const X = new Float32Array(n * k);
   const labels = new Uint8Array(n);
@@ -621,6 +941,7 @@ function* collect(ctx: JobContext, layer: number, indices: Int32Array, d: number
     const f = layerFeatures(ctx.net, layer);
     if (R) projectRow(f, R, d, k, X, s * k, acc);
     else X.set(f, s * k);
+    if (keep) keep.set(f, s * d);
     if (now() - t0 > SLICE_MS) {
       yield (s + 1) / n;
       t0 = now();
@@ -637,12 +958,18 @@ const embed: Job<EmbedParams, EmbedResult> = function* (ctx, params): Generator<
   const indices = balancedIndices(ctx.testY, want);
   const n = indices.length;
   const d = layerDim(net, layer);
-  const k = method === 'tsne' && d > TSNE_MAX_DIM ? TSNE_MAX_DIM : d;
+  const wide = method === 'tsne' && d > TSNE_MAX_DIM;
+  const sketch = wide ? TSNE_MAX_DIM : d;
+  const reduce = !wide ? null : params.reduce === 'projection' ? 'projection' : 'pca';
+  const keep = reduce === 'pca' && n * d <= KEEP_LIMIT ? new Float32Array(n * d) : null;
   const share = method === 'pca' ? PHASES.pca.collect : PHASES.tsne.collect;
+  // A wide t-SNE layer spends part of its share on the PCA step: little when the rows are kept,
+  // half when they are read a second time.
+  const collectShare = reduce !== 'pca' ? share : keep ? 0.85 * share : 0.5 * share;
   const report = (f: number, partial?: unknown): Progress => ({ done: Math.round(Math.min(1, f) * TOTAL), total: TOTAL, partial });
   let R: Float32Array | null = null;
-  if (k < d) {
-    const gp = projectionChunks(d, k);
+  if (wide) {
+    const gp = projectionChunks(d, sketch);
     let rp = gp.next();
     while (!rp.done) {
       yield report(0);
@@ -651,13 +978,14 @@ const embed: Job<EmbedParams, EmbedResult> = function* (ctx, params): Generator<
     R = rp.value;
   }
 
-  const gc = collect(ctx, layer, indices, d, k, R);
+  const gc = collect(ctx, layer, indices, d, sketch, R, keep);
   let c = gc.next();
   while (!c.done) {
-    yield report(c.value * share);
+    yield report(c.value * collectShare);
     c = gc.next();
   }
-  const { X, labels, preds } = c.value;
+  const { labels, preds } = c.value;
+  let X: Float32Array = c.value.X;
 
   if (method === 'pca') {
     const g = pcaFit(X, n, d);
@@ -667,6 +995,10 @@ const embed: Job<EmbedParams, EmbedResult> = function* (ctx, params): Generator<
       r = g.next();
     }
     const fit = r.value;
+    let meanSquare = fit.total;
+    for (const m of fit.mean) meanSquare += m * m;
+    const flat = isFlat(fit.total, meanSquare);
+    if (flat) fit.coords.fill(0);
     return {
       layer,
       method,
@@ -674,10 +1006,36 @@ const embed: Job<EmbedParams, EmbedResult> = function* (ctx, params): Generator<
       labels,
       preds,
       coords: fit.coords,
-      pca: { mean: fit.mean, components: fit.components, explained: fit.explained },
+      pca: { mean: fit.mean, components: fit.components, explained: flat ? [0, 0] : fit.explained },
       iterations: fit.iterations[0] + fit.iterations[1],
       dim: d,
+      flat,
     };
+  }
+
+  let k = sketch;
+  const sp = spread(X, n, k);
+  if (isFlat(sp.total, sp.meanSquare)) {
+    const perplexity = Math.max(2, Math.min(params.perplexity ?? DEFAULT_PERPLEXITY, (n - 1) / 3));
+    return { layer, method, indices, labels, preds, coords: new Float32Array(2 * n), kl: 0, iterations: 0, dim: d, inputDim: k, perplexity, flat: true };
+  }
+
+  if (reduce === 'pca') {
+    const img = new Float32Array(784);
+    const row = keep
+      ? (s: number) => keep.subarray(s * d, (s + 1) * d)
+      : (s: number) => {
+          ctx.net.forward(ctx.image(indices[s], img));
+          return layerFeatures(ctx.net, layer);
+        };
+    const gr = randomizedPca(X, n, sketch, d, TSNE_PCA_DIM, row);
+    let rr = gr.next();
+    while (!rr.done) {
+      yield report(collectShare + (share - collectShare) * rr.value);
+      rr = gr.next();
+    }
+    X = rr.value;
+    k = Math.min(TSNE_PCA_DIM, sketch);
   }
 
   const g = tsneRun(X, n, k, { perplexity: params.perplexity, iterations: params.iterations });
@@ -687,7 +1045,21 @@ const embed: Job<EmbedParams, EmbedResult> = function* (ctx, params): Generator<
     r = g.next();
   }
   const fit = r.value;
-  return { layer, method, indices, labels, preds, coords: fit.coords, kl: fit.kl, iterations: fit.iterations, dim: d, inputDim: k, perplexity: fit.perplexity };
+  return {
+    layer,
+    method,
+    indices,
+    labels,
+    preds,
+    coords: fit.coords,
+    kl: fit.kl,
+    iterations: fit.iterations,
+    dim: d,
+    inputDim: k,
+    reduced: reduce ?? undefined,
+    perplexity: fit.perplexity,
+    flat: false,
+  };
 };
 
 export const jobs: Record<string, Job> = { embed };

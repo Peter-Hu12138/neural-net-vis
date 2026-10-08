@@ -1,4 +1,7 @@
-import { histogram, niceTicks, type Line } from '../analysis/stats';
+import { axisFormat, histogram, histogramSorted, niceTicks, num, share, type Line } from '../analysis/stats';
+
+// Number formatting lives with the statistics (DOM-free, so unit tests can check it).
+export { fixed, num, share, sig } from '../analysis/stats';
 import { palette } from './theme';
 
 /**
@@ -62,6 +65,11 @@ export interface HistOptions {
   compareName?: string;
   /** What one value is called in the tooltip ("weights", "values"). */
   noun?: string;
+  /**
+   * `values` and `compare` are finite and sorted ascending (sortedFinite's output): the range and
+   * the counts then come from binary searches instead of passes over every value.
+   */
+  sorted?: boolean;
 }
 
 export interface HistPlot {
@@ -72,28 +80,6 @@ export interface HistPlot {
 
 export const MONO = '"IBM Plex Mono", ui-monospace, monospace';
 export const SANS = 'Archivo, "Helvetica Neue", Arial, sans-serif';
-
-const SUP: Record<string, string> = { '-': '⁻', '0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴', '5': '⁵', '6': '⁶', '7': '⁷', '8': '⁸', '9': '⁹' };
-const minus = (s: string) => s.replace(/^-/, '−').replace(/e-/, 'e−');
-
-/** A value for tooltips and stats: three significant digits, exponent form when tiny or huge. */
-export function num(v: number, digits = 3): string {
-  if (!Number.isFinite(v)) return '—';
-  if (v === 0) return '0';
-  const a = Math.abs(v);
-  if (a >= 1e-3 && a < 1e5) return minus(String(Number(v.toPrecision(digits))));
-  return minus(v.toExponential(digits - 1).replace('e+', 'e'));
-}
-
-/** Tick label formatter for an axis with ticks `step` apart; tiny or huge ranges get a ×10ⁿ factor. */
-function axisFormat(step: number, maxAbs: number): { fmt: (v: number) => string; suffix: string } {
-  const e = maxAbs > 0 ? Math.floor(Math.log10(maxAbs)) : 0;
-  const scale = e <= -3 || e >= 5 ? Math.pow(10, e) : 1;
-  const d = Math.max(0, Math.ceil(-Math.log10(step / scale) - 1e-9));
-  const fmt = (v: number) => minus((v / scale).toFixed(d)).replace(/^−(0\.?0*)$/, '$1');
-  const suffix = scale === 1 ? '' : ` ×10${String(e).split('').map((c) => SUP[c]).join('')}`;
-  return { fmt, suffix };
-}
 
 /** Smallest and largest finite value across `arrays`, or null when there are none. */
 function rawExtent(arrays: ArrayLike<number>[]): [number, number] | null {
@@ -280,26 +266,29 @@ export function drawHistogram(ctx: CanvasRenderingContext2D, rect: Rect, values:
   const compare = opts.compare ?? null;
   const labelH = 15;
   const plot: Rect = { x: rect.x, y: rect.y, w: rect.w, h: Math.max(8, rect.h - labelH) };
+  const sorted = opts.sorted === true && values instanceof Float64Array && (!compare || compare instanceof Float64Array);
   // The exact range, so the end labels name the real minimum and maximum.
-  let [lo, hi] = rawExtent(compare ? [values, compare] : [values]) ?? [-1, 1];
+  const ends = (a: ArrayLike<number>) => (a.length ? [[a[0], a[a.length - 1]]] : []);
+  let [lo, hi] = (sorted ? rawExtent([...ends(values), ...(compare ? ends(compare) : [])]) : rawExtent(compare ? [values, compare] : [values])) ?? [-1, 1];
   if (!(hi > lo)) {
     lo -= 0.5;
     hi += 0.5;
   }
   // Rice rule (2·n^⅓ bins), so a 72-weight layer gets ~8 bins and 25,000 weights get ~58; at
   // least 5 px per bar.
-  let n = 0;
-  for (let i = 0; i < values.length; i++) if (Number.isFinite(values[i])) n++;
+  let n = sorted ? values.length : 0;
+  if (!sorted) for (let i = 0; i < values.length; i++) if (Number.isFinite(values[i])) n++;
   const bins = opts.bins ?? Math.max(6, Math.min(Math.floor(rect.w / 5), 64, Math.round(2 * Math.cbrt(n))));
-  const counts = histogram(values, bins, lo, hi);
-  const cmp = compare ? histogram(compare, bins, lo, hi) : null;
+  const count = (a: ArrayLike<number>) => (sorted ? histogramSorted(a as Float64Array, bins, lo, hi) : histogram(a, bins, lo, hi));
+  const counts = count(values);
+  const cmp = compare ? count(compare) : null;
   let total = 0;
   for (const c of counts) total += c;
 
   // A single towering bin (exact zeros after ReLU) would flatten everything else: clip it.
-  const sorted = Array.from(counts).concat(cmp ? Array.from(cmp) : []).sort((a, b) => b - a);
-  const top = sorted[0] ?? 0;
-  const second = sorted.find((c) => c < top) ?? 0;
+  const byCount = Array.from(counts).concat(cmp ? Array.from(cmp) : []).sort((a, b) => b - a);
+  const top = byCount[0] ?? 0;
+  const second = byCount.find((c) => c < top) ?? 0;
   const cap = top > 4 * second && second > 0 ? second * 1.6 : top || 1;
   const bw = plot.w / bins;
   const base = plot.y + plot.h;
@@ -362,8 +351,8 @@ export function drawHistogram(ctx: CanvasRenderingContext2D, rect: Rect, values:
       const k = Math.min(bins - 1, Math.max(0, Math.floor((px - plot.x) / bw)));
       const a = lo + (k / bins) * (hi - lo);
       const b = lo + ((k + 1) / bins) * (hi - lo);
-      const share = total ? ` (${((100 * counts[k]) / total).toFixed(1)}%)` : '';
-      let text = `${num(a)} to ${num(b)}\n${counts[k].toLocaleString('en-US')} ${noun}${share}`;
+      const pct = total ? ` (${share(counts[k], total)})` : '';
+      let text = `${num(a)} to ${num(b)}\n${counts[k].toLocaleString('en-US')} ${noun}${pct}`;
       if (cmp) text += `\n${opts.compareName ?? 'compare'} ${cmp[k].toLocaleString('en-US')}`;
       return text;
     },

@@ -5,7 +5,7 @@ import { store, type WeightMode } from '../store';
 import { layerDetail, layerName } from './builder';
 import { $, clear, h, segmented, selectField } from './dom';
 import { drawMatrix, fitCanvas, maxAbs, type MatrixMode } from './draw';
-import { drawQQ, num, SANS as SANS_FONT, type QQSeries } from './qq';
+import { drawQQ, fixed, SANS as SANS_FONT, sig, type QQSeries } from './qq';
 import { onThemeChange, palette } from './theme';
 import { hideTip, showTip } from './tip';
 
@@ -91,6 +91,9 @@ export function mountInspector(): void {
       ),
       h('div', { class: 'field' }, h('span', { class: 'label' }, 'View'), segmented(MODES, store.mode, setMode, 'Weight view')),
     );
+    note.textContent = NOTES[store.mode];
+    // Histogram and Q–Q show the whole layer, so a unit choice would do nothing there.
+    if (store.mode === 'hist' || store.mode === 'qq') return;
     const n = unitCount(sel);
     const unit = store.selectedUnit ?? 0;
     head.append(
@@ -102,7 +105,6 @@ export function mountInspector(): void {
         (u) => select(sel, u),
       ),
     );
-    note.textContent = NOTES[store.mode];
   };
 
   const render = () => {
@@ -349,10 +351,12 @@ export function mountInspector(): void {
     const beside = availW >= 420 + sideW + 24;
     const plotW = beside ? Math.min(560, availW - sideW - 24) : Math.min(availW, 560);
     const sideX = beside ? plotW + 24 : 0;
+    const ref = now.qq.reference;
     const ITEMS: { text: string; mark: 'filled' | 'hollow' | 'line' }[] = [
       { text: 'Now', mark: 'filled' },
       ...(start ? [{ text: 'At initialisation', mark: 'hollow' as const }] : []),
-      { text: 'Normal line through the quartiles of now', mark: 'line' },
+      // Through the quartiles; with the mean and std when the quartiles coincide (that line would be flat).
+      ...(ref ? [{ text: ref.from === 'quartiles' ? 'Normal line through the quartiles of now' : 'Normal line with the mean and std of now', mark: 'line' as const }] : []),
     ];
 
     // Legend entries, wrapped to the available width (measured before the canvas is sized).
@@ -419,7 +423,7 @@ export function mountInspector(): void {
       xTitle: 'Normal quantile',
       yTitle: 'Weight quantile',
       xName: 'normal',
-      line: now.qq.line,
+      line: ref?.line ?? null,
     });
 
     // Stats table: one column per series, values right-aligned under their headings.
@@ -435,13 +439,13 @@ export function mountInspector(): void {
     if (start) ctx.fillText('AT INITIALISATION', initX, row(0));
     ctx.fillStyle = p.hair;
     ctx.fillRect(tx, row(0) + 9, (start ? initX : nowX) - tx, 1);
-    const f2 = (v: number) => (Number.isFinite(v) ? v.toFixed(2).replace(/^-/, '−') : '—');
-    const f4 = (v: number) => (Number.isFinite(v) ? v.toFixed(4) : '—');
+    // Fixed decimals (never "−0.00") and three significant digits with trailing zeros, so the two
+    // columns line up digit for digit.
     const rows: [string, (s: typeof now) => string][] = [
-      ['Skew', (s) => f2(s.moments.skew)],
-      ['Excess kurtosis', (s) => f2(s.moments.excessKurtosis)],
-      ['PPCC r', (s) => f4(s.ppcc)],
-      ['Std', (s) => num(s.moments.std)],
+      ['Skew', (s) => fixed(s.moments.skew, 2)],
+      ['Excess kurtosis', (s) => fixed(s.moments.excessKurtosis, 2)],
+      ['PPCC r', (s) => fixed(s.ppcc, 4)],
+      ['Std', (s) => sig(s.moments.std, 3)],
     ];
     rows.forEach(([name, get], i) => {
       const y = row(i + 1);
@@ -554,14 +558,53 @@ export function mountInspector(): void {
   });
 
   let queued = false;
+  let qqCost = 0;
+  let qqAt = -Infinity;
   const schedule = () => {
     if (queued) return;
     queued = true;
     requestAnimationFrame(() => {
       queued = false;
+      const t0 = performance.now();
       render();
+      if (store.mode === 'qq') {
+        qqAt = performance.now();
+        qqCost = qqAt - t0;
+      }
     });
   };
+  /**
+   * New weights. The Q–Q view sorts the whole layer (400k weights for a wide dense layer), so it
+   * skips updates while off screen and runs at most every 250 ms and once per twice its own cost.
+   */
+  let inView = true;
+  let behind = false;
+  let qqTimer: ReturnType<typeof setTimeout> | null = null;
+  const onWeights = () => {
+    if (store.mode !== 'qq') return schedule();
+    if (!inView) {
+      behind = true;
+      return;
+    }
+    if (qqTimer) return;
+    const wait = Math.max(250, 2 * qqCost) - (performance.now() - qqAt);
+    if (wait <= 0) schedule();
+    else
+      qqTimer = setTimeout(() => {
+        qqTimer = null;
+        schedule();
+      }, wait);
+  };
+  new IntersectionObserver(
+    (entries) => {
+      inView = entries.some((e) => e.isIntersecting);
+      if (inView && behind) {
+        behind = false;
+        schedule();
+      }
+    },
+    { rootMargin: '200px 0px' },
+  ).observe(box);
   const full = () => {
     renderHead();
     schedule();
@@ -569,7 +612,7 @@ export function mountInspector(): void {
   store.on('model', full);
   store.on('select', full);
   store.on('mode', full);
-  store.on('weights', schedule);
+  store.on('weights', onWeights);
   onThemeChange(schedule);
   new ResizeObserver(schedule).observe(box);
   full();

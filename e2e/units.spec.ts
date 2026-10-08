@@ -10,6 +10,7 @@ const SHOTS = 'docs/screenshots';
 type Raster = {
   store: {
     status: { step: number; running: boolean } | null;
+    weightsStep: number;
     evals: { acc: number }[];
     probe: { key: string; caption: string } | null;
     selected: number;
@@ -51,9 +52,11 @@ async function trainUntil(page: Page, pred: string, timeout = 90_000) {
 }
 
 const cards = (page: Page) => page.locator('#units-root .units-card');
+const status = (page: Page) => page.locator('#units-root .synced-status');
 
 /** Screenshot of the whole section; the sticky control bar would otherwise cover its top. */
 async function shot(page: Page, name: string) {
+  await page.mouse.move(0, 0); // no hover outlines in the documentation shots
   const style = await page.addStyleTag({ content: '#bar { position: static !important; }' });
   await page.locator('#units').screenshot({ path: `${SHOTS}/${name}` });
   await style.evaluate((el) => (el as Element).remove());
@@ -63,8 +66,11 @@ async function shot(page: Page, name: string) {
 async function scanned(page: Page, n: number) {
   await expect(cards(page)).toHaveCount(n);
   await expect(page.locator('#units-root .units-card .units-mosaic canvas')).toHaveCount(9 * n, { timeout: 60_000 });
-  await expect(page.locator('#units-root .synced-status')).toContainText('Based on the weights at step');
+  await expect(status(page)).toContainText('Based on the weights at step');
 }
+
+/** "Current input, test digit #0 · label 7: 0.901, higher than …" → 0.901 */
+const probeValue = (line: string) => Number(line.match(/: (−?[\d.]+(?:e−?\d+)?),/)![1].replace(/−/g, '-'));
 
 test('top digits, detail panel and synthesised inputs for each layer', async ({ page }) => {
   await open(page);
@@ -73,17 +79,24 @@ test('top digits, detail panel and synthesised inputs for each layer', async ({ 
 
   // Conv 1 (the selected layer) has 8 filters; each card shows 9 receptive-field crops (3×3 px).
   await scanned(page, 8);
-  await expect(page.locator('#units-root .hint').first()).toContainText('Top images are the test digits that excite a unit most');
+  await expect(page.locator('#units-root .units-key')).toHaveText(
+    'Each card: the 3×3 patches of the 9 test digits that excite the filter most (left), and an input synthesised from blank to excite it (right).',
+  );
   const crop = await page.locator('#units-root .units-card .units-mosaic canvas').first().evaluate((c: HTMLCanvasElement) => [c.width, c.height]);
   expect(crop).toEqual([3, 3]);
-  await expect(cards(page).first()).toContainText(/active on \d+% of digits/);
-  await expect(cards(page).first()).toContainText(/mean -?\d/);
+  // How often a filter fires: the share of positions with z > 0, not "fired somewhere" (always 100%).
+  await expect(cards(page).first()).toContainText(/fires at [<>]?\d+% of positions/);
+  const covers = await page.locator('#units-root .units-card-foot').allInnerTexts();
+  expect(covers.filter((t) => t === 'fires at 100% of positions').length, covers.join(' | ')).toBeLessThan(covers.length);
+  await expect(cards(page).first()).toHaveAttribute('aria-label', /^Filter 1: fires at [<>]?\d+% of positions on average, mean response −?\d/);
+  await expect(cards(page).first()).toContainText(/mean −?\d/);
 
   // Switch to conv 2 with the layer select: 16 filters, 8×8 crops; the global selection follows.
   await page.selectOption('#units-layer', '1');
   expect(await raster(page, (r) => r.store.selected)).toBe(1);
   await scanned(page, 16);
   expect(await page.locator('#units-root .units-card .units-mosaic canvas').first().evaluate((c: HTMLCanvasElement) => c.width)).toBe(8);
+  await expect(page.locator('#units-root .units-synth-note')).toHaveText('Optimises an input for each of the 16 filters, 160 steps each.');
 
   // Clicking a card selects that filter (network diagram and inspector follow) and opens details.
   await cards(page).nth(2).click();
@@ -92,11 +105,19 @@ test('top digits, detail panel and synthesised inputs for each layer', async ({ 
   await expect(cards(page).nth(0)).toHaveAttribute('aria-pressed', 'false');
   const detail = page.locator('#units-detail');
   await expect(detail.locator('h3')).toHaveText('Filter 3');
+  await expect(detail.locator('h3')).toHaveClass(/panel-title/);
+  await expect(detail.locator('h3')).toHaveCSS('font-size', '16px');
   await expect(detail.locator('.units-digit')).toHaveCount(16 + 8);
   await expect(detail.locator('.units-digit-box')).toHaveCount(16 + 8);
   await expect(detail.locator('.units-label-col')).toHaveCount(10);
   await expect(detail.locator('.units-label-sum')).toContainText(/^(Mostly|Mixed:|All)/);
-  await expect(detail.locator('.units-probe')).toContainText(/This input: -?\d/);
+  await expect(detail.locator('.units-stats')).toContainText(/fires at [<>]?\d+(\.\d)?% of positions/);
+  await expect(detail.locator('.units-stats')).toContainText('sees 8×8 px');
+  await expect(detail).toContainText('The box marks the 8×8 patch where the filter fired hardest.');
+  // A conv filter fires somewhere on every digit, even its weakest: no "switches it off" claim.
+  await expect(detail.locator('.units-weak-title')).toHaveText('Weakest responses · bottom 8');
+  // The current input is named, with its exact rank among the test digits.
+  await expect(detail.locator('.units-probe')).toContainText(/^Current input, test digit #0 · label 7: −?\d/);
   const hist = detail.locator('.units-hist canvas');
   await expect(hist).toHaveAttribute('role', 'img');
   await hist.hover();
@@ -104,12 +125,15 @@ test('top digits, detail panel and synthesised inputs for each layer', async ({ 
   await expect(page.locator('#tip')).toContainText(/digits?/);
   await page.mouse.move(0, 0);
 
-  // A digit in the panel becomes the network's input.
+  // A digit in the panel becomes the network's input. The strongest digit ranks first.
   const first = detail.locator('.units-digit').first();
   const idx = await first.getAttribute('data-index');
   await first.click();
   expect(await raster(page, (r) => r.store.probe?.key)).toBe(`test:${idx}`);
   await expect(detail.locator('.units-digit').first()).toHaveAttribute('aria-pressed', 'true');
+  await expect(detail.locator('.units-probe')).toContainText(new RegExp(`^Current input, test digit #${idx} · label \\d: [\\d.]+, as high as the strongest of the 2,000 test digits\\.$`));
+  const max = (await detail.locator('.units-stats').innerText()).match(/max ([\d.]+)/)![1];
+  expect(probeValue(await detail.locator('.units-probe').innerText()).toFixed(3)).toBe(max);
 
   // Synthesise the whole layer: the button turns into Stop, cards fill in, the result is reported.
   await page.click('#units-synth');
@@ -119,10 +143,15 @@ test('top digits, detail panel and synthesised inputs for each layer', async ({ 
   await expect(page.locator('#units-synth')).toHaveText('Synthesise inputs');
   await expect(page.locator('#units-root .units-card .units-synth canvas:visible')).toHaveCount(16);
   await expect(detail.locator('.units-synth-large canvas')).toBeVisible();
-  await expect(detail).toContainText(/pre-activation rose from -?\d+\.\d+ on a blank image to -?\d+\.\d+ after 160 steps/);
+  await expect(detail).toContainText('Cropped to the 8×8 patch the filter sees at the centre of the image.');
+  await expect(detail).toContainText(/pre-activation rose from −?\d+\.\d+ on a blank image to −?\d+\.\d+ after 160 steps/);
   const rose = await detail.locator('.units-block').last().innerText();
-  const m = rose.match(/from (-?[\d.]+) on a blank image to (-?[\d.]+)/)!;
-  expect(Number(m[2])).toBeGreaterThan(Number(m[1]));
+  const m = rose.match(/from (−?[\d.]+) on a blank image to (−?[\d.]+)/)!;
+  expect(Number(m[2].replace('−', '-'))).toBeGreaterThan(Number(m[1].replace('−', '-')));
+  // True minus signs, and never a "−0.00" (tiny values keep their digits, as in "0.00022").
+  const text = await page.locator('#units').innerText();
+  expect(text).not.toMatch(/(^|[\s(])-\d/m);
+  expect(text).not.toMatch(/[−-]0\.0+(?!\d)/);
 
   await shot(page, '11-units-light.png');
 
@@ -139,16 +168,25 @@ test('top digits, detail panel and synthesised inputs for each layer', async ({ 
   await shot(page, '11-units-dark.png');
   await page.emulateMedia({ colorScheme: 'light' });
 
-  // The dense layer shows full digits; the output layer is named by digit.
+  // The dense layer shows full digits and how often each unit fires; the output layer is named by digit.
   await page.selectOption('#units-layer', '2');
   await scanned(page, 32);
   expect(await page.locator('#units-root .units-card .units-mosaic canvas').first().evaluate((c: HTMLCanvasElement) => c.width)).toBe(28);
+  await expect(cards(page).first()).toContainText(/fires on [<>]?\d+% of digits/);
   await page.selectOption('#units-layer', '3');
   await scanned(page, 10);
   await expect(cards(page).nth(7).locator('.units-card-title')).toHaveText('Digit 7');
+  // Output units: how often each digit is predicted; the ten shares add up to about 100%.
+  const predicted = await page.locator('#units-root .units-card-foot').allInnerTexts();
+  expect(predicted.every((t) => /^predicted for [<>]?\d+% of digits$/.test(t)), predicted.join(' | ')).toBe(true);
+  const sum = predicted.reduce((a, t) => a + Number(t.match(/(\d+)%/)![1]), 0);
+  expect(sum).toBeGreaterThanOrEqual(95);
+  expect(sum).toBeLessThanOrEqual(105);
   await cards(page).nth(7).click();
   await expect(detail.locator('.units-digit-box')).toHaveCount(0);
   await expect(detail).toContainText('the logit for digit 7');
+  await expect(detail.locator('.units-stats')).toContainText(/predicted for \d+(\.\d)?% of digits/);
+  await expect(detail.locator('.units-weak-title')).toHaveText(/^(What switches it off · weakest 8|Weakest responses · bottom 8)$/);
   // A trained output unit's favourite digits are mostly its own digit.
   const sevens = await detail.locator('.units-label-col').nth(7).locator('.units-label-n').innerText();
   expect(Number(sevens)).toBeGreaterThan(25);
@@ -158,6 +196,108 @@ test('top digits, detail panel and synthesised inputs for each layer', async ({ 
   await page.selectOption('#units-layer', '1');
   await scanned(page, 16);
   await expect(page.locator('#units-root .units-card .units-synth canvas:visible')).toHaveCount(16);
+});
+
+test('while training, the current input is ranked with the scan’s weights; the status matches what is shown', async ({ page }) => {
+  await open(page);
+  await page.locator('#units').scrollIntoViewIfNeeded();
+  await scanned(page, 8);
+  await page.selectOption('#units-layer', '1');
+  await scanned(page, 16);
+  await cards(page).nth(2).click();
+  const detail = page.locator('#units-detail');
+  const line = detail.locator('.units-probe');
+  await expect(line).toContainText(/^Current input, test digit #0 · label 7: /);
+  const before = await line.innerText();
+  const v0 = probeValue(before);
+  const inTop = await detail.locator('.units-digits').first().locator('.units-digit[data-index="0"]').count();
+  if (!inTop) expect(before).not.toMatch(/as high as the strongest|higher than all/);
+  await expect(detail).toHaveAttribute('data-step', '0');
+
+  // Train with the section on screen. The scan is held (it already shows a result), and the
+  // input's value stays the one measured with the scan's weights, with a note saying so.
+  await page.click('#play');
+  await page.waitForFunction(() => ((window as unknown as { raster: Raster }).raster.store.weightsStep ?? 0) >= 30, null, { timeout: 60_000 });
+  await expect(status(page)).toContainText(/Computed at step 0; the network is now at step [\d,]+\./);
+  await expect(line).toContainText('Measured with the weights at step 0, as the scan was.');
+  expect(probeValue(await line.innerText())).toBe(v0);
+  expect((await line.innerText()).split('.')[0]).toBe(before.split('.')[0]);
+  await expect(detail).toHaveAttribute('data-step', '0');
+
+  // Pause and watch the rescan: whenever the status says "Based on the weights at step N", the
+  // panel shows the scan of step N (the old one is dimmed while the new one computes).
+  await page.evaluate(() => {
+    const w = window as unknown as { samples: string[][]; sampling: boolean };
+    w.samples = [];
+    w.sampling = true;
+    const tick = () => {
+      if (!w.sampling) return;
+      const st = document.querySelector('#units-root .synced-status')?.textContent ?? '';
+      const d = document.getElementById('units-detail')!;
+      const dim = document.querySelector('#units-root .units-layout')!.classList.contains('is-updating');
+      w.samples.push([st, d.dataset.step ?? '', String(dim)]);
+      requestAnimationFrame(tick);
+    };
+    tick();
+  });
+  await page.click('#play');
+  await page.waitForFunction(() => !(window as unknown as { raster: Raster }).raster.store.status?.running);
+  const step = await raster(page, (r) => r.store.weightsStep);
+  const stepText = step.toLocaleString('en-US');
+  await expect(status(page)).toContainText(`Based on the weights at step ${stepText}.`, { timeout: 60_000 });
+  await expect(detail).toHaveAttribute('data-step', String(step));
+  await page.waitForTimeout(300);
+  const samples = await page.evaluate(() => {
+    const w = window as unknown as { samples: string[][]; sampling: boolean };
+    w.sampling = false;
+    return w.samples;
+  });
+  const based = samples.filter(([st]) => /Based on the weights at step/.test(st));
+  expect(based.length).toBeGreaterThan(0);
+  for (const [st, shown] of based) {
+    const n = st.match(/step ([\d,]+)\./)![1].replace(/,/g, '');
+    expect(shown, `status "${st}" while the panel shows step ${shown}`).toBe(n);
+  }
+  expect(samples.some(([st, , dim]) => /Updating to step/.test(st) && dim === 'true'), 'the old scan is dimmed while updating').toBe(true);
+  expect(samples.at(-1)![2]).toBe('false');
+  await expect(line).not.toContainText('Measured with');
+  await expect(line).toContainText(/^Current input, test digit #0 · label 7: /);
+});
+
+test('deep conv stacks: fields are clipped to the 28×28 image in text and crops', async ({ page }) => {
+  await open(page);
+  // Small CNN + 2 conv layers: maps 28 → 14 → 7 → 3 → 1, so conv 4's nominal field is 38×38.
+  await page.getByRole('button', { name: '+ Conv layer' }).click();
+  await page.getByRole('button', { name: '+ Conv layer' }).click();
+  expect(await raster(page, (r) => r.store.spec.length)).toBe(5);
+  await page.locator('#units').scrollIntoViewIfNeeded();
+  await page.selectOption('#units-layer', '3');
+  await scanned(page, 8);
+  // Crops are the whole 28×28 digit, never a 38×38 canvas with blank margins.
+  const widths = await page.locator('#units-root .units-card .units-mosaic canvas').evaluateAll((cs) => cs.map((c) => (c as HTMLCanvasElement).width));
+  expect(new Set(widths)).toEqual(new Set([28]));
+  await expect(page.locator('#units-root .units-key')).toHaveText(
+    'Each card: the 9 test digits that excite the filter most (left), and an input synthesised from blank to excite it (right).',
+  );
+  await cards(page).first().click();
+  const detail = page.locator('#units-detail');
+  await expect(detail.locator('.units-stats')).toContainText('sees whole image');
+  await expect(detail).toContainText('The box marks the pixels the filter sees from the position where it fired hardest.');
+  await expect(detail).toContainText('The filter at the centre of its map sees the whole image.');
+  await expect(page.locator('#units')).not.toContainText(/(38|58)×(38|58)/);
+  // Boxes on the digits stay inside the image.
+  const boxes = await detail.locator('.units-digit-box').evaluateAll((els) =>
+    els.map((el) => {
+      const s = (el as HTMLElement).style;
+      return [s.left, s.top, s.width, s.height].map((v) => parseFloat(v));
+    }),
+  );
+  for (const [l, t, w, h] of boxes) {
+    expect(l).toBeGreaterThanOrEqual(0);
+    expect(t).toBeGreaterThanOrEqual(0);
+    expect(l + w).toBeLessThanOrEqual(100.001);
+    expect(t + h).toBeLessThanOrEqual(100.001);
+  }
 });
 
 test('follows the selection from other views, shows all units on request, works from the keyboard', async ({ page }) => {
@@ -175,9 +315,13 @@ test('follows the selection from other views, shows all units on request, works 
   await expect(page.locator('#units-show-all')).toHaveText('Show the first 32');
   await expect(cards(page).nth(40)).toHaveAttribute('aria-pressed', 'true');
   await expect(page.locator('#units-detail h3')).toHaveText('Unit 41');
+  await page.locator('#units-show-all').scrollIntoViewIfNeeded();
+  const y0 = (await page.locator('#units-show-all').boundingBox())!.y;
   await page.click('#units-show-all');
   await expect(cards(page)).toHaveCount(32);
   await expect(page.locator('#units-show-all')).toHaveText('Show all 64');
+  // Collapsing keeps the button in place on screen instead of leaving the page below the section.
+  expect(Math.abs((await page.locator('#units-show-all').boundingBox())!.y - y0)).toBeLessThan(2);
   await expect(page.locator('#units-root .units-card .units-mosaic canvas')).toHaveCount(9 * 32, { timeout: 60_000 });
 
   // Keyboard: Tab to a card and press Enter.
@@ -201,8 +345,31 @@ test('follows the selection from other views, shows all units on request, works 
 test('phone width: no horizontal overflow, detail below the cards', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await open(page);
+  // Record where the cards start while the first scan runs: the shared progress bar must not move them.
+  await page.evaluate(() => {
+    const w = window as unknown as { tops: number[]; heights: number[] };
+    w.tops = [];
+    w.heights = [];
+    const tick = () => {
+      const root = document.getElementById('units-root');
+      const layout = document.querySelector('#units-root .units-layout');
+      const st = document.querySelector('#units-root .synced-status');
+      if (root && layout && st) {
+        w.tops.push(Math.round(layout.getBoundingClientRect().top - root.getBoundingClientRect().top));
+        w.heights.push(Math.round(st.getBoundingClientRect().height));
+      }
+      if (w.tops.length < 2000) requestAnimationFrame(tick);
+    };
+    tick();
+  });
   await page.locator('#units').scrollIntoViewIfNeeded();
   await scanned(page, 8);
+  const { tops, heights } = await page.evaluate(() => {
+    const w = window as unknown as { tops: number[]; heights: number[] };
+    return { tops: w.tops.slice(), heights: w.heights.slice() };
+  });
+  expect(new Set(tops).size, `cards start at ${[...new Set(tops)].join(', ')} px`).toBe(1);
+  expect(Math.max(...heights), 'the status row is one 28 px line').toBeLessThanOrEqual(30);
   await page.selectOption('#units-layer', '1');
   await scanned(page, 16);
   await cards(page).nth(5).click();
@@ -223,5 +390,6 @@ test('phone width: no horizontal overflow, detail below the cards', async ({ pag
   expect(sec, 'nothing pokes out of the section').toEqual([]);
   const [grid, detail] = await Promise.all([page.locator('#units-root .units-grid').boundingBox(), page.locator('#units-detail').boundingBox()]);
   expect(detail!.y).toBeGreaterThan(grid!.y + grid!.height - 1);
+  expect((await status(page).boundingBox())!.height).toBeLessThanOrEqual(30);
   await shot(page, '11-units-phone.png');
 });

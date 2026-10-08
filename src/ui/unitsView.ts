@@ -1,21 +1,36 @@
 import './unitsView.css';
 import { select, setProbe } from '../actions';
 import { analysis, isSuperseded } from '../analysis/client';
-import { receptiveBox, receptiveSize, type Box } from '../analysis/receptive';
-import { ACTMAX_STEPS, TOP_LABELS, labelSummary, unitResponse, type ActmaxPartial, type ActmaxResult, type Hit, type TopkResult, type UnitKind, type UnitSummary } from '../analysis/units';
+import { centreFieldSize, centrePosition, cropBox, type Box } from '../analysis/receptive';
+import {
+  ACTMAX_STEPS,
+  TOP_LABELS,
+  allOff,
+  coveragePhrase,
+  labelSummary,
+  rankIn,
+  rankPhrase,
+  sharePct,
+  unitResponse,
+  type ActmaxPartial,
+  type ActmaxResult,
+  type Hit,
+  type TopkResult,
+  type UnitKind,
+  type UnitSummary,
+} from '../analysis/units';
 import { sampleToFloat } from '../data/mnist';
-import { store } from '../store';
+import { Network } from '../nn/network';
+import { store, type Probe } from '../store';
 import { layerDetail, layerName } from './builder';
-import { $, clear, fmt, h, int, pct, selectField } from './dom';
+import { $, clear, h, int, selectField } from './dom';
 import { fitCanvas } from './draw';
-import { syncedSection } from './snapshot';
+import { isCurrent, stampNow, syncedSection, type Stamp } from './snapshot';
 import { onThemeChange, palette, sequential, type RGB } from './theme';
 import { hideTip, showTip } from './tip';
 
 /** Section 09: the test digits that excite each unit most and least, and inputs synthesised to excite it. */
 
-const HINT =
-  'Top images are the test digits that excite a unit most; for conv filters only the patch the filter sees is shown. Synthesised inputs are images optimised from blank to excite the unit.';
 const CARD_LIMIT = 32;
 const TOP_K = 16;
 const CARD_TOP = 9;
@@ -32,7 +47,8 @@ interface SynthUnit {
 
 interface SynthState {
   block: number;
-  step: number;
+  /** The weights the synthesis used. */
+  stamp: Stamp;
   running: boolean;
   stopped: boolean;
   total: number;
@@ -78,14 +94,34 @@ function crop(at: (i: number) => number, b: Box): { data: Float32Array; H: numbe
   return { data, H, W };
 }
 
+/** A top-k scan of one layer, with a copy of the network holding the weights it used. */
+interface Scan {
+  result: TopkResult;
+  /** The current input is measured with these weights too, so it ranks against the same scan. */
+  net: Network;
+  stamp: Stamp;
+}
+
 const unitName = (kind: UnitKind, u: number) => (kind === 'output' ? `Digit ${u}` : kind === 'conv' ? `Filter ${u + 1}` : `Unit ${u + 1}`);
 
 const plural = (d: number) => `${d}s`;
 
-/** Two decimals, without a "−0.00". */
-const fix2 = (v: number) => (Math.abs(v) < 0.005 ? 0 : v).toFixed(2);
+/**
+ * `d` decimals with a true minus sign. Values too small for `d` decimals keep two significant
+ * digits ("0.00022") instead of rounding to a "0.00" or "−0.00" that hides them.
+ */
+const num = (v: number, d = 3): string => {
+  if (!Number.isFinite(v)) return '—';
+  const t = v !== 0 && Math.abs(v) < 10 ** -d ? v.toPrecision(2) : (v === 0 ? 0 : v).toFixed(d);
+  return t.replace(/^-/, '−').replace('e-', 'e−');
+};
 
-/** Shared thin progress bar. It keeps its space while idle, so nothing below it jumps. */
+/** Two decimals, without a "−0.00". */
+const fix2 = (v: number) => (Math.abs(v) < 0.005 ? 0 : v).toFixed(2).replace(/^-/, '−');
+
+const lowerFirst = (t: string) => t.charAt(0).toLowerCase() + t.slice(1);
+
+/** Thin progress bar for synthesis. It keeps its space while idle, so nothing below it jumps. */
 function progressBar(label: string) {
   const fill = h('span', { style: { width: '0%' } });
   const el = h('div', { class: 'progress is-idle', role: 'progressbar', 'aria-label': label, 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': '0' }, fill);
@@ -109,9 +145,10 @@ export function mountUnits(): void {
 
   // ── State ──
   let layer = 0;
-  let top: TopkResult | null = null;
-  let scanFor: { block: number; version: number } | null = null;
-  let scanning = false;
+  /** The scan on screen; it always belongs to `layer`. */
+  let scan: Scan | null = null;
+  /** The scan being computed, if any. */
+  let scanning: { block: number } | null = null;
   let scanError: string | null = null;
   let showAll = false;
   let visible = false;
@@ -122,13 +159,13 @@ export function mountUnits(): void {
   const synthBtn = h('button', { type: 'button', id: 'units-synth', class: 'btn btn-sm btn-solid' }, 'Synthesise inputs') as HTMLButtonElement;
   const synthNote = h('span', { class: 'hint units-synth-note', 'aria-live': 'polite' });
   const synthBar = progressBar('Synthesis progress');
-  const scanBar = progressBar('Scan progress');
-  const scanLine = h('span', { class: 'units-scan-line' }, scanBar.el, h('span', { class: 'hint' }, 'Scanning the test digits…'));
   const grid = h('div', { class: 'units-grid' });
   const more = h('button', { type: 'button', id: 'units-show-all', class: 'btn btn-sm' }) as HTMLButtonElement;
   const gridNote = h('p', { class: 'hint units-grid-note' });
   const gridKey = h('p', { class: 'hint units-key' });
   const detail = h('div', { class: 'units-detail', id: 'units-detail', role: 'region', 'aria-label': 'Unit details' });
+  const main = h('div', { class: 'units-main' }, gridNote, gridKey, grid, more);
+  const layout = h('div', { class: 'units-layout' }, main, detail);
 
   const blocks = () => store.net.blocks;
   const clampLayer = (i: number) => Math.max(0, Math.min(blocks().length - 1, i));
@@ -138,7 +175,7 @@ export function mountUnits(): void {
     return b.kind === 'conv' ? b.spec.filters : b.spec.units;
   };
   const specOf = (i: number) => (i === blocks().length - 1 ? null : store.net.spec[i]);
-  const summary = (u: number): UnitSummary | null => (top && top.block === layer ? top.units[u] ?? null : null);
+  const summary = (u: number): UnitSummary | null => (scan && scan.result.block === layer ? scan.result.units[u] ?? null : null);
   const selectedUnit = (): number | null => {
     if (store.selected !== layer || store.selectedUnit === null) return null;
     return store.selectedUnit < countOf(layer) ? store.selectedUnit : null;
@@ -148,59 +185,78 @@ export function mountUnits(): void {
     const d = store.data!;
     return (p: number) => d.testX[i * 784 + p] / 255;
   };
-  const centreBox = (raw: boolean): Box | null => {
-    const b = blocks()[layer];
-    if (b.kind !== 'conv') return null;
-    return receptiveBox(store.net.spec, layer, b.zShape.h >> 1, b.zShape.w >> 1, 'z', !raw);
+  /** What a conv layer's units see, for the copy: the clipped field at the centre of the map. */
+  const field = () => {
+    const spec = store.net.spec;
+    const size = centreFieldSize(spec, layer);
+    const c = centrePosition(spec, layer);
+    const crop = cropBox(spec, layer, c.y, c.x);
+    const cropSide = crop ? crop.y1 - crop.y0 + 1 : 28;
+    return { size, whole: size >= 28, cropSide, crop };
   };
+
+  /** Dims the previous scan while a new one for the same layer is computed. */
+  const markUpdating = () => layout.classList.toggle('is-updating', !!scanning && !!scan && scanning.block === layer);
 
   // ── Synced top-k scan ──
   const refresh = () => {
     if (!store.data || !store.valid) return;
     const block = layer;
-    const version = store.version;
-    sync.markComputed();
-    scanFor = { block, version };
-    scanning = true;
+    const stamp = sync.begin();
+    // The worker gets these same weights (analysis.run copies them synchronously below).
+    const net = new Network(store.net.spec, 0);
+    net.setWeights(store.net.getWeights());
+    scanning = { block };
     scanError = null;
-    scanBar.set(0);
-    scanBar.show(true);
-    scanLine.classList.add('is-on');
-    renderNote();
+    sync.setProgress(0);
+    markUpdating();
+    if (!scan) {
+      renderCards();
+      renderDetail();
+    } else renderNote();
     analysis
-      .run<TopkResult>('units-topk', 'topk', { block, k: TOP_K }, (p) => scanBar.set(p.done / p.total))
+      .run<TopkResult>('units-topk', 'topk', { block, k: TOP_K }, (p) => sync.setProgress(p.done / p.total))
       .then((r) => {
-        scanning = false;
-        scanBar.show(false);
-        scanLine.classList.remove('is-on');
-        if (r.block !== layer || version !== store.version) return;
-        top = r;
+        scanning = null;
+        if (r.block !== layer || stamp.version !== store.version || !store.valid) {
+          sync.fail();
+          markUpdating();
+          return;
+        }
+        scan = { result: r, net, stamp };
+        markUpdating();
         renderCards();
         renderDetail();
+        sync.done(stamp);
       })
       .catch((e: unknown) => {
+        // A newer scan replaced this one; it owns the status now.
         if (isSuperseded(e)) return;
-        scanning = false;
-        scanBar.show(false);
-        scanLine.classList.remove('is-on');
+        scanning = null;
         scanError = e instanceof Error ? e.message : String(e);
+        sync.fail();
+        markUpdating();
         renderNote();
       });
   };
   const sync = syncedSection(root, refresh);
-  // Scan progress sits in the status row, so the cards below never shift when it ends.
-  sync.status.append(scanLine);
 
-  /** Scans the current layer if the section is on screen and no scan covers it yet. */
+  /**
+   * Scans the current layer when the section is on screen and nothing is shown for this layer
+   * yet (first view, another layer picked, a new architecture). Results that merely went stale
+   * are left to the shared policy in syncedSection.
+   */
   const ensureScan = () => {
     if (!visible || !store.data || !store.valid) return;
-    if (scanFor && scanFor.block === layer && scanFor.version === store.version) return;
-    sync.refreshNow();
+    if (scan || scanning?.block === layer) return;
+    if (!sync.shown) sync.request();
+    else sync.refreshNow(); // the result on record belongs to another layer
   };
   new IntersectionObserver(
     (entries) => {
       visible = entries.some((e) => e.isIntersecting);
       ensureScan();
+      if (visible && probeDirty) redrawProbe();
     },
     { rootMargin: '200px 0px' },
   ).observe(root);
@@ -229,7 +285,8 @@ export function mountUnits(): void {
     }
     layer = b;
     showAll = (selectedUnit() ?? 0) >= CARD_LIMIT;
-    if (top && top.block !== layer) top = null;
+    if (scan && scan.result.block !== layer) scan = null;
+    markUpdating();
     const sel = document.getElementById('units-layer') as HTMLSelectElement | null;
     if (sel) sel.value = String(layer);
     renderAll();
@@ -246,8 +303,8 @@ export function mountUnits(): void {
 
   const hitCanvas = (hit: Hit): HTMLCanvasElement => {
     const c = h('canvas', { class: 'units-px', 'aria-hidden': 'true' }) as HTMLCanvasElement;
-    if (hit.y >= 0) {
-      const b = receptiveBox(store.net.spec, layer, hit.y, hit.x, 'z', false)!;
+    const b = hit.y >= 0 ? cropBox(store.net.spec, layer, hit.y, hit.x) : null;
+    if (b) {
       const { data, H, W } = crop(digitAt(hit.index), b);
       paintPixels(c, data, H, W);
     } else {
@@ -257,7 +314,7 @@ export function mountUnits(): void {
   };
 
   const paintSynth = (c: HTMLCanvasElement, x: Float32Array) => {
-    const b = centreBox(true);
+    const b = kindOf(layer) === 'conv' ? field().crop : null;
     if (b) {
       const { data, H, W } = crop((p) => x[p], b);
       paintPixels(c, data, H, W);
@@ -279,20 +336,21 @@ export function mountUnits(): void {
       empty.hidden = true;
     } else synthC.hidden = true;
     const sel = selectedUnit() === u;
+    const cover = s ? coveragePhrase(kind, s.coverage) : '';
     const label = s
-      ? `${name}: active on ${pct(s.activeFraction, 0)} of digits, mean response ${fmt(s.mean, 2)}. Show details.`
+      ? `${name}: ${kind === 'conv' ? `${cover} on average` : cover}, mean response ${fix2(s.mean)}. Show details.`
       : `${name}. Show details.`;
     const btn = h(
       'button',
       { type: 'button', class: 'units-card', 'aria-pressed': String(sel), 'aria-label': label, 'data-unit': String(u) },
-      h('span', { class: 'units-card-head' }, h('span', { class: 'units-card-title' }, name), h('span', { class: 'units-card-mean' }, s ? `mean ${fmt(s.mean, 2)}` : '')),
+      h('span', { class: 'units-card-head' }, h('span', { class: 'units-card-title' }, name), h('span', { class: 'units-card-mean' }, s ? `mean ${fix2(s.mean)}` : '')),
       h(
         'span',
         { class: 'units-card-body' },
         h('span', { class: 'units-fig' }, mosaic),
         h('span', { class: 'units-fig' }, h('span', { class: 'units-synth' }, synthC, empty)),
       ),
-      h('span', { class: 'units-card-foot' }, s ? `active on ${pct(s.activeFraction, 0)} of digits` : scanning ? 'Scanning…' : 'Not scanned yet'),
+      h('span', { class: 'units-card-foot' }, s ? cover : scanning ? 'Scanning…' : 'Not scanned yet'),
     ) as HTMLButtonElement;
     btn.addEventListener('click', () => {
       select(layer, u);
@@ -308,10 +366,14 @@ export function mountUnits(): void {
     const n = countOf(layer);
     const shown = showAll ? n : Math.min(n, CARD_LIMIT);
     for (let u = 0; u < shown; u++) grid.append(card(u));
+    const kind = kindOf(layer);
+    const f = kind === 'conv' ? field() : null;
     gridKey.textContent =
-      kindOf(layer) === 'conv'
-        ? 'Each card: the 9 patches that excite the filter most (left) and its synthesised input (right).'
-        : 'Each card: the 9 test digits that excite the unit most (left) and its synthesised input (right).';
+      kind === 'conv'
+        ? f!.cropSide < 28
+          ? `Each card: the ${f!.cropSide}×${f!.cropSide} patches of the 9 test digits that excite the filter most (left), and an input synthesised from blank to excite it (right).`
+          : 'Each card: the 9 test digits that excite the filter most (left), and an input synthesised from blank to excite it (right).'
+        : `Each card: the 9 test digits that excite the ${kind === 'output' ? 'logit' : 'unit'} most (left), and an input synthesised from blank to excite it (right).`;
     more.hidden = n <= CARD_LIMIT;
     more.textContent = showAll ? `Show the first ${CARD_LIMIT}` : `Show all ${n}`;
     renderNote();
@@ -341,6 +403,9 @@ export function mountUnits(): void {
   // ── Detail panel ──
   let histDraw: (() => void) | null = null;
   let probeLine: HTMLElement | null = null;
+  /** Re-renders the probe line's text only (no forward pass); set while a histogram is shown. */
+  let probeText: (() => void) | null = null;
+  let probeDirty = false;
   let detailSynth: { unit: number; canvas: HTMLCanvasElement; text: HTMLElement; empty: HTMLElement } | null = null;
 
   const digitButton = (hit: Hit, showBox: boolean): HTMLElement => {
@@ -367,8 +432,8 @@ export function mountUnits(): void {
         class: 'units-digit',
         'data-index': String(i),
         'aria-pressed': String(store.probe?.key === `test:${i}`),
-        title: `Test digit #${i} · label ${label} · response ${fmt(hit.value, 3)}`,
-        'aria-label': `Use test digit ${i}, a ${label} with response ${fmt(hit.value, 3)}, as the network input`,
+        title: `Test digit #${i} · label ${label} · response ${num(hit.value, 3)}`,
+        'aria-label': `Use test digit ${i}, a ${label} with response ${num(hit.value, 3)}, as the network input`,
       },
       c,
       box,
@@ -378,34 +443,40 @@ export function mountUnits(): void {
     return btn;
   };
 
+  /**
+   * The current input's response, measured with the scan's own weights (not the live ones), so
+   * it ranks against the same histogram. Cached per input, scan and unit.
+   */
+  let probeCache: { probe: Probe; scan: Scan; unit: number; value: number } | null = null;
   const probeResponse = (u: number): number | null => {
     const p = store.probe;
-    if (!p || layer >= blocks().length) return null;
-    return unitResponse(store.net, layer, u, p.x).value;
+    if (!p || !scan || scan.result.block !== layer) return null;
+    if (probeCache && probeCache.probe === p && probeCache.scan === scan && probeCache.unit === u) return probeCache.value;
+    const value = unitResponse(scan.net, layer, u, p.x).value;
+    probeCache = { probe: p, scan, unit: u, value };
+    return value;
   };
 
-  const rankText = (share: number) =>
-    share >= 0.995 ? 'as high as the strongest test digits' : share <= 0.005 ? 'as low as the weakest test digits' : `higher than about ${pct(share, 0)} of the test digits`;
-
-  /** Approximate share of test digits below `v`, interpolating inside the histogram bin. */
-  const shareBelow = (s: UnitSummary, v: number) => {
-    const { lo, hi, counts } = s.hist;
-    const n = counts.reduce((a, b) => a + b, 0);
-    if (!n) return 0;
-    const t = ((v - lo) / (hi - lo)) * counts.length;
-    if (t <= 0) return 0;
-    if (t >= counts.length) return 1;
-    const k = Math.floor(t);
-    let below = 0;
-    for (let i = 0; i < k; i++) below += counts[i];
-    return (below + counts[k] * (t - k)) / n;
+  /** "Current input, test digit #12 · label 3: 0.419, higher than 61.4% of the 2,000 test digits." */
+  const probeSentence = (s: UnitSummary, v: number | null): string => {
+    const p = store.probe;
+    if (!p || v === null) return 'No input selected. Click a digit above, or pick or draw one in 02 Network or 03 Draw.';
+    let t = `Current input, ${lowerFirst(p.caption)}: ${num(v, 3)}, ${rankPhrase(rankIn(s.sorted, v))}.`;
+    if (scan && !isCurrent(scan.stamp)) t += ` Measured with the weights at step ${int(scan.stamp.step)}, as the scan was.`;
+    return t;
   };
 
   const histogram = (s: UnitSummary, u: number, kind: UnitKind): HTMLElement => {
-    const canvas = h('canvas', { role: 'img', 'aria-label': `Histogram of ${unitName(kind, u)}'s response over ${int(top?.count ?? 0)} test digits` }) as HTMLCanvasElement;
+    const count = scan?.result.count ?? 0;
+    const canvas = h('canvas', { role: 'img', 'aria-label': `Histogram of ${unitName(kind, u)}'s response over ${int(count)} test digits` }) as HTMLCanvasElement;
     const box = h('div', { class: 'canvas-box units-hist' }, canvas);
     let geo: { L: number; T: number; pw: number; ph: number; probe: number | null; px: number | null } | null = null;
+    const text = () => {
+      const t = probeSentence(s, probeResponse(u));
+      if (probeLine && probeLine.textContent !== t) probeLine.textContent = t;
+    };
     const draw = () => {
+      probeDirty = false;
       const p = palette();
       const w = Math.max(240, box.clientWidth);
       const H = 156;
@@ -458,7 +529,7 @@ export function mountUnits(): void {
         ctx.fillRect(x - 0.5, T + ph, 1, 4);
         ctx.fillStyle = p.muted;
         ctx.textAlign = v === lo ? 'left' : v === hi ? 'right' : 'center';
-        ctx.fillText(fmt(v, 2), v === lo ? x - 0.5 : v === hi ? x + 0.5 : x, T + ph + 6);
+        ctx.fillText(num(v, 2), v === lo ? x - 0.5 : v === hi ? x + 0.5 : x, T + ph + 6);
         ctx.fillStyle = p.ink;
       }
       ctx.fillStyle = p.muted;
@@ -473,18 +544,13 @@ export function mountUnits(): void {
         ctx.fillRect(Math.round(px) - 1, T - 6, 2, ph + 6);
         ctx.fillStyle = p.ink;
         ctx.textBaseline = 'alphabetic';
-        const text = pv < lo || pv > hi ? `this input ${fmt(pv, 2)} (off scale)` : 'this input';
-        const tw = ctx.measureText(text).width;
+        const label = pv < lo || pv > hi ? `this input ${num(pv, 2)} (off scale)` : 'this input';
+        const tw = ctx.measureText(label).width;
         ctx.textAlign = px + 6 + tw > L + pw ? 'right' : 'left';
-        ctx.fillText(text, ctx.textAlign === 'right' ? px - 6 : px + 6, T - 2);
+        ctx.fillText(label, ctx.textAlign === 'right' ? px - 6 : px + 6, T - 2);
       }
       geo = { L, T, pw, ph, probe: pv, px };
-      if (probeLine) {
-        probeLine.textContent =
-          pv === null
-            ? 'No input selected.'
-            : `This input: ${fmt(pv, 3)}, ${rankText(shareBelow(s, pv))}.`;
-      }
+      text();
     };
     canvas.addEventListener('mousemove', (e) => {
       if (!geo) return;
@@ -497,12 +563,15 @@ export function mountUnits(): void {
       const k = Math.min(counts.length - 1, Math.floor(((mx - L) / pw) * counts.length));
       const a = lo + ((hi - lo) * k) / counts.length;
       const b = lo + ((hi - lo) * (k + 1)) / counts.length;
-      let text = `${fmt(a, 3)} to ${fmt(b, 3)}\n${int(counts[k])} digit${counts[k] === 1 ? '' : 's'}`;
-      if (geo.px !== null && geo.probe !== null && Math.abs(mx - geo.px) < 6) text += `\nthis input ${fmt(geo.probe, 3)}`;
-      showTip(text, e.clientX, e.clientY);
+      let tip = `${num(a, 3)} to ${num(b, 3)}\n${int(counts[k])} digit${counts[k] === 1 ? '' : 's'}`;
+      if (geo.px !== null && geo.probe !== null && store.probe && Math.abs(mx - geo.px) < 6) {
+        tip += `\nCurrent input · ${store.probe.caption}\n${num(geo.probe, 3)}, ${rankPhrase(rankIn(s.sorted, geo.probe))}`;
+      }
+      showTip(tip, e.clientX, e.clientY);
     });
     canvas.addEventListener('mouseleave', hideTip);
     histDraw = draw;
+    probeText = text;
     requestAnimationFrame(draw);
     return box;
   };
@@ -536,13 +605,16 @@ export function mountUnits(): void {
   const renderDetail = () => {
     clear(detail);
     histDraw = null;
+    probeText = null;
     probeLine = null;
     detailSynth = null;
+    if (scan) detail.dataset.step = String(scan.stamp.step);
+    else delete detail.dataset.step;
     const u = selectedUnit();
     if (u === null) {
       detail.append(
         h('p', { class: 'sub' }, 'Details'),
-        h('p', { class: 'hint' }, 'Pick a unit to see the 16 digits that excite it most, the digits that switch it off, how its response spreads over the test set, and its synthesised input.'),
+        h('p', { class: 'hint' }, 'Pick a unit to see the 16 digits that excite it most, the digits that excite it least, how its response spreads over the test set, and its synthesised input.'),
       );
       return;
     }
@@ -550,48 +622,62 @@ export function mountUnits(): void {
     const spec = specOf(layer);
     const name = unitName(kind, u);
     const s = summary(u);
-    const size = receptiveSize(store.net.spec, layer);
+    const f = kind === 'conv' ? field() : null;
     const responseIs =
-      kind === 'conv' ? 'its strongest activation anywhere on the digit' : kind === 'output' ? `the logit for digit ${u}, before softmax` : 'its activation';
+      kind === 'conv'
+        ? 'its strongest activation anywhere on the digit. It fires where its pre-activation is above 0'
+        : kind === 'output'
+          ? `the logit for digit ${u}, before softmax. A digit is predicted as ${u} when this logit is the largest of the ten`
+          : 'its activation. It fires when its pre-activation is above 0';
 
     const head = h(
       'div',
       { class: 'units-detail-head' },
-      h('h3', null, name),
+      h('h3', { class: 'panel-title' }, name),
       h('span', { class: 'units-detail-layer' }, `${layerName(spec, layer)} · ${layerDetail(spec)}`),
     );
     detail.append(head);
     if (s) {
-      const kv = (k: string, v: string) => h('span', null, `${k} `, h('b', null, v));
+      const kv = (k: string, v: string, after = '') => h('span', null, `${k} `, h('b', null, v), after);
+      const [coverLead, coverTail] =
+        kind === 'conv' ? ['fires at', ' of positions'] : kind === 'dense' ? ['fires on', ' of digits'] : ['predicted for', ' of digits'];
       detail.append(
         h(
           'div',
           { class: 'units-stats' },
-          kv('mean', fmt(s.mean, 3)),
-          kv('active', pct(s.activeFraction, 0)),
-          kv('max', fmt(s.top[0]?.value ?? NaN, 3)),
-          kind === 'conv' ? kv('sees', `${size}×${size} px`) : kv('sees', 'whole image'),
+          kv('mean', num(s.mean, 3)),
+          kv('max', num(s.top[0]?.value ?? NaN, 3)),
+          kv(coverLead, sharePct(s.coverage, 1), coverTail),
+          kv('sees', f && !f.whole ? `${f.size}×${f.size} px` : 'whole image'),
         ),
         h('p', { class: 'hint' }, `Response is ${responseIs}. Click any digit to make it the network’s input.`),
       );
       const strongest = h('div', { class: 'units-digits' }, ...s.top.slice(0, TOP_K).map((hit) => digitButton(hit, true)));
-      const weakest = h('div', { class: 'units-digits' }, ...s.bottom.slice(0, DETAIL_BOTTOM).map((hit) => digitButton(hit, true)));
+      const weak = s.bottom.slice(0, DETAIL_BOTTOM);
+      const weakest = h('div', { class: 'units-digits' }, ...weak.map((hit) => digitButton(hit, true)));
+      // Conv filters fire somewhere on almost every digit, so their weakest digits rarely switch them off.
+      const weakTitle = allOff(weak) ? `What switches it off · weakest ${weak.length}` : `Weakest responses · bottom ${weak.length}`;
+      const boxNote = !f
+        ? null
+        : f.whole
+          ? 'The box marks the pixels the filter sees from the position where it fired hardest.'
+          : `The box marks the ${f.size}×${f.size} patch where the filter fired hardest.`;
       detail.append(
         h(
           'div',
           { class: 'units-block' },
           h('p', { class: 'sub' }, `Strongest responses · top ${Math.min(TOP_K, s.top.length)}`),
-          kind === 'conv' ? h('p', { class: 'hint units-box-note' }, h('i', { class: 'units-swatch-box' }), `The box marks the ${size}×${size} patch where the filter fired hardest.`) : null,
+          boxNote ? h('p', { class: 'hint units-box-note' }, h('i', { class: 'units-swatch-box' }), boxNote) : null,
           strongest,
         ),
-        h('div', { class: 'units-block' }, h('p', { class: 'sub' }, 'What switches it off · weakest 8'), weakest),
+        h('div', { class: 'units-block' }, h('p', { class: 'sub units-weak-title' }, weakTitle), weakest),
       );
-      probeLine = h('p', { class: 'hint units-probe' });
+      probeLine = h('p', { class: 'hint units-probe', 'aria-live': 'polite' });
       detail.append(
         h(
           'div',
           { class: 'units-block' },
-          h('p', { class: 'sub' }, `Response across ${int(top!.count)} test digits`),
+          h('p', { class: 'sub' }, `Response across ${int(scan!.result.count)} test digits`),
           histogram(s, u, kind),
           h(
             'div',
@@ -609,7 +695,7 @@ export function mountUnits(): void {
     // Labels and synthesised input side by side when there is room.
     const pair = h('div', { class: 'units-pair' });
     if (s) {
-      const n = Math.min(TOP_LABELS, top!.count);
+      const n = Math.min(TOP_LABELS, scan!.result.count);
       pair.append(h('div', { class: 'units-block' }, h('p', { class: 'sub' }, `Labels of the top ${n}`), h('p', { class: 'units-label-sum' }, labelSummary(s.labelCounts)), labelBars(s.labelCounts)));
     }
     const st = synth();
@@ -627,7 +713,17 @@ export function mountUnits(): void {
         { class: 'units-block' },
         h('p', { class: 'sub' }, 'Synthesised input'),
         h('div', { class: 'units-synth units-synth-large' }, canvas, empty),
-        kind === 'conv' ? h('p', { class: 'hint' }, `Cropped to the ${size}×${size} patch the filter sees at the centre of the image.`) : null,
+        f
+          ? h(
+              'p',
+              { class: 'hint' },
+              f.cropSide < 28
+                ? `Cropped to the ${f.cropSide}×${f.cropSide} patch the filter sees at the centre of the image.`
+                : f.whole
+                  ? 'The filter at the centre of its map sees the whole image.'
+                  : `The filter at the centre of its map sees a ${f.size}×${f.size} patch; pixels outside it stay blank.`,
+            )
+          : null,
         text,
       ),
     );
@@ -642,13 +738,16 @@ export function mountUnits(): void {
     synthBtn.disabled = !store.data || !store.valid;
     synthBar.show(!!s?.running);
     const n = countOf(layer);
-    if (!s) synthNote.textContent = `Optimises an input for each of the ${n} unit${n === 1 ? '' : 's'}, ${ACTMAX_STEPS} steps each.`;
+    const what = kindOf(layer) === 'conv' ? 'filter' : 'unit';
+    const step = s ? s.stamp.step : 0;
+    if (!s) synthNote.textContent = `Optimises an input for each of the ${n} ${what}${n === 1 ? '' : 's'}, ${ACTMAX_STEPS} steps each.`;
     else if (s.error) synthNote.textContent = `Synthesis failed: ${s.error}`;
     else if (s.running) {
       synthNote.textContent = s.current === null ? 'Starting…' : `Synthesising ${unitName(kindOf(layer), s.current)}, ${s.current + 1} of ${s.total}…`;
-    } else if (s.stopped) synthNote.textContent = `Stopped after ${s.current ?? 0} of ${s.total} units.`;
-    else if (s.step !== store.weightsStep) synthNote.textContent = `Synthesised at step ${int(s.step)}; the network is now at step ${int(store.weightsStep)}.`;
-    else synthNote.textContent = `Synthesised from the weights at step ${int(s.step)}.`;
+    } else if (s.stopped) synthNote.textContent = `Stopped after ${s.current ?? 0} of ${s.total} ${what}s.`;
+    else if (isCurrent(s.stamp)) synthNote.textContent = `Synthesised from the weights at step ${int(step)}.`;
+    else if (step !== store.weightsStep) synthNote.textContent = `Synthesised at step ${int(step)}; the network is now at step ${int(store.weightsStep)}.`;
+    else synthNote.textContent = `Synthesised at step ${int(step)}, before the latest manual weight update.`;
   };
 
   const showSynth = (u: number) => {
@@ -682,7 +781,7 @@ export function mountUnits(): void {
     if (!store.data || !store.valid) return;
     const block = layer;
     const version = store.version;
-    const st: SynthState = { block, step: store.weightsStep, running: true, stopped: false, total: countOf(block), current: null, units: new Map(), error: null };
+    const st: SynthState = { block, stamp: stampNow(), running: true, stopped: false, total: countOf(block), current: null, units: new Map(), error: null };
     synths.set(block, st);
     synthBar.set(0);
     renderCards();
@@ -721,8 +820,13 @@ export function mountUnits(): void {
   });
 
   more.addEventListener('click', () => {
+    const before = more.getBoundingClientRect().top;
     showAll = !showAll;
     renderCards();
+    // Collapsing removes cards above the button: keep the button where it was on screen, or the
+    // page would be left far below the section.
+    const shift = more.getBoundingClientRect().top - before;
+    if (shift) window.scrollTo({ top: window.scrollY + shift, behavior: 'instant' });
   });
 
   // ── Assembly ──
@@ -733,23 +837,25 @@ export function mountUnits(): void {
   };
 
   root.append(
-    h('p', { class: 'hint' }, HINT),
     h('div', { class: 'units-controls' }, layerSlot, h('div', { class: 'units-synth-ctl' }, h('div', { class: 'units-synth-row' }, synthBtn, synthNote), synthBar.el)),
     sync.status,
-    h('div', { class: 'units-layout' }, h('div', { class: 'units-main' }, gridNote, gridKey, grid, more), detail),
+    layout,
   );
 
   // ── Store events ──
   store.on('model', () => {
     for (const s of synths.values()) if (s.running) analysis.cancel('units-actmax');
     synths.clear();
-    top = null;
-    scanFor = null;
+    scan = null;
+    scanning = null; // a scan of the old network is useless; ensureScan below replaces it
+    probeCache = null;
     scanError = null;
     showAll = false;
     layer = clampLayer(store.selected);
+    markUpdating();
     buildLayerSelect();
     renderAll();
+    ensureScan();
   });
   store.on('select', () => {
     const b = clampLayer(store.selected);
@@ -767,20 +873,27 @@ export function mountUnits(): void {
   });
 
   let queued = false;
-  const redrawProbe = () => {
-    if (queued || !histDraw) return;
+  /** Redraws the histogram (and the current input's marker) on the next frame, if on screen. */
+  function redrawProbe() {
+    if (!histDraw) return;
+    if (!visible) {
+      probeDirty = true;
+      return;
+    }
+    if (queued) return;
     queued = true;
     requestAnimationFrame(() => {
       queued = false;
       histDraw?.();
     });
-  };
+  }
   store.on('probe', () => {
     for (const b of detail.querySelectorAll<HTMLElement>('.units-digit')) b.setAttribute('aria-pressed', String(store.probe?.key === `test:${b.dataset.index}`));
     redrawProbe();
   });
+  // New weights do not move the marker (it uses the scan's weights); only the "measured at" note changes.
   store.on('weights', () => {
-    redrawProbe();
+    probeText?.();
     renderSynthUI();
   });
   store.on('data', () => {

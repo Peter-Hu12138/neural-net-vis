@@ -2,18 +2,28 @@ import { readFileSync } from 'node:fs';
 import { inflateSync } from 'node:zlib';
 import { describe as suite, expect, it } from 'vitest';
 import {
+  alignPca,
   balancedIndices,
   calibrateRow,
   DEFAULT_N,
   gaussianProjection,
+  isFlat,
   jobs,
   layerDim,
   layerFeatures,
+  niceTicks,
   pcaFit,
   projectPca,
   projectRow,
+  randomizedPca,
+  jacobiEigen as eigenSmall,
+  signedValue,
   sqDistances,
   symmetrise,
+  tickLabel,
+  TSNE_INIT_STD,
+  TSNE_PCA_DIM,
+  KEEP_LIMIT,
   tsneGradient,
   tsneKL,
   tsneRun,
@@ -22,14 +32,15 @@ import {
 } from '../src/analysis/embed';
 import type { JobContext, Progress } from '../src/analysis/protocol';
 import { Network } from '../src/nn/network';
+import { Optimizer } from '../src/nn/optim';
 import { Rng } from '../src/nn/rng';
 import { PRESETS } from '../src/store';
 
 const preset = (name: string) => structuredClone(PRESETS.find((p) => p.name === name)!.spec);
 
-/** The bundled 2,000 MNIST test digits, decoded from the PNG sprite (8-bit grey, filter 0). */
-function loadTest(): { testX: Uint8Array; testY: Uint8Array } {
-  const buf = readFileSync('public/data/mnist-test.png');
+/** Digits from one bundled PNG sprite (8-bit grey, filter 0, 100 per row). */
+function decodeSprite(file: string, count: number): Uint8Array {
+  const buf = readFileSync(file);
   let off = 8;
   let width = 0;
   const idat: Buffer[] = [];
@@ -42,15 +53,45 @@ function loadTest(): { testX: Uint8Array; testY: Uint8Array } {
     off += 12 + len;
   }
   const raw = inflateSync(Buffer.concat(idat));
-  const testX = new Uint8Array(2000 * 784);
-  for (let i = 0; i < 2000; i++) {
+  const X = new Uint8Array(count * 784);
+  for (let i = 0; i < count; i++) {
     const ox = (i % 100) * 28;
     const oy = Math.floor(i / 100) * 28;
-    for (let r = 0; r < 28; r++) for (let c = 0; c < 28; c++) testX[i * 784 + r * 28 + c] = raw[(oy + r) * (width + 1) + 1 + ox + c];
+    for (let r = 0; r < 28; r++) for (let c = 0; c < 28; c++) X[i * 784 + r * 28 + c] = raw[(oy + r) * (width + 1) + 1 + ox + c];
   }
-  const labels = readFileSync('public/data/mnist-labels.txt', 'utf8').trim();
-  const testY = Uint8Array.from(labels.slice(20_000), (ch) => ch.charCodeAt(0) - 48);
-  return { testX, testY };
+  return X;
+}
+
+const labelText = readFileSync('public/data/mnist-labels.txt', 'utf8').trim();
+
+/** The bundled 2,000 MNIST test digits. */
+function loadTest(): { testX: Uint8Array; testY: Uint8Array } {
+  return { testX: decodeSprite('public/data/mnist-test.png', 2000), testY: Uint8Array.from(labelText.slice(20_000), (ch) => ch.charCodeAt(0) - 48) };
+}
+
+/** A network trained with Adam (lr 0.003, batches of 32) on the first 5,000 training digits. */
+function trainer(name: string, seed: number) {
+  const trainX = decodeSprite('public/data/mnist-train-0.png', 5000);
+  const trainY = Uint8Array.from(labelText.slice(0, 5000), (ch) => ch.charCodeAt(0) - 48);
+  const net = new Network(preset(name), seed);
+  const opt = new Optimizer(net, 'adam', 0.003);
+  const x = new Float32Array(784);
+  let pos = 0;
+  return {
+    net,
+    train(batches: number) {
+      for (let b = 0; b < batches; b++) {
+        net.zeroGrad();
+        for (let k = 0; k < 32; k++) {
+          const i = pos++ % 5000;
+          for (let j = 0; j < 784; j++) x[j] = trainX[i * 784 + j] / 255;
+          net.forward(x);
+          net.backward(trainY[i]);
+        }
+        opt.step(1 / 32);
+      }
+    },
+  };
 }
 
 const data = loadTest();
@@ -430,7 +471,8 @@ suite('embed job on real digits', () => {
     const r = run.result;
     expect(r.method).toBe('tsne');
     expect(r.dim).toBe(784);
-    expect(r.inputDim).toBe(64);
+    expect(r.inputDim).toBe(50);
+    expect(r.reduced).toBe('pca');
     expect(r.iterations).toBe(400);
     expect(r.perplexity).toBe(30);
     expect(r.coords.every(Number.isFinite)).toBe(true);
@@ -444,15 +486,22 @@ suite('embed job on real digits', () => {
     // Progress is monotone and stays within the total.
     for (let i = 1; i < run.reports.length; i++) expect(run.reports[i].done).toBeGreaterThanOrEqual(run.reports[i - 1].done);
     expect(run.reports[run.reports.length - 1].done).toBe(run.reports[0].total);
-    // The map keeps neighbours: 5-NN label purity in 2-D is close to that of the 64-d input t-SNE saw.
+    // 5-NN label purity: the 50 PCA directions t-SNE saw keep neighbours better than the 64-d
+    // sketch they were found from, and the 2-D map keeps most of what the full 784-d space has.
+    const full = new Float32Array(n * 784);
+    r.indices.forEach((i, s) => context(net).image(i, full.subarray(s * 784, (s + 1) * 784)));
     const R = gaussianProjection(784, 64);
-    const P = new Float32Array(n * 64);
-    const x = new Float32Array(784);
-    r.indices.forEach((i, s) => projectRow(context(net).image(i, x), R, 784, 64, P, s * 64));
-    const input = knnPurityND(P, 64, r.labels);
+    const sketch = new Float32Array(n * 64);
+    for (let s = 0; s < n; s++) projectRow(full.subarray(s * 784, (s + 1) * 784), R, 784, 64, sketch, s * 64);
+    const reduced = drain(randomizedPca(sketch, n, 64, 784, 50, (s) => full.subarray(s * 784, (s + 1) * 784))).result;
+    const pFull = knnPurityND(full, 784, r.labels);
+    const pSketch = knnPurityND(sketch, 64, r.labels);
+    const pReduced = knnPurityND(reduced, 50, r.labels);
     const map = knnPurity(r.coords, r.labels);
-    expect(input).toBeGreaterThan(0.7);
-    expect(map).toBeGreaterThan(0.9 * input);
+    console.log(`5-NN purity, ${n} pixel digits: 784-d ${pFull.toFixed(3)}, 64-d sketch ${pSketch.toFixed(3)}, 50 PCs ${pReduced.toFixed(3)}, t-SNE map ${map.toFixed(3)}`);
+    expect(pFull).toBeGreaterThan(0.7);
+    expect(pReduced).toBeGreaterThan(pSketch + 0.01);
+    expect(map).toBeGreaterThan(0.9 * pFull);
   });
 
   it('runs the default t-SNE (n = 1000, 500 steps) on a conv layer in time', () => {
@@ -462,17 +511,300 @@ suite('embed job on real digits', () => {
     const run = drain(jobs.embed(ctx, { layer: 0, method: 'tsne' }) as Generator<Progress, EmbedResult, void>);
     const r = run.result;
     let longest = 0;
-    // Time per yield, on a second pass over the first part of the job.
+    // Time per yield, on a second run through the reading, PCA and preparation phases.
     const gen = jobs.embed(ctx, { layer: 0, method: 'tsne' });
-    for (let i = 0; i < 400; i++) {
+    for (;;) {
       const t0 = performance.now();
-      if (gen.next().done) break;
+      const step = gen.next();
       longest = Math.max(longest, performance.now() - t0);
+      if (step.done || (step.value as Progress).partial) break;
     }
-    console.log(`t-SNE, Conv 1 (1,568 values), n = ${r.indices.length}, ${r.iterations} steps: ${run.ms.toFixed(0)} ms; longest slice ${longest.toFixed(1)} ms; KL ${r.kl!.toFixed(3)}`);
+    console.log(`t-SNE, Conv 1 (1,568 values), n = ${r.indices.length}, ${r.iterations} steps: ${run.ms.toFixed(0)} ms; longest slice before the first frame ${longest.toFixed(1)} ms; KL ${r.kl!.toFixed(3)}`);
     expect(r.indices.length).toBe(1000);
-    expect(r.inputDim).toBe(64);
+    expect(r.inputDim).toBe(50);
     expect(r.coords.every(Number.isFinite)).toBe(true);
     expect(run.ms).toBeLessThan(20_000);
+    expect(longest).toBeLessThan(60);
+  }, 60_000);
+});
+
+suite('PCA orientation (alignPca)', () => {
+  /** A fitted PCA of correlated random data, for the synthetic cases. */
+  const sample = () => {
+    const n = 200;
+    const d = 5;
+    const rng = new Rng(17);
+    const X = new Float32Array(n * d);
+    for (let i = 0; i < n; i++) {
+      const a = 3 * rng.normal();
+      const b = 1.5 * rng.normal();
+      for (let j = 0; j < d; j++) X[i * d + j] = a * (j - 2) + b * (j % 2 ? 1 : -1) + 0.1 * rng.normal();
+    }
+    return { fit: drain(pcaFit(X, n, d)).result, d };
+  };
+
+  it('negates a component (and its coordinates) that came out mirrored', () => {
+    const { fit, d } = sample();
+    const prev = fit.components.slice();
+    const coords = fit.coords.slice();
+    // The same map, but PC1 mirrored: what a sign-rule flip after a training step looks like.
+    for (let j = 0; j < d; j++) fit.components[j] = -fit.components[j];
+    for (let i = 0; i < coords.length; i += 2) fit.coords[i] = -fit.coords[i];
+    expect(alignPca(fit, fit.coords, prev)).toEqual([true, false]);
+    expect(Array.from(fit.components)).toEqual(Array.from(prev));
+    expect(Array.from(fit.coords)).toEqual(Array.from(coords));
+    // Already aligned: nothing changes. No previous map: nothing changes either.
+    expect(alignPca(fit, fit.coords, prev)).toEqual([false, false]);
+    expect(alignPca(fit, fit.coords, null)).toEqual([false, false]);
+    expect(alignPca(fit, fit.coords, new Float32Array(4))).toEqual([false, false]);
+  });
+
+  it('follows a component that swapped places with the other one', () => {
+    const { fit, d } = sample();
+    const prev = fit.components.slice();
+    // New PC1 = old PC2, new PC2 = −old PC1 (the eigenvalues crossed and the sign rule flipped one).
+    const c = fit.components;
+    c.set(prev.subarray(d, 2 * d), 0);
+    for (let j = 0; j < d; j++) c[d + j] = -prev[j];
+    expect(alignPca(fit, fit.coords, prev)).toEqual([false, true]);
+    for (let j = 0; j < d; j++) expect(c[d + j]).toBe(prev[j]);
+  });
+
+  it('keeps a recomputed map facing the same way through training steps', () => {
+    // Small CNN, logits layer: softmax ignores the all-ones direction, so the components' entry
+    // sums (pcaFit's cold-start sign rule) are ~0 and a single training step can tip them over.
+    const t = trainer('Small CNN', 1);
+    t.train(100);
+    const layer = t.net.blocks.length - 1;
+    const dot = (a: Float32Array, b: Float32Array, k: number, m: number, d: number) => {
+      let s = 0;
+      for (let j = 0; j < d; j++) s += a[k * d + j] * b[m * d + j];
+      return s;
+    };
+    let rawPrev: Float32Array | null = null;
+    let alignedPrev: Float32Array | null = null;
+    let rawFlips = 0;
+    let alignedFlips = 0;
+    let c = 0;
+    for (; c < 39 && rawFlips < 1; c++) {
+      if (c > 0) t.train(2); // 64 more digits, as after two clicks on Step
+      const r = drain(jobs.embed(context(t.net), { layer, method: 'pca' }) as Generator<Progress, EmbedResult, void>).result;
+      const d = r.dim;
+      const raw = r.pca!.components.slice();
+      alignPca(r.pca!, r.coords, alignedPrev);
+      for (let k = 0; k < 2; k++) {
+        if (rawPrev && dot(raw, rawPrev, k, k, d) < -0.5) rawFlips++;
+        if (alignedPrev && dot(r.pca!.components, alignedPrev, k, k, d) < -0.5) alignedFlips++;
+      }
+      // The coordinates still are the digits' projections on the (re-oriented) components.
+      const s = 123;
+      const net = t.net;
+      net.forward(context(net).image(r.indices[s]));
+      const [a, b] = projectPca(layerFeatures(net, layer), r.pca!);
+      expect(a).toBeCloseTo(r.coords[2 * s], 3);
+      expect(b).toBeCloseTo(r.coords[2 * s + 1], 3);
+      rawPrev = raw;
+      alignedPrev = r.pca!.components.slice();
+    }
+    console.log(`PCA of the logits, ${c} recomputes 64 digits apart: ${rawFlips} sign flips from pcaFit alone, ${alignedFlips} after alignPca`);
+    expect(rawFlips).toBeGreaterThan(0); // the problem reproduces…
+    expect(alignedFlips).toBe(0); // …and alignment removes it
+  }, 120_000);
+});
+
+suite('flat layers', () => {
+  it('a layer whose units are all inactive is reported as flat, not drawn as noise', () => {
+    const net = new Network(preset('Small CNN'), 4);
+    net.blocks[2].b.fill(-100); // Dense 3: every ReLU is off for every digit
+    const pca = drain(jobs.embed(context(net), { layer: 2, method: 'pca', n: 200 }) as Generator<Progress, EmbedResult, void>).result;
+    expect(pca.flat).toBe(true);
+    expect(pca.pca!.explained).toEqual([0, 0]);
+    expect(pca.coords.every((v) => v === 0)).toBe(true);
+    const run = drain(jobs.embed(context(net), { layer: 2, method: 'tsne', n: 200 }) as Generator<Progress, EmbedResult, void>);
+    expect(run.result.flat).toBe(true);
+    expect(run.result.iterations).toBe(0);
+    expect(run.result.coords.every((v) => v === 0)).toBe(true);
+    expect(run.reports.some((r) => r.partial)).toBe(false);
+    // The layer before it is alive.
+    const live = drain(jobs.embed(context(net), { layer: 1, method: 'pca', n: 200 }) as Generator<Progress, EmbedResult, void>).result;
+    expect(live.flat).toBe(false);
+    expect(live.pca!.explained[0]).toBeGreaterThan(0);
+  });
+
+  it('isFlat: zero or rounding-level variance only', () => {
+    expect(isFlat(0, 0)).toBe(true);
+    expect(isFlat(0, 4)).toBe(true);
+    expect(isFlat(1e-20, 1)).toBe(true);
+    expect(isFlat(NaN, 1)).toBe(true);
+    expect(isFlat(1e-6, 1)).toBe(false);
+    expect(isFlat(1e-30, 1e-31)).toBe(false); // tiny but relatively large: a real spread
+  });
+});
+
+suite('axis and tooltip numbers', () => {
+  it('tick labels: true minus, plain zero, never −0.0000, distinct even on tiny spans', () => {
+    expect(tickLabel(-10, 5)).toBe('−10');
+    expect(tickLabel(0, 5)).toBe('0');
+    expect(tickLabel(0.25, 0.05)).toBe('0.25');
+    expect(tickLabel(-0.0002, 0.0001)).toBe('−0.0002');
+    expect(tickLabel(-4e-5, 2e-5)).toBe('−4e−5');
+    expect(tickLabel(1.2e-4, 2e-5)).toBe('1.2e−4');
+    for (const span of [1e-13, 3e-9, 2e-5, 4e-4, 0.03, 7, 1234]) {
+      for (const lo of [-span, -span / 3, 0]) {
+        const { ticks, step } = niceTicks(lo, lo + 2 * span, 5);
+        expect(ticks.length).toBeGreaterThan(2);
+        const labels = ticks.map((t) => tickLabel(t, step));
+        expect(new Set(labels).size, labels.join(' ')).toBe(labels.length);
+        for (const l of labels) {
+          expect(l).not.toMatch(/^[−-]0(\.0*)?$/);
+          expect(l).not.toContain('-');
+          expect(l.length).toBeLessThanOrEqual(8);
+        }
+      }
+    }
+  });
+
+  it('tooltip coordinates use a true minus and never print −0.00', () => {
+    expect(signedValue(-5.444)).toBe('−5.44');
+    expect(signedValue(10.43)).toBe('10.43');
+    expect(signedValue(-0)).toBe('0.00');
+    expect(signedValue(-0.0049)).toBe('−4.9e−3');
+    expect(signedValue(0)).toBe('0.00');
+    expect(signedValue(Infinity)).toBe('—');
+  });
+});
+
+suite('t-SNE start', () => {
+  it('starts from the PCA layout scaled to TSNE_INIT_STD; random start still available', () => {
+    const net = new Network([], 1);
+    const n = 300;
+    const idx = balancedIndices(data.testY, n);
+    const x = new Float32Array(784);
+    const X = new Float32Array(n * 64);
+    const R = gaussianProjection(784, 64);
+    idx.forEach((i, s) => projectRow(context(net).image(i, x), R, 784, 64, X, s * 64));
+    const frame0 = (init: 'pca' | 'random') =>
+      drain(tsneRun(X, n, 64, { iterations: 1, init })).reports.map((r) => r.partial).find((p): p is TsnePartial => !!p && p.iteration === 0)!.coords;
+    const pca = drain(pcaFit(X.slice(), n, 64)).result.coords;
+    const corr = (a: Float32Array, b: Float32Array, k: number) => {
+      const u = Float64Array.from({ length: n }, (_, i) => a[2 * i + k]);
+      const v = Float64Array.from({ length: n }, (_, i) => b[2 * i + k]);
+      return cosine(u, v);
+    };
+    const start = frame0('pca');
+    for (const k of [0, 1]) expect(Math.abs(corr(start, pca, k))).toBeGreaterThan(0.999);
+    let ss = 0;
+    for (let i = 0; i < n; i++) ss += start[2 * i] ** 2;
+    expect(Math.sqrt(ss / n)).toBeCloseTo(TSNE_INIT_STD, 6);
+    const noise = frame0('random');
+    expect(Math.abs(corr(noise, pca, 0))).toBeLessThan(0.2);
+    // The PCA start already sorts the digits a little; noise does not.
+    expect(knnPurity(start, Uint8Array.from(idx, (i) => data.testY[i]))).toBeGreaterThan(0.2);
+    expect(knnPurity(noise, Uint8Array.from(idx, (i) => data.testY[i]))).toBeLessThan(0.2);
+  });
+
+  it('on a trained conv layer, clusters form during early exaggeration (purity after 100 steps)', () => {
+    const t = trainer('Small CNN', 1);
+    t.train(100);
+    const n = 1000;
+    const idx = balancedIndices(data.testY, n);
+    const labels = Uint8Array.from(idx, (i) => data.testY[i]);
+    const d = layerDim(t.net, 0);
+    const R = gaussianProjection(d, 64);
+    const X = new Float32Array(n * 64);
+    idx.forEach((i, s) => {
+      t.net.forward(context(t.net).image(i));
+      projectRow(layerFeatures(t.net, 0), R, d, 64, X, s * 64);
+    });
+    const at100 = (init: 'pca' | 'random', initStd?: number) => {
+      const g = tsneRun(X, n, 64, { init, initStd, iterations: 101 });
+      for (let r = g.next(); !r.done; r = g.next()) if (r.value.partial?.iteration === 100) return knnPurity(r.value.partial.coords, labels);
+      return 0;
+    };
+    const fromPca = at100('pca');
+    const fromNoise = at100('random', 1e-4); // the previous start
+    console.log(`t-SNE, Conv 1, 5-NN purity after 100 steps: PCA start ${fromPca.toFixed(3)}, random start (std 1e-4) ${fromNoise.toFixed(3)}`);
+    expect(fromPca).toBeGreaterThan(0.45);
+    expect(fromPca).toBeGreaterThan(fromNoise + 0.08);
+  }, 120_000);
+});
+
+suite('randomized PCA (t-SNE reduction)', () => {
+  it('jacobiEigen: A·v = λ·v, values in decreasing order', () => {
+    const l = 12;
+    const rng = new Rng(8);
+    const A = new Float64Array(l * l);
+    for (let a = 0; a < l; a++) for (let b = a; b < l; b++) A[a * l + b] = A[b * l + a] = rng.normal();
+    const { values, vectors } = drain(eigenSmall(A, l)).result;
+    for (let c = 1; c < l; c++) expect(values[c]).toBeLessThanOrEqual(values[c - 1]);
+    for (let c = 0; c < l; c++) {
+      for (let r = 0; r < l; r++) {
+        let av = 0;
+        for (let k = 0; k < l; k++) av += A[r * l + k] * vectors[k * l + c];
+        expect(av).toBeCloseTo(values[c] * vectors[r * l + c], 9);
+      }
+    }
+  });
+
+  it('with a sketch as wide as the data it equals exact PCA', () => {
+    const n = 300;
+    const d = 24;
+    const rng = new Rng(31);
+    const mix = Array.from({ length: d }, () => Array.from({ length: d }, () => rng.normal()));
+    const X = new Float32Array(n * d);
+    for (let i = 0; i < n; i++) {
+      const z = Array.from({ length: d }, (_, k) => rng.normal() * 3 * 0.75 ** k);
+      for (let j = 0; j < d; j++) {
+        let v = 1 + j;
+        for (let k = 0; k < d; k++) v += mix[j][k] * z[k];
+        X[i * d + j] = v;
+      }
+    }
+    const R = gaussianProjection(d, d);
+    const Y = new Float32Array(n * d);
+    for (let s = 0; s < n; s++) projectRow(X.subarray(s * d, (s + 1) * d), R, d, d, Y, s * d);
+    const F = drain(randomizedPca(Y, n, d, d, 5, (s) => X.subarray(s * d, (s + 1) * d))).result;
+    expect(F.length).toBe(n * 5);
+    const fit = drain(pcaFit(X.slice(), n, d)).result;
+    for (const k of [0, 1]) {
+      const a = Float64Array.from({ length: n }, (_, i) => F[i * 5 + k]);
+      const b = Float64Array.from({ length: n }, (_, i) => fit.coords[2 * i + k]);
+      expect(Math.abs(cosine(a, b))).toBeGreaterThan(0.9999);
+      // Same scale: the column's variance is that component's eigenvalue.
+      let v = 0;
+      for (let i = 0; i < n; i++) v += a[i] * a[i];
+      expect(v / n / fit.variance[k]).toBeCloseTo(1, 4);
+    }
+  });
+
+  it('the job reads very wide layers a second time and gets the same result as from memory', () => {
+    // Unpooled conv, 16 filters: 12,544 values per digit; 400 digits exceed KEEP_LIMIT, so the
+    // job runs the network again for the PCA step instead of holding 20 MB of rows.
+    const net = new Network([{ kind: 'conv', filters: 16, kernel: 3, act: 'relu', pool: false }], 3);
+    const n = 400;
+    const d = layerDim(net, 0);
+    expect(n * d).toBeGreaterThan(KEEP_LIMIT);
+    const run = drain(jobs.embed(context(net), { layer: 0, method: 'tsne', n, iterations: 1 }) as Generator<Progress, EmbedResult, void>);
+    expect(run.result.inputDim).toBe(TSNE_PCA_DIM);
+    const start = run.reports.map((p) => p.partial as TsnePartial | undefined).find((p) => p?.iteration === 0)!.coords;
+    // The same reduction from rows held in memory, then the same start layout.
+    const idx = balancedIndices(data.testY, n);
+    const rows = new Float32Array(n * d);
+    const R = gaussianProjection(d, 64);
+    const sketch = new Float32Array(n * 64);
+    idx.forEach((i, s) => {
+      net.forward(context(net).image(i));
+      rows.set(layerFeatures(net, 0), s * d);
+      projectRow(rows.subarray(s * d, (s + 1) * d), R, d, 64, sketch, s * 64);
+    });
+    const reduced = drain(randomizedPca(sketch, n, 64, d, TSNE_PCA_DIM, (s) => rows.subarray(s * d, (s + 1) * d))).result;
+    const mine = drain(tsneRun(reduced, n, TSNE_PCA_DIM, { iterations: 1 })).reports.map((r) => r.partial).find((p) => p?.iteration === 0)!.coords;
+    let err = 0;
+    let scale = 0;
+    for (let p = 0; p < 2 * n; p++) {
+      err = Math.max(err, Math.abs(start[p] - mine[p]));
+      scale = Math.max(scale, Math.abs(mine[p]));
+    }
+    expect(err / scale).toBeLessThan(1e-5);
   }, 60_000);
 });

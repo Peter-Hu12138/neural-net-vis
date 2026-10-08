@@ -74,3 +74,37 @@ export function receptiveSize(spec: LayerSpec[], block: number, level: 'z' | 'ou
   const b = receptiveBox(spec, block, 0, 0, level, false);
   return b ? b.y1 - b.y0 + 1 : INPUT_SHAPE.h;
 }
+
+/** The whole 28×28 input image. */
+export const WHOLE_IMAGE: Readonly<Box> = { y0: 0, y1: INPUT_SHAPE.h - 1, x0: 0, x1: INPUT_SHAPE.w - 1 };
+
+const side = (b: Box) => Math.max(b.y1 - b.y0 + 1, b.x1 - b.x0 + 1);
+
+/**
+ * The square crop that shows what position (y, x) of conv block `block`'s pre-pool map sees.
+ * While the nominal field is smaller than the image it is that field, unclipped, so every crop
+ * of a layer has the same size and pixels past the image edge show as blank. Once the field is as
+ * large as the image (deep stacks reach 38 or 58 pixels) it is the whole image, never more.
+ * Dense and output blocks return null.
+ */
+export function cropBox(spec: LayerSpec[], block: number, y: number, x: number): Box | null {
+  const b = receptiveBox(spec, block, y, x, 'z', false);
+  if (!b) return null;
+  return side(b) >= INPUT_SHAPE.h ? { ...WHOLE_IMAGE } : b;
+}
+
+/** Position at the centre of conv block `block`'s pre-pool map (the one activation maximisation uses). */
+export function centrePosition(spec: LayerSpec[], block: number): { y: number; x: number } {
+  const l = describe(spec)[block];
+  return { y: l.inShape.h >> 1, x: l.inShape.w >> 1 };
+}
+
+/**
+ * Side length in input pixels of what the unit at the centre of `block`'s map really sees,
+ * clipped to the image, so at most 28 (which means the whole image). Dense and output blocks: 28.
+ */
+export function centreFieldSize(spec: LayerSpec[], block: number): number {
+  if (!isConvPath(spec, block)) return INPUT_SHAPE.h;
+  const { y, x } = centrePosition(spec, block);
+  return side(receptiveBox(spec, block, y, x, 'z', true)!);
+}

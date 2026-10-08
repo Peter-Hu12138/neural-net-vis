@@ -79,9 +79,13 @@ describe('layerStats job', () => {
   it('returns sampled z/a, activity and gradients with the right shapes', () => {
     const ctx = context(SMALL_CNN);
     const { result, progress } = drain(layerStats(ctx, { samples: 40, maxValues: 5000 }));
-    expect(progress).toHaveLength(40); // one yield per image
-    expect(progress.at(-1)).toEqual({ done: 40, total: 40 });
+    // One yield per image: 40 forward/backward (3 progress units each), then a forward-only scan.
+    expect(progress.length).toBe(result.activityImages);
+    expect(progress[39]).toMatchObject({ done: 120 });
+    for (let i = 1; i < progress.length; i++) expect(progress[i].done).toBeGreaterThan(progress[i - 1].done);
+    expect(progress.at(-1)!.done).toBeLessThanOrEqual(progress[0].total);
     expect(result.samples).toBe(40);
+    expect(result.complete).toBe(true);
     expect(result.layers.map((l) => l.block)).toEqual([0, 1, 2, 3]);
     const blocks = ctx.net.blocks;
     result.layers.forEach((l, i) => {
@@ -125,7 +129,8 @@ describe('layerStats job', () => {
 
   it('the active fraction counts image × position entries with a > 0', () => {
     const ctx = context(SMALL_CNN, 2);
-    const { result } = drain(layerStats(ctx, { samples: 3, maxValues: 1e9 }));
+    const { result } = drain(layerStats(ctx, { samples: 3, maxValues: 1e9, activityImages: 3 }));
+    expect(result.activityImages).toBe(3);
     // Brute force over every value of Conv 1.
     const check = new Network(SMALL_CNN, 2);
     const counts = new Array(8).fill(0);
@@ -185,6 +190,94 @@ describe('layerStats job', () => {
     expect(l.gb[2]).toBe(0);
   });
 
+  it('a unit silent on the sampled digits but firing on another test digit is not dead', () => {
+    // Unit 1 is a template of one digit with a bias that only that digit clears.
+    const spec: LayerSpec[] = [{ kind: 'dense', units: 2, act: 'relu' }];
+    const ctx = context(spec, 1);
+    const b = ctx.net.blocks[0];
+    const n = 784;
+    b.W.fill(0.01, 0, n);
+    b.b[0] = 0.1;
+    const tmpl = ctx.image(7);
+    for (let i = 0; i < n; i++) b.W[n + i] = tmpl[i] - 0.5;
+    const scores = Array.from({ length: 2000 }, (_, k) => {
+      const x = ctx.image(k);
+      let s = 0;
+      for (let i = 0; i < n; i++) s += b.W[n + i] * x[i];
+      return s;
+    });
+    const order = scores.map((s, k) => [s, k]).sort((p, q) => q[0] - p[0]);
+    const [best, second] = order;
+    b.b[1] = -(best[0] + second[0]) / 2;
+    const only = best[1];
+    const sampled = [0, 500, 1000, 1500];
+    expect(sampled).not.toContain(only);
+
+    // Silent on the four sampled digits, so the scan runs until digit `only` makes it fire, then stops.
+    const { result, progress } = drain(layerStats(ctx, { samples: 4 }));
+    const l = result.layers[0];
+    expect(l.dead).toBe(0);
+    expect(l.activeFraction[1]).toBeCloseTo(1 / result.activityImages, 6);
+    const scannedUpTo = only - sampled.filter((s) => s < only).length; // forward-only images before it
+    expect(result.activityImages).toBe(4 + scannedUpTo + 1);
+    // The distributions arrive early as a partial result while the scan runs.
+    const partials = progress.filter((p) => p.partial);
+    expect(partials.length).toBeGreaterThan(0);
+    const part = partials[0].partial as LayerStatsResult;
+    expect(part.complete).toBe(false);
+    expect(part.layers[0].dead).toBe(1); // provisional: unit 1 has not fired on the 4 sampled digits
+    expect(part.layers[0].z).toEqual(l.z);
+
+    // Limited to the sampled digits, the same unit counts as dead.
+    const ctx2 = context(spec, 1);
+    ctx2.net.blocks[0].W.set(b.W);
+    ctx2.net.blocks[0].b.set(b.b);
+    const r2 = drain(layerStats(ctx2, { samples: 4, activityImages: 4 })).result;
+    expect(r2.activityImages).toBe(4);
+    expect(r2.layers[0].dead).toBe(1);
+  });
+
+  it('scans the whole test set when a unit never fires, and skips the scan when nothing is silent', () => {
+    const spec: LayerSpec[] = [{ kind: 'dense', units: 2, act: 'relu' }];
+    const ctx = context(spec, 1);
+    const b = ctx.net.blocks[0];
+    b.W.fill(0.01, 0, 784);
+    b.W.fill(-0.01, 784);
+    b.b.set([0.1, -0.1]);
+    const all = drain(layerStats(ctx, { samples: 8 })).result;
+    expect(all.activityImages).toBe(2000);
+    expect(all.layers[0].dead).toBe(1);
+    // Tanh layers have no dead units to look for: no scan.
+    const tanh = drain(layerStats(context([{ kind: 'dense', units: 8, act: 'tanh' }], 1), { samples: 8 }));
+    expect(tanh.result.activityImages).toBe(8);
+    expect(tanh.progress.every((p) => !p.partial)).toBe(true);
+  });
+
+  it('blank: the share of values whose whole input patch is zero, so z is exactly the bias', () => {
+    const ctx = context(SMALL_CNN, 3);
+    const { result } = drain(layerStats(ctx, { samples: 3, activityImages: 3 }));
+    // Brute force for Conv 1 (3×3, zero padding): count positions whose patch has no ink.
+    let blank = 0;
+    for (const idx of [0, 666, 1333]) {
+      const x = ctx.image(idx);
+      for (let y = 0; y < 28; y++)
+        for (let xx = 0; xx < 28; xx++) {
+          let ink = false;
+          for (let dy = -1; dy <= 1; dy++)
+            for (let dx = -1; dx <= 1; dx++) {
+              const yy = y + dy;
+              const xc = xx + dx;
+              if (yy >= 0 && yy < 28 && xc >= 0 && xc < 28 && x[yy * 28 + xc] !== 0) ink = true;
+            }
+          if (!ink) blank++;
+        }
+    }
+    // Every filter sees the same patches.
+    expect(result.layers[0].blank).toBeCloseTo(blank / (3 * 784), 9);
+    expect(result.layers[0].blank).toBeGreaterThan(0.4); // MNIST is mostly background
+    expect(result.layers[3].blank).toBe(0); // the logits always see some input
+  });
+
   it('counts a dead conv channel too', () => {
     const spec: LayerSpec[] = [{ kind: 'conv', filters: 3, kernel: 3, act: 'relu', pool: false }];
     const ctx = context(spec, 4);
@@ -205,7 +298,7 @@ describe('layerStats job', () => {
     }
   });
 
-  it('runs the default settings on the largest preset in a few seconds, at a few ms per yield', () => {
+  it('runs the default settings on the largest preset in a few seconds, at a few ms per yield', { timeout: 60_000 }, () => {
     const lenet: LayerSpec[] = [
       { kind: 'conv', filters: 6, kernel: 5, act: 'tanh', pool: true },
       { kind: 'conv', filters: 16, kernel: 5, act: 'tanh', pool: true },
@@ -224,11 +317,11 @@ describe('layerStats job', () => {
         if (r.done) break;
       }
       const total = performance.now() - t0;
-      timings.push(`${name}: ${total.toFixed(0)} ms total, worst yield ${worst.toFixed(1)} ms`);
+      timings.push(`${name}: ${total.toFixed(0)} ms total over ${r.value.activityImages} images, worst yield ${worst.toFixed(1)} ms`);
       expect(r.value.samples).toBe(256);
       for (const l of r.value.layers) expect(l.z.length).toBeLessThanOrEqual(20000);
       expect(total).toBeLessThan(10_000);
     }
-    console.log(`layerStats timings (256 images, 20,000 values):\n  ${timings.join('\n  ')}`);
+    console.log(`layerStats timings (256 images, 20,000 values, dead-unit scan when needed):\n  ${timings.join('\n  ')}`);
   });
 });
