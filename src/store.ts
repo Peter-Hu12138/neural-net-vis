@@ -4,7 +4,7 @@ import { DEFAULT_LR } from './nn/optim';
 import type { Hyper, LayerSpec } from './nn/types';
 import type { EvalPoint, Status, TrainPoint } from './train/protocol';
 
-export type WeightMode = 'heat' | 'hinton' | 'numbers' | 'hist';
+export type WeightMode = 'heat' | 'hinton' | 'numbers' | 'hist' | 'qq';
 
 export interface Probe {
   x: Float32Array;

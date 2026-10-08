@@ -11,6 +11,11 @@ import { $, int } from './ui/dom';
 import { mountDrawpad } from './ui/drawpad';
 import { mountInspector } from './ui/inspector';
 import { mountNetworkView } from './ui/networkView';
+import { analysis } from './analysis/client';
+import { mountAttribution } from './ui/attributionView';
+import { mountDistributions } from './ui/distView';
+import { mountEmbedding } from './ui/embeddingView';
+import { mountUnits } from './ui/unitsView';
 
 mountControls();
 mountBuilder();
@@ -20,6 +25,10 @@ mountInspector();
 mountCharts();
 mountBackprop();
 mountDataPanel();
+mountDistributions();
+mountUnits();
+mountAttribution();
+mountEmbedding();
 
 rebuild();
 
@@ -39,6 +48,7 @@ loadMnist((done, total) => {
   .then((data) => {
     store.data = data;
     client.post({ type: 'data', data: { trainX: data.trainX, trainY: data.trainY, testX: data.testX, testY: data.testY } });
+    analysis.setData(data.testX, data.testY);
     $('fact-data').textContent = `MNIST · ${int(TRAIN_COUNT)} train · ${int(TEST_COUNT)} test`;
     const i = 0;
     setProbe({ x: sampleToFloat(data.testX, i), label: data.testY[i], caption: `Test digit #${i} · label ${data.testY[i]}`, key: `test:${i}` });
@@ -49,4 +59,4 @@ loadMnist((done, total) => {
   });
 
 // Exposed for the browser tests and for poking around in the console.
-(window as unknown as { raster: unknown }).raster = { store, client };
+(window as unknown as { raster: unknown }).raster = { store, client, analysis };

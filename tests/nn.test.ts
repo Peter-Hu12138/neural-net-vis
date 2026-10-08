@@ -171,3 +171,63 @@ suite('weights', () => {
     expect(net.paramCount).toBe(describe(spec).reduce((s, l) => s + l.params, 0));
   });
 });
+
+suite('input gradients', () => {
+  const spec: LayerSpec[] = [
+    { kind: 'conv', filters: 3, kernel: 3, act: 'tanh', pool: true },
+    { kind: 'conv', filters: 4, kernel: 5, act: 'sigmoid', pool: false },
+    { kind: 'dense', units: 6, act: 'tanh' },
+  ];
+
+  /** Finite-difference check of ∂(seed·z_block)/∂x for random seeds at every block. */
+  for (const block of [0, 1, 2, 3]) {
+    it(`matches finite differences for a seed at block ${block}`, () => {
+      const net = new Network(spec, 21);
+      const rng = new Rng(block + 1);
+      const x = randomInput(rng);
+      const zLen = net.blocks[block].z.length;
+      const seed = Float32Array.from({ length: zLen }, () => rng.normal());
+      const objective = () => {
+        net.forward(x);
+        const z = net.blocks[block].z;
+        let s = 0;
+        for (let i = 0; i < zLen; i++) s += seed[i] * z[i];
+        return s;
+      };
+      objective();
+      const g = net.inputGradient(block, seed).slice();
+      const before = net.blocks.map((b) => b.gW.slice());
+      let num = 0;
+      let den = 0;
+      for (let t = 0; t < 40; t++) {
+        const i = rng.int(784);
+        const orig = x[i];
+        // ε = 0.003: large enough for float32, small enough not to flip max-pool winners.
+        x[i] = orig + 3e-3;
+        const p = objective();
+        x[i] = orig - 3e-3;
+        const m = objective();
+        x[i] = orig;
+        const numeric = (p - m) / 6e-3;
+        num += (numeric - g[i]) ** 2;
+        den += numeric ** 2 + g[i] ** 2;
+      }
+      expect(Math.sqrt(num / den)).toBeLessThan(1e-2);
+      // Parameter gradients are left alone.
+      net.blocks.forEach((b, j) => expect(b.gW).toEqual(before[j]));
+    });
+  }
+
+  it('agrees with the loss gradient at the logits', () => {
+    const net = new Network(spec, 5);
+    const x = randomInput(new Rng(9));
+    net.zeroGrad();
+    const p = net.forward(x).slice();
+    net.backward(4, true);
+    const viaLoss = net.blocks[0].dX.slice();
+    net.forward(x);
+    const seed = Float32Array.from(p, (v, k) => v - (k === 4 ? 1 : 0));
+    const viaSeed = net.inputGradient(net.blocks.length - 1, seed);
+    for (let i = 0; i < 784; i += 37) expect(viaSeed[i]).toBeCloseTo(viaLoss[i], 5);
+  });
+});

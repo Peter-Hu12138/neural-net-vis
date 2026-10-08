@@ -218,6 +218,12 @@ export class ConvBlock {
 
   /** Reads this.dOut (∂L/∂out); accumulates gW, gb; writes dX when needDx. */
   backward(needDx: boolean): void {
+    this.backwardToZ();
+    this.backwardFromZ(needDx, true);
+  }
+
+  /** ∂L/∂out → ∂L/∂z: routes through the max-pool winners, then the activation slope. */
+  backwardToZ(): void {
     if (this.spec.pool) {
       const dA = this.dA;
       dA.fill(0);
@@ -225,17 +231,22 @@ export class ConvBlock {
       for (let i = 0; i < am.length; i++) dA[am[i]] += this.dOut[i];
     }
     activateBackward(this.spec.act, this.z, this.a, this.dA, this.dZ);
+  }
 
+  /** Reads this.dZ; accumulates gW, gb when `params`; writes dX when needDx. */
+  backwardFromZ(needDx: boolean, params: boolean): void {
     const HW = this.zShape.h * this.zShape.w;
     const F = this.spec.filters;
     const R = this.R;
     const dZ = this.dZ;
-    for (let f = 0; f < F; f++) {
-      let sb = 0;
-      for (let i = f * HW; i < (f + 1) * HW; i++) sb += dZ[i];
-      this.gb[f] += sb;
+    if (params) {
+      for (let f = 0; f < F; f++) {
+        let sb = 0;
+        for (let i = f * HW; i < (f + 1) * HW; i++) sb += dZ[i];
+        this.gb[f] += sb;
+      }
+      convWeightGrad(dZ, this.col, this.gW, F, R, HW);
     }
-    convWeightGrad(dZ, this.col, this.gW, F, R, HW);
     if (!needDx) return;
 
     // ∂L/∂col = Wᵀ·dZ, then fold the columns back onto the input (col2im).
@@ -325,8 +336,19 @@ export class DenseBlock {
     return this.out;
   }
 
+  /** Reads this.dOut (∂L/∂out); accumulates gW, gb; writes dX when needDx. */
   backward(needDx: boolean): void {
+    this.backwardToZ();
+    this.backwardFromZ(needDx, true);
+  }
+
+  /** ∂L/∂out → ∂L/∂z through the activation slope. */
+  backwardToZ(): void {
     activateBackward(this.spec.act, this.z, this.a, this.dA, this.dZ);
+  }
+
+  /** Reads this.dZ; accumulates gW, gb when `params`; writes dX when needDx. */
+  backwardFromZ(needDx: boolean, params: boolean): void {
     const n = this.inSize;
     const m = this.spec.units;
     const W = this.W;
@@ -336,10 +358,10 @@ export class DenseBlock {
     if (needDx) dX.fill(0);
     for (let j = 0; j < m; j++) {
       const g = this.dZ[j];
-      this.gb[j] += g;
+      if (params) this.gb[j] += g;
       if (g === 0) continue;
       const o = j * n;
-      for (let i = 0; i < n; i++) gW[o + i] += g * x[i];
+      if (params) for (let i = 0; i < n; i++) gW[o + i] += g * x[i];
       if (needDx) for (let i = 0; i < n; i++) dX[i] += W[o + i] * g;
     }
   }
@@ -434,6 +456,25 @@ export class Network {
       if (i > 0) this.blocks[i - 1].dOut.set(b.dX);
     }
     return this.loss(label);
+  }
+
+  /**
+   * Gradient of Σ seed[i]·z[i] (the pre-activations of `block`) with respect to the input pixels,
+   * for the input of the last forward pass. Used by activation maximisation and attribution:
+   * a one-hot seed asks "which pixels would raise this unit?". Parameter gradients are untouched.
+   * Returns the network's internal buffer; copy it before the next call.
+   */
+  inputGradient(block: number, seed: ArrayLike<number>): Float32Array {
+    const b = this.blocks[block];
+    b.dZ.set(seed);
+    b.backwardFromZ(true, false);
+    for (let i = block - 1; i >= 0; i--) {
+      const bi = this.blocks[i];
+      bi.dOut.set(this.blocks[i + 1].dX);
+      bi.backwardToZ();
+      bi.backwardFromZ(true, false);
+    }
+    return this.blocks[0].dX;
   }
 
   zeroGrad(): void {

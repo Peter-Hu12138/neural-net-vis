@@ -10,6 +10,18 @@
   --accent: #e3120b;
   --neg: #1747d1;
   --on-accent: #ffffff;
+  /* Digit identity in scatter plots (secondary to the numeral glyph itself): the validated
+     8-hue categorical order for 0–7, then two neutrals. */
+  --cat-0: #2a78d6;
+  --cat-1: #eb6834;
+  --cat-2: #1baf7a;
+  --cat-3: #eda100;
+  --cat-4: #e87ba4;
+  --cat-5: #008300;
+  --cat-6: #4a3aa7;
+  --cat-7: #e34948;
+  --cat-8: #3f3f3b;
+  --cat-9: #8d8d85;
   --sans: 'Archivo', 'Helvetica Neue', Helvetica, Arial, sans-serif;
   --mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
   --gutter: clamp(16px, 3vw, 44px);
@@ -28,11 +40,31 @@
     --accent: #ff3b2f;
     --neg: #5c87ff;
     --on-accent: #ffffff;
+    --cat-0: #3987e5;
+    --cat-1: #d95926;
+    --cat-2: #199e70;
+    --cat-3: #c98500;
+    --cat-4: #d55181;
+    --cat-5: #008300;
+    --cat-6: #9085e9;
+    --cat-7: #e66767;
+    --cat-8: #c6c6be;
+    --cat-9: #8d8d85;
     color-scheme: dark;
   }
 }
 
 :root[data-theme='dark'] {
+  --cat-0: #3987e5;
+  --cat-1: #d95926;
+  --cat-2: #199e70;
+  --cat-3: #c98500;
+  --cat-4: #d55181;
+  --cat-5: #008300;
+  --cat-6: #9085e9;
+  --cat-7: #e66767;
+  --cat-8: #c6c6be;
+  --cat-9: #8d8d85;
   --bg: #0e0e0d;
   --surface: #171716;
   --ink: #f0f0eb;
@@ -1119,6 +1151,31 @@ select {
   display: flex;
   gap: 28px;
   flex-wrap: wrap;
+}
+
+/* ── Analysis sections (08–11) ─────────────────────────── */
+
+/* Thin determinate progress bar: <div class="progress"><span style="width: 40%"></span></div> */
+.progress {
+  height: 3px;
+  background: var(--hair);
+  position: relative;
+  overflow: hidden;
+}
+
+.progress > span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: var(--accent);
+  transition: width 120ms linear;
+}
+
+.synced-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  margin-bottom: 14px;
 }
 
 /* ── 07 Data ──────────────────────────────────────────── */

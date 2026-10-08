@@ -23,6 +23,7 @@ const MODES: { value: WeightMode; label: string }[] = [
   { value: 'hinton', label: 'Hinton' },
   { value: 'numbers', label: 'Numbers' },
   { value: 'hist', label: 'Histogram' },
+  { value: 'qq', label: 'Q–Q' },
 ];
 
 const NOTES: Record<WeightMode, string> = {
@@ -30,6 +31,7 @@ const NOTES: Record<WeightMode, string> = {
   hinton: 'Hinton diagram: the area of each square is the weight’s magnitude, the colour its sign. Small weights almost vanish.',
   numbers: 'Raw weight values, tinted by sign. Choose which filter or unit to read.',
   hist: 'Distribution of this layer’s weights now (solid) against the values they started from (outline).',
+  qq: 'Q–Q plot: each weight quantile against the same quantile of a normal distribution. A straight line means a normal shape; bent ends mean heavier or lighter tails than normal.',
 };
 
 function stats(a: Float32Array) {
@@ -112,6 +114,7 @@ export function mountInspector(): void {
     const mode = store.mode;
 
     if (mode === 'hist') renderHist(b.W, initialWeights[2 * i] ?? null, availW);
+    else if (mode === 'qq') renderQQMode(b.W, initialWeights[2 * i] ?? null, availW);
     else if (b.kind === 'conv') renderConv(b, mode, max, unit, availW);
     else renderDense(b, i === blocks.length - 1, mode, max, unit, availW);
 
@@ -140,7 +143,7 @@ export function mountInspector(): void {
     ctx.fillText(text, x, y);
   };
 
-  function renderConv(b: ConvBlock, mode: Exclude<WeightMode, 'hist'>, max: number, unit: number, availW: number) {
+  function renderConv(b: ConvBlock, mode: Exclude<WeightMode, 'hist' | 'qq'>, max: number, unit: number, availW: number) {
     const p = palette();
     const F = b.spec.filters;
     const C = b.inShape.c;
@@ -220,7 +223,7 @@ export function mountInspector(): void {
     }
   }
 
-  function renderDense(b: DenseBlock, isOut: boolean, mode: Exclude<WeightMode, 'hist'>, max: number, unit: number, availW: number) {
+  function renderDense(b: DenseBlock, isOut: boolean, mode: Exclude<WeightMode, 'hist' | 'qq'>, max: number, unit: number, availW: number) {
     const p = palette();
     const M = b.spec.units;
     const N = b.inSize;
@@ -327,6 +330,11 @@ export function mountInspector(): void {
     ctx.strokeStyle = p.accent;
     ctx.lineWidth = 2;
     ctx.strokeRect(left - 1, top + unit * ch - 1, N * cw + 2, ch + 2);
+  }
+
+  // Placeholder: replaced by the Q–Q implementation.
+  function renderQQMode(_w: Float32Array, _init: Float32Array | null, availW: number) {
+    fitCanvas(canvas, availW, 40);
   }
 
   function renderHist(w: Float32Array, init: Float32Array | null, availW: number) {
