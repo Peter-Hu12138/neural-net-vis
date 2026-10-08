@@ -393,7 +393,27 @@ The 25 low findings were fixed too. They covered tick fallbacks, "−0.00", tool
 animation, flat layers, receptive fields larger than the image, segmented controls on phones, the
 type scale and wording, the redraw cost of the initial weights, and probe redraws while drawing.
 
-**Round 2** (verification) is described below.
+**Round 2** checked the fixes and looked for regressions they introduced. Three reviewers did it: one for the maths, one for the flow between sections, and one for design. They used the same rules as round 1: they could not edit the project, and every claim needed evidence.
+
+- **The fixes held.** The reviewers confirmed 39 of round 1's fixes with their own measurements. For example, a Q–Q property test ran over 25,175 (n, points) cases. The dead-unit counts matched a brute-force count on 13 networks. The IG completeness gap stayed under 0.75% on 400 browser pairs. Neighbour purity for the t-SNE start went from 0.095 to 0.345.
+- **One of round 1's fixes caused a new high-severity problem.** The shared sync policy now started a job while training was running. However, every weights tick from the trainer (about 3 per second) made the job stale and restarted it, so a section with nothing to show could restart forever. After Reset + Play with 08–11 on screen, the distributions job ran 32 times in 12 s and finished 0 times.
+
+| Finding | Problem (as reproduced) | Fix |
+| --- | --- | --- |
+| NEW-1 (high), F1, UX-3 | While training, a section without a result restarted its job on every weights tick: units-topk started 9 times, with 8 superseded. | A job already running for the current network finishes while training; the section then holds its result. `e2e/sync.spec.ts` reproduces the loop on the old build (6 restarts; 0 finished runs after Reset + Play) and passes on the fix. |
+| Palette NEW-1 / UX-5 (medium) | Equalising lightness made digits 2 and 5 nearly the same colour (OKLab ΔE 6.8). In dark mode, digit 1 sat 7.8 from the accent red that marks the current input. | Slots 1, 2 and 3 (and dark 4) were moved. Light theme: no two colours closer than 9.9, none closer than 12.5 to the accent. Dark theme: 9.8 and 14.3. The e2e check asserts these floors in OKLab, together with 4.5:1 contrast. |
+| UX-6 (low) | On phones, the Recompute button wrapped to a second line, so the content below jumped 27 px at every status change. | The status row stays on one line at every width (full text in the tooltip). The new test checks that its height doesn't change. |
+| UX-9 (low) | An odd number of options (the 5 weight views) left "Q–Q" alone on a third row on phones. | An odd last option spans the row, and the frame keeps its 2 px weight. |
+
+Six further findings (four low, two medium) were handed to the dataset work, because the same files were being rewritten for the new datasets:
+- MATH-1: the t-SNE reduction for wide layers loses neighbours; one power iteration brings recall within 0.01 of exact PCA.
+- NEW-2: re-picking the current input reran an identical attribution job.
+- Dead units described with "strongest responses".
+- An ASCII minus in the weights stats.
+- Leftover unit, filter and logit wording.
+- Mixed precision in the 08 stat grid, and a label summary that dropped a tied digit.
+
+Their outcome is recorded in section 7.
 
 ## 5. Bugs found during verification
 
