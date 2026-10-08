@@ -193,6 +193,13 @@
   border-top: 1px solid var(--ink);
 }
 
+.bd-metrics .kpi .label {
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .bd-metrics .kpi b {
   font-size: 18px;
 }

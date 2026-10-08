@@ -8,7 +8,7 @@ import type { Block } from '../nn/network';
 import { store } from '../store';
 import { layerName } from './builder';
 import { ACTIVATIONS, type LayerSpec } from '../nn/types';
-import { axisName } from './boundaryMath';
+import { axisName, robustScale } from './boundaryMath';
 import { Live, netFits } from './boundary2d';
 import { onSlice, slice, sliceAxes } from './boundary3d';
 import { $, clear, h } from './dom';
@@ -109,17 +109,29 @@ function strengths(b: Block): Float32Array[] {
 const SANS = 'Archivo, "Helvetica Neue", Arial, sans-serif';
 const MONO = '"IBM Plex Mono", ui-monospace, monospace';
 
-/** Draws a column header: layer name and two caption lines, underlined when selected. */
-function drawHeader(ctx: CanvasRenderingContext2D, cx: number, name: string, lines: [string, string], selected: boolean): void {
+/** Sets `ctx.font` to the largest size from `size` down to `min` at which `text` fits in `maxW`. */
+function fitFont(ctx: CanvasRenderingContext2D, text: string, weight: number, size: number, min: number, family: string, maxW: number): void {
+  ctx.font = `${weight} ${size}px ${family}`;
+  const w = ctx.measureText(text).width;
+  if (w <= maxW) return;
+  ctx.font = `${weight} ${Math.max(min, Math.floor((size * maxW * 2) / w) / 2)}px ${family}`;
+}
+
+/**
+ * Draws a column header: layer name and two caption lines, underlined when selected. Text shrinks
+ * a little to stay within `maxW` (narrow columns on phones), so neighbouring headers never touch.
+ */
+function drawHeader(ctx: CanvasRenderingContext2D, cx: number, name: string, lines: [string, string], selected: boolean, maxW = Infinity): void {
   const p = palette();
   ctx.textAlign = 'center';
   ctx.textBaseline = 'alphabetic';
   ctx.fillStyle = selected ? p.accent : p.ink;
-  ctx.font = `800 13px ${SANS}`;
+  fitFont(ctx, name, 800, 13, 10.5, SANS, maxW);
   ctx.fillText(name, cx, 16);
   ctx.fillStyle = p.muted;
-  ctx.font = `400 10.5px ${MONO}`;
+  fitFont(ctx, lines[0], 400, 10.5, 8.5, MONO, maxW);
   ctx.fillText(lines[0], cx, 31);
+  fitFont(ctx, lines[1], 400, 10.5, 8.5, MONO, maxW);
   ctx.fillText(lines[1], cx, 44);
   if (selected) {
     ctx.fillStyle = p.accent;
@@ -130,6 +142,7 @@ function drawHeader(ctx: CanvasRenderingContext2D, cx: number, name: string, lin
 /** Pixel resolution of each unit's map over the input plane (point datasets); half for heavy networks while training. */
 const TILE_RES = 32;
 const TILE_RES_FAST = 16;
+
 
 interface Tiles {
   res: number;
@@ -339,10 +352,10 @@ export function mountNetworkView(): void {
     }
 
     const headerX = (col: number) => (col === cols - 1 ? centers[col] + 12 : centers[col]);
-    drawHeader(ctx, headerX(0), 'Input', [`${shape.h}×${shape.w}`, shape.c === 3 ? 'colour' : 'grey'], false);
+    drawHeader(ctx, headerX(0), 'Input', [`${shape.h}×${shape.w}`, shape.c === 3 ? 'colour' : 'grey'], false, colW - 8);
     blocks.forEach((_b, i) => {
       const spec = i === blocks.length - 1 ? null : store.spec[i];
-      drawHeader(ctx, headerX(i + 1), layerName(spec, i), headerLines(spec, info), store.selected === i);
+      drawHeader(ctx, headerX(i + 1), layerName(spec, i), headerLines(spec, info), store.selected === i, colW - 8);
     });
 
     // Input
@@ -619,11 +632,12 @@ export function mountNetworkView(): void {
     }
 
     // Headers
-    drawHeader(ctx, centers[0], 'Features', [`${F} input${F === 1 ? '' : 's'}`, T.dims === 2 ? `over ${axisName(0)}, ${axisName(1)}` : `${axisName(slice.axis)} = ${fixed(slice.pos, 2)}`], false);
+    const headW = colW - 8;
+    drawHeader(ctx, centers[0], 'Features', [`${F} input${F === 1 ? '' : 's'}`, T.dims === 2 ? `over ${axisName(0)}, ${axisName(1)}` : `${axisName(slice.axis)} = ${fixed(slice.pos, 2)}`], false, headW);
     blocks.forEach((_b, i) => {
       const isOut = i === blocks.length - 1;
       const spec = isOut ? null : store.spec[i];
-      drawHeader(ctx, centers[i + 1] + (isOut ? 20 : 0), layerName(spec, i), headerLines(spec, info), store.selected === i);
+      drawHeader(ctx, centers[i + 1] + (isOut ? 20 : 0), layerName(spec, i), headerLines(spec, info), store.selected === i, isOut ? headW + 40 : headW);
     });
 
     const R = T.res;
@@ -694,7 +708,7 @@ export function mountNetworkView(): void {
       const units = b.out.length;
       if (!isOut) {
         const signed = hasNegative(A);
-        const max = maxAbs(A) || 1;
+        const max = robustScale(A);
         const vals = new Float32Array(n);
         items.forEach((it, j) => {
           for (let q = 0; q < n; q++) vals[q] = A[q * units + j];

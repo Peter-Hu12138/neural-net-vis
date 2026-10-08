@@ -73,11 +73,12 @@ export function mountBoundary(): void {
     return { el: h('div', { class: 'kpi', title }, h('span', { class: 'label' }, label), b), b };
   };
   const mEpoch = kpi('Epoch', 'Passes through the training points so far');
-  const mTrainLoss = kpi('Training loss', 'Cross-entropy on the latest training batches');
-  const mTestLoss = kpi('Test loss', 'Cross-entropy on the test points, at the latest evaluation');
-  const mTrainAcc = kpi('Training acc.', 'Share of the latest training batches classified correctly');
-  const mTestAcc = kpi('Test acc.', 'Share of test points classified correctly, at the latest evaluation');
+  const mTrainLoss = kpi('Train loss', 'Training loss: cross-entropy on the latest training batches');
+  const mTestLoss = kpi('Test loss', 'Test loss: cross-entropy on the test points, at the latest evaluation');
+  const mTrainAcc = kpi('Train acc.', 'Training accuracy: share of the latest training batches classified correctly');
+  const mTestAcc = kpi('Test acc.', 'Test accuracy: share of test points classified correctly, at the latest evaluation');
   mTestLoss.el.classList.add('is-accent');
+  mTestAcc.el.classList.add('is-accent');
   const metrics = h('div', { class: 'bd-metrics', 'aria-live': 'off' }, mEpoch.el, mTrainLoss.el, mTestLoss.el, mTrainAcc.el, mTestAcc.el);
   const pct = (v: number) => `${(100 * v).toFixed(1)}%`;
   let metricsQueued = false;

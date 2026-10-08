@@ -317,6 +317,27 @@ export function nearSide(m: number[], axis: number): 1 | -1 {
   return m[6 + axis] > 0 ? -1 : 1;
 }
 
+// ── Colour scales ────────────────────────────────────────────────────────
+
+/**
+ * Colour scale for one layer's unit maps: the 98th percentile of |value| over every unit and
+ * position, so one unbounded ReLU unit does not wash all the others out to blank tiles. Values
+ * beyond it show at full colour.
+ */
+export function robustScale(a: ArrayLike<number>): number {
+  const n = a.length;
+  if (!n) return 1;
+  const step = Math.max(1, Math.floor(n / 4096));
+  const s: number[] = [];
+  for (let i = 0; i < n; i += step) s.push(Math.abs(a[i]));
+  s.sort((x, y) => x - y);
+  const q = s[Math.min(s.length - 1, Math.floor(0.98 * s.length))];
+  if (q > 1e-6) return q;
+  let m = 0;
+  for (let i = 0; i < n; i++) m = Math.max(m, Math.abs(a[i]));
+  return m || 1;
+}
+
 // ── Budgets and labels ───────────────────────────────────────────────────
 
 /**

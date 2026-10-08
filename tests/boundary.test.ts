@@ -13,6 +13,7 @@ import {
   paintRegions,
   project,
   resolutionFor,
+  robustScale,
   shadeAmount,
   surfaceNets,
   ticks,
@@ -275,5 +276,25 @@ describe('budgets and labels', () => {
     expect(ticks(1.25)).toEqual([-1, -0.5, 0, 0.5, 1]);
     expect(ticks(2, 1)).toEqual([-2, -1, 0, 1, 2]);
     expect([0, 1, 2].map(axisName)).toEqual(['x₁', 'x₂', 'x₃']);
+  });
+});
+
+describe('unit map colour scale', () => {
+  it('ignores a few extreme values, so the other units stay visible', () => {
+    const a = new Float32Array(1000);
+    for (let i = 0; i < a.length; i++) a[i] = (i % 10) / 10; // 0 … 0.9
+    for (let i = 0; i < 5; i++) a[i * 7] = 50; // one runaway ReLU unit
+    const s = robustScale(a);
+    expect(s).toBeGreaterThanOrEqual(0.8);
+    expect(s).toBeLessThanOrEqual(0.9);
+  });
+
+  it('uses magnitudes, falls back to the maximum when nearly everything is zero, and never returns 0', () => {
+    expect(robustScale(new Float32Array([-2, 1, 0.5, -0.25]))).toBe(2);
+    const sparse = new Float32Array(1000);
+    sparse[3] = 4;
+    expect(robustScale(sparse)).toBe(4);
+    expect(robustScale(new Float32Array(10))).toBe(1);
+    expect(robustScale([])).toBe(1);
   });
 });
