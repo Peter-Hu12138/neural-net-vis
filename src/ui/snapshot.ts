@@ -77,6 +77,10 @@ export function syncedSection(root: HTMLElement, refresh: () => void, opts: { au
   const fmtStep = (n: number) => n.toLocaleString('en-US');
 
   const update = () => {
+    setText();
+    text.title = text.textContent ?? '';
+  };
+  const setText = () => {
     btn.disabled = !store.data;
     if (!store.data) {
       text.textContent = 'Waiting for MNIST to load…';
@@ -107,7 +111,9 @@ export function syncedSection(root: HTMLElement, refresh: () => void, opts: { au
   /** Whether the policy allows an automatic refresh right now. */
   const wanted = () => {
     if (!auto || !visible || !store.data || !stale()) return false;
-    if (busy && isCurrent(busy)) return false; // already computing exactly this
+    // Already computing exactly this; or training moves the weights on every tick, so let a job for
+    // this network finish rather than restart it ~3 times a second and never show anything.
+    if (busy && (isCurrent(busy) || (store.running && busy.version === store.version))) return false;
     if (store.running && shown && shown.version === store.version) return false; // hold while training
     return true;
   };

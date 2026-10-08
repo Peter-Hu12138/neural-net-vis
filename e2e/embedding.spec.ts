@@ -131,22 +131,28 @@ async function digitColours(page: Page) {
       const [r, g, b] = hex(v).map(lin);
       return 0.2126 * r + 0.7152 * g + 0.0722 * b;
     };
+    // OKLab, ×100 so a distance reads like ΔE.
     const lab = (v: string) => {
       const [r, g, b] = hex(v).map(lin);
-      const f = (t: number) => (t > 0.008856 ? Math.cbrt(t) : 7.787 * t + 16 / 116);
-      const X = f((r * 0.4124 + g * 0.3576 + b * 0.1805) / 0.95047);
-      const Y = f(r * 0.2126 + g * 0.7152 + b * 0.0722);
-      const Z = f((r * 0.0193 + g * 0.1192 + b * 0.9505) / 1.08883);
-      return [116 * Y - 16, 500 * (X - Y), 200 * (Y - Z)];
+      const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+      const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+      const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+      return [
+        100 * (0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s),
+        100 * (1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s),
+        100 * (0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s),
+      ];
     };
+    const dist = (p: number[], q: number[]) => Math.hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2]);
     const surface = cs.getPropertyValue('--surface');
     const accent = lab(cs.getPropertyValue('--accent'));
-    return Array.from({ length: 10 }, (_, d) => {
-      const c = cs.getPropertyValue(`--cat-${d}`);
+    const colours = Array.from({ length: 10 }, (_, d) => cs.getPropertyValue(`--cat-${d}`));
+    const labs = colours.map(lab);
+    return colours.map((c, d) => {
       const a = lum(c);
       const s = lum(surface);
-      const p = lab(c);
-      return { d, colour: c.trim(), contrast: (Math.max(a, s) + 0.05) / (Math.min(a, s) + 0.05), fromAccent: Math.hypot(p[0] - accent[0], p[1] - accent[1], p[2] - accent[2]) };
+      const nearest = Math.min(...labs.filter((_, k) => k !== d).map((q) => dist(labs[d], q)));
+      return { d, colour: c.trim(), contrast: (Math.max(a, s) + 0.05) / (Math.min(a, s) + 0.05), fromAccent: dist(labs[d], accent), nearest };
     });
   });
 }
@@ -537,10 +543,12 @@ test('dark mode follows the theme; digit colours keep their contrast in both the
     ['light', light],
     ['dark', dark],
   ] as const) {
-    console.log(`${theme}: ${cols.map((c) => `${c.d} ${c.colour} ${c.contrast.toFixed(2)}:1 ΔE ${c.fromAccent.toFixed(0)}`).join(' | ')}`);
+    console.log(`${theme}: ${cols.map((c) => `${c.d} ${c.colour} ${c.contrast.toFixed(2)}:1 ΔE ${c.fromAccent.toFixed(0)} nearest ${c.nearest.toFixed(1)}`).join(' | ')}`);
     for (const c of cols) {
       expect(c.contrast, `${theme} --cat-${c.d}`).toBeGreaterThanOrEqual(4.5);
-      expect(c.fromAccent, `${theme} --cat-${c.d} vs --accent`).toBeGreaterThan(20);
+      // OKLab ΔE×100: clear of the state red (UX-5), and no two digits nearly the same colour (NEW-1).
+      expect(c.fromAccent, `${theme} --cat-${c.d} vs --accent`).toBeGreaterThanOrEqual(12);
+      expect(c.nearest, `${theme} --cat-${c.d} vs its nearest digit colour`).toBeGreaterThanOrEqual(9);
     }
   }
 });

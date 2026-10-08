@@ -10,14 +10,16 @@
   --accent: #e3120b;
   --neg: #1747d1;
   --on-accent: #ffffff;
-  /* Digit identity in scatter plots, drawn as numeral glyphs (the numeral carries identity, colour
-     is secondary): eight hues for 0–7 (no red, which marks state), two neutrals for 8–9. Every token
-     clears 4.5:1 against --surface; every pair of hues is ≥ 15 ΔE (OKLab×100) apart and ≥ 23 from
-     --accent. 7 (plum / pink) sits slightly outside the usual fill lightness band to stay distinct. */
+  /* Class identity in scatter plots, drawn as numeral glyphs (the numeral carries identity, colour
+     is secondary): eight hues for 0–7 (no red, which marks state), two neutrals for 8–9. Measured
+     (OKLab ΔE×100): every token clears 4.5:1 against --surface; the closest pair of tokens is 9.9
+     apart in light (1–3) and 9.8 in dark (0–6); every token is ≥ 12.5 from --accent in light and
+     ≥ 14.3 in dark. Ten hues cannot all be far apart, hence the glyphs. e2e/embedding.spec.ts
+     checks these floors. Classes 0 and 1 (blue, orange) are the two-class point datasets. */
   --cat-0: #1f6fd0;
-  --cat-1: #b8501a;
-  --cat-2: #11805a;
-  --cat-3: #946800;
+  --cat-1: #b05a00;
+  --cat-2: #007a99;
+  --cat-3: #7f6f00;
   --cat-4: #c2447a;
   --cat-5: #1c7a1c;
   --cat-6: #4a3aa7;
@@ -43,10 +45,10 @@
     --neg: #5c87ff;
     --on-accent: #ffffff;
     --cat-0: #3987e5;
-    --cat-1: #d95926;
-    --cat-2: #199e70;
-    --cat-3: #c98500;
-    --cat-4: #d55181;
+    --cat-1: #e8892a;
+    --cat-2: #1aa3b3;
+    --cat-3: #d4b000;
+    --cat-4: #cf5c9e;
     --cat-5: #3aae4e;
     --cat-6: #9085e9;
     --cat-7: #fd8de4;
@@ -58,10 +60,10 @@
 
 :root[data-theme='dark'] {
   --cat-0: #3987e5;
-  --cat-1: #d95926;
-  --cat-2: #199e70;
-  --cat-3: #c98500;
-  --cat-4: #d55181;
+  --cat-1: #e8892a;
+  --cat-2: #1aa3b3;
+  --cat-3: #d4b000;
+  --cat-4: #cf5c9e;
   --cat-5: #3aae4e;
   --cat-6: #9085e9;
   --cat-7: #fd8de4;
@@ -1183,10 +1185,26 @@ select {
 .synced-status {
   position: relative;
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
   gap: 8px 14px;
   margin-bottom: 14px;
+}
+
+/* One line at every width, so the content below never jumps when the text changes; the full text
+   is in the title attribute. */
+.synced-status > .hint {
+  flex: 1 1 auto;
+  min-width: 0;
+  /* The text never widens the section (its own width does not count when the grid sizes columns). */
+  contain: inline-size;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.synced-status > .btn {
+  flex: none;
 }
 
 /* The shared progress bar sits under the status row without moving anything below it. */
@@ -1371,13 +1389,17 @@ select {
   .seg {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    border-width: 1px 0 0 1px;
+    border-width: 2px 0 0 2px;
   }
   .seg button,
   .seg button + button {
     border: 0;
-    border-right: 1px solid var(--ink);
-    border-bottom: 1px solid var(--ink);
+    border-right: 2px solid var(--ink);
+    border-bottom: 2px solid var(--ink);
+  }
+  /* An odd last option spans the row instead of sitting beside an empty cell. */
+  .seg button:last-child:nth-child(odd) {
+    grid-column: 1 / -1;
   }
   .bar {
     gap: 10px 16px;
