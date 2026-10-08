@@ -647,7 +647,7 @@ export function mountDrawpad(): void {
     const photoHint = photoDrop.querySelector('.hint')!;
     photoHint.textContent = info.image?.shape.c === 3
       ? 'It is cropped to its centre square and averaged down to 32×32 pixels.'
-      : 'Like the Fashion-MNIST photos, it is cropped to the item, scaled to fill 28×28 and inverted.';
+      : 'As with the Fashion-MNIST photos, it is cropped to the item, scaled to fill 28×28 and made grey, with the backdrop at zero.';
   };
 
   let shownDataset = '';

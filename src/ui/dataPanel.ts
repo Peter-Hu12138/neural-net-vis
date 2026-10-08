@@ -85,7 +85,7 @@ const DROP: Record<string, { title: string; how: string }> = {
   },
   fashion: {
     title: 'Drop photos of clothing here',
-    how: 'or click to choose files. As Fashion-MNIST did with its product photos, each is cropped to the item, scaled to fill 28×28, made grey and inverted, so the item is light on black.',
+    how: 'or click to choose files. As Fashion-MNIST did with its product photos, each is cropped to the item, scaled to fill 28×28 and made grey, with the backdrop at zero.',
   },
   cifar10: {
     title: 'Drop photos here',
@@ -744,7 +744,8 @@ function pointPanel(): { el: HTMLElement } {
     pred = { train, test };
   };
 
-  // Redraws are coalesced to one per frame; re-evaluating follows the weights at most 4× a second.
+  // Redraws are coalesced to one per frame. The points do not move while training, only the
+  // mistake rings change, so changed weights are re-evaluated and redrawn at most 4× a second.
   let frame = 0;
   let lastEval = 0;
   let evalTimer: ReturnType<typeof setTimeout> | null = null;
@@ -754,10 +755,10 @@ function pointPanel(): { el: HTMLElement } {
       const wait = 250 - (performance.now() - lastEval);
       if (wait > 0) {
         if (!evalTimer) evalTimer = setTimeout(() => ((evalTimer = null), schedule(true)), wait);
-      } else {
-        lastEval = performance.now();
-        evaluate();
+        return;
       }
+      lastEval = performance.now();
+      evaluate();
     }
     if (frame) return;
     frame = requestAnimationFrame(() => {
@@ -847,7 +848,7 @@ function pointPanel(): { el: HTMLElement } {
           'li',
           null,
           h('span', { class: 'dp-swatch', style: { background: classColor(c.y) } }),
-          h('span', { class: 'dp-custom-text' }, h('b', null, d.info.classes[c.y]), h('span', { class: 'mono' }, ` (${at})`)),
+          h('span', { class: 'dp-custom-text' }, h('b', null, d.info.classes[c.y]), ' ', h('span', { class: 'mono' }, `(${at})`)),
           use,
           rm,
         ),

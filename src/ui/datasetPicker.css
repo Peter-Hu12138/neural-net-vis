@@ -69,6 +69,11 @@
   scroll-snap-align: start;
 }
 
+/* The focus ring sits inside the item, so the scrolling strip never clips it. */
+.dsp-item:focus-visible {
+  outline-offset: -3px;
+}
+
 .dsp-item:first-child {
   border-left-color: transparent;
 }
