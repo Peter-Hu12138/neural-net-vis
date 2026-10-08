@@ -124,6 +124,7 @@ function imagePanel(): { el: HTMLElement } {
   // ── Test grid ──
   let indices: number[] = [];
   const cells: { i: number; btn: HTMLButtonElement; tag: HTMLElement; caption: string }[] = [];
+  let gridDataset: DatasetId | null = null;
   const pick = () => {
     const d = store.data;
     if (!d || d.info.kind !== 'image') return;
@@ -131,6 +132,7 @@ function imagePanel(): { el: HTMLElement } {
     const set = new Set<number>();
     while (set.size < Math.min(GRID, n)) set.add(Math.floor(Math.random() * n));
     indices = [...set];
+    gridDataset = d.info.id;
     buildGrid();
   };
   const buildGrid = () => {
@@ -435,7 +437,9 @@ function imagePanel(): { el: HTMLElement } {
   store.on('data', () => {
     if (!isImages()) return;
     shuffle.disabled = false;
-    pick();
+    // A new "train on" subset leaves the test images as they were: keep the grid the reader sees.
+    if (store.dataset === gridDataset && indices.length) buildGrid();
+    else pick();
   });
   store.on('weights', predict);
   store.on('model', () => {

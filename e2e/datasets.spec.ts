@@ -332,6 +332,11 @@ test('section 03 tries a photo on CIFAR-10: crop, live probabilities, flip and b
   await shot(page, '#draw', '14-datasets-photo.png');
   await page.locator('#photo-reset').click();
   await page.waitForFunction(() => (window as unknown as { raster: Raster }).raster.store.probe?.caption === 'Your photo');
+  // Training on a subset resets the page's input to a test image, but the photo stays in 03.
+  await page.locator('#datasets .dsp-train').getByRole('button', { name: '1,000', exact: true }).click();
+  await page.waitForFunction(() => (window as unknown as { raster: Raster }).raster.store.data!.trainY.length === 1000);
+  await expect(page.locator('#drawpad .dp-photo-caption')).toHaveText('Your photo');
+  await expect(page.locator('#drawpad .pred-digit')).not.toHaveText('?');
 
   // A random test image keeps its label, and a test image picked in 07 shows up here.
   await page.locator('#photo-random').click();

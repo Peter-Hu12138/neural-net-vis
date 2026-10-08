@@ -604,11 +604,16 @@ export function mountDrawpad(): void {
     });
   }
 
-  // Inputs chosen elsewhere on the page (07, 02) show up here, so they can be nudged.
+  // Inputs chosen elsewhere on the page (07, 02) show up here, so they can be nudged. New data
+  // (a different "train on" subset) also resets the page's input; the reader's photo stays.
+  let dataSeen = store.data;
   store.on('probe', () => {
+    const fresh = store.data !== dataSeen;
+    dataSeen = store.data;
     if (!active() || mode !== 'photo') return;
     const p = store.probe;
     if (!p || p.key === 'photo' || p.key === 'draw') return;
+    if (fresh && source?.kind === 'photo') return;
     if (source?.kind === 'sample' && source.key === p.key && !isAdjusted(adj)) return;
     if (p.x.length !== size(store.input)) return;
     adj = { ...NO_ADJUSTMENT };
