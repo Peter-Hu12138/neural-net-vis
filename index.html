@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Raster Net Lab</title>
+    <meta name="description" content="Build a small neural network, train it on MNIST in the browser, and inspect every weight and gradient." />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..900&family=IBM+Plex+Mono:wght@400;500;600&display=swap" />
+  </head>
+  <body>
+    <div class="page">
+      <header class="masthead">
+        <h1 class="wordmark">Raster<span class="wordmark-dot" aria-hidden="true"></span></h1>
+        <p class="tagline">Build a neural network, train it on handwritten digits, and watch every weight and gradient move.</p>
+        <dl class="facts" id="facts">
+          <div><dt>Dataset</dt><dd id="fact-data">MNIST, loading…</dd></div>
+          <div><dt>Input</dt><dd>28 × 28 px, grey</dd></div>
+          <div><dt>Engine</dt><dd id="fact-engine">Starting…</dd></div>
+        </dl>
+      </header>
+
+      <div class="bar" id="bar" role="toolbar" aria-label="Training controls"></div>
+
+      <main class="grid">
+        <section class="sec sec-arch" id="architecture" aria-labelledby="h-arch">
+          <header class="sec-head"><span class="sec-num">01</span><h2 id="h-arch">Architecture</h2></header>
+          <div id="builder"></div>
+        </section>
+
+        <section class="sec sec-net" id="network" aria-labelledby="h-net">
+          <header class="sec-head">
+            <span class="sec-num">02</span><h2 id="h-net">Network</h2>
+            <p class="sec-note">Activations for one input. Click a layer to inspect its weights.</p>
+          </header>
+          <div id="netview"></div>
+        </section>
+
+        <section class="sec sec-draw" id="draw" aria-labelledby="h-draw">
+          <header class="sec-head"><span class="sec-num">03</span><h2 id="h-draw">Draw</h2></header>
+          <div id="drawpad"></div>
+        </section>
+
+        <section class="sec sec-weights" id="weights" aria-labelledby="h-weights">
+          <header class="sec-head"><span class="sec-num">04</span><h2 id="h-weights">Weights</h2></header>
+          <div id="inspector"></div>
+        </section>
+
+        <section class="sec sec-curves" id="training" aria-labelledby="h-curves">
+          <header class="sec-head"><span class="sec-num">05</span><h2 id="h-curves">Training</h2></header>
+          <div id="curves"></div>
+        </section>
+
+        <section class="sec sec-bp" id="backprop" aria-labelledby="h-bp">
+          <header class="sec-head">
+            <span class="sec-num">06</span><h2 id="h-bp">Backpropagation</h2>
+            <p class="sec-note">One example, one step at a time: forward pass, loss, gradients layer by layer, then the update.</p>
+          </header>
+          <div id="bplab"></div>
+        </section>
+
+        <section class="sec sec-data" id="data" aria-labelledby="h-data">
+          <header class="sec-head">
+            <span class="sec-num">07</span><h2 id="h-data">Data</h2>
+            <p class="sec-note">Pick any digit as the network's input, or add your own images to the training set.</p>
+          </header>
+          <div id="datapanel"></div>
+        </section>
+      </main>
+
+      <footer class="colophon">
+        <p>MNIST handwritten digits by Yann LeCun, Corinna Cortes and Christopher J.C. Burges (CC BY-SA 3.0). A 20,000 / 2,000 subset ships with this page. Everything trains locally in your browser.</p>
+      </footer>
+    </div>
+    <div class="tip" id="tip" role="tooltip" hidden></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,22 @@
+{
+  "name": "raster-net-lab",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Interactive neural network builder and visualizer for MNIST, in Swiss style.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "test:e2e": "vite build && playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.56.1",
+    "@types/node": "^22.20.5",
+    "typescript": "5.9.3",
+    "vite": "7.3.6",
+    "vitest": "3.2.6"
+  }
+}
