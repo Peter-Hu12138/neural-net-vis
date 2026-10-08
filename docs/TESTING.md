@@ -4,15 +4,16 @@ Raster is checked at two levels:
 
 | Level | Tool | Command | What it covers |
 | --- | --- | --- | --- |
-| Unit | Vitest (Node) | `npm test` | Engine maths, trainer protocol, preprocessing, bundled data, number formatting |
+| Unit | Vitest (Node) | `npm test` | Engine maths, trainer and analysis protocols, statistics, every analysis job, preprocessing, bundled data, formatting |
 | Browser | Playwright + Chromium | `npm run test:e2e` | Every user-facing feature, run against the production build, with screenshots |
+| Adversarial review | Independent reviewer agents | see section 4 | The analysis views (08–11): maths, behaviour, integration, design and code, each finding backed by a reproduction |
 
-Both suites were last run on the current commit: **33/33 unit tests** and **12/12 browser tests** pass.
+Both suites were last run on the current commit: **176/176 unit tests** and **31/31 browser tests** pass.
 
 ```bash
 npm install
-npm test            # unit tests, ~2 s
-npm run test:e2e    # builds, serves dist/ on :4173, runs Chromium, ~70 s
+npm test            # unit tests, ~20 s
+npm run test:e2e    # builds, serves dist/ on :4173, runs Chromium, ~7 min
 npm run typecheck   # strict TypeScript over src/, tests/ and e2e/
 ```
 
@@ -80,9 +81,69 @@ Decodes the PNG sprites with a minimal reader, then checks:
 
 Matrix-cell labels never exceed five characters; KPI and counter formats are stable.
 
+
+### 1.6 Analysis scheduler: `tests/analyzer.test.ts` (4 tests)
+
+Jobs wait for the test set, run to completion, and report results. A newer request on a channel
+replaces the running one while other channels continue. Cancel stops a job without a result.
+Errors and unknown job names are reported.
+
+### 1.7 Statistics and Q–Q plots: `tests/stats.test.ts` (32 tests)
+
+- `normalQuantile` matches reference values, for example Φ⁻¹(0.975) = 1.959963984540054. It is antisymmetric and monotone, and it round-trips with `normalCdf` (relative error under 1e-13 in both tails).
+- Type-7 quantiles, Blom plotting positions and the qqline match their definitions.
+- A large normal sample lies on its line with slope ≈ σ. A uniform sample bends into an S with a lower PPCC. Heavy tails bend away. Empty, single and constant data give no NaN.
+- Thinned Q–Q plots draw real order statistics and always include the minimum, the maximum and the 16 most extreme values per tail. The regression case is the review's: 10 outliers among 25,088 weights must all be drawn. Two-sample plots pair both minima and both maxima.
+- The reference line falls back to mean and std when the quartiles coincide, as with ReLU zeros.
+- `niceTicks` never returns a single tick (100,000-case property test).
+- The sorted fast paths equal the general functions exactly. Formatting never prints "−0.00" and keeps trailing zeros.
+
+### 1.8 Layer statistics: `tests/layerStats.test.ts` (12 tests)
+
+- Sampled z and a values come from the same entries.
+- Weight gradients equal the batch mean of a direct forward and backward pass over the same images.
+- A ReLU unit that can never fire counts as dead. A unit that is silent on the sampled digits but fires on another test digit does not: the dead-unit scan covers all 2,000 digits and stops early.
+- The "blank input" share equals a brute-force count of all-zero input patches.
+- Results are deterministic. The default settings run in a few seconds at a few ms per yield.
+
+### 1.9 Units: `tests/units.test.ts` (40 tests)
+
+- **Receptive fields:** known cases (3×3, 5×5, through one to three pools, clipped at corners). Brute-force agreement by perturbing single pixels on random networks with and without pooling. Fields are never larger than the 28×28 image.
+- **Top-k:** matches a brute-force scan on every Small CNN layer. Conv hits record where the filter fired and the pixels behind that position. Labels of a trained output unit's top 50 follow its digit. All 2,000 digits are scanned within the time budget.
+- **Activation maximisation:** the seeded gradient matches finite differences. The objective rises above its blank start on every layer type (conv, dense, output, MLP, LeNet-ish). Results are deterministic. Conv 1 synthesises the pattern its kernel describes.
+- **Ranks and statistics:**
+  - Exact ranks over all responses report ties, not interpolation; for example, a dense ReLU unit's exact zeros are counted.
+  - The current input is ranked with a copy of the scan's weights.
+  - Conv filters report the share of positions that fire, and sigmoid units are not "active on every digit".
+  - Output units report how often each digit is predicted.
+
+### 1.10 Attribution: `tests/attribution.test.ts` (24 tests)
+
+- **Gradients:** match central finite differences pixel by pixel on smooth networks and on real digits, and away from kinks on pooled networks.
+- **Blank pixels of real digits:** ReLU kinks no longer zero out saliency, and tied max-pool windows leave no lattice pattern.
+- **Integrated gradients:**
+  - It is exact (equal to x ⊙ W) for the Softmax preset.
+  - It satisfies completeness within 5% at 32 steps, and the gap shrinks with more steps.
+  - The gap is measured against Σ|IG|, so it cannot blow up when z(x) − z(blank) ≈ 0. It stays under 1% for every target on trained networks.
+- **Occlusion:** matches a brute-force sweep, as a logit map and as a probability map. It is exactly 0 where every covering patch is already blank, and keeps detail where the probability saturates.
+- **The job:** validates its parameters, reports exact progress, and runs end to end on a real CNN in under 3 s.
+
+### 1.11 Embedding: `tests/embed.test.ts` (24 tests)
+
+- **Sampling:** a balanced, deterministic sample of the first 100 digits of each class.
+- **PCA:** recovers a known direction and matches a brute-force covariance eigendecomposition. Mirrored or swapped components are re-oriented to match the previous map, so a recomputed map keeps facing the same way through training steps.
+- **t-SNE:**
+  - Perplexity calibration hits its target.
+  - The gradient matches finite differences of KL(P‖Q).
+  - Three Gaussian clusters separate, and raw pixels keep their neighbours.
+  - It starts from the PCA layout, so clusters form during early exaggeration.
+  - The default run (1,000 points, 500 iterations) on a conv layer finishes in time.
+- **Randomized PCA for wide layers:** equals exact PCA when the sketch is as wide as the data. A second pass over very wide layers gives the same result as reading from memory.
+- **Flat layers** are reported as flat. Tick and tooltip labels use a true minus and never "−0.0000".
+
 ---
 
-## 2. Browser tests (`e2e/app.spec.ts`)
+## 2. Browser tests (`e2e/*.spec.ts`)
 
 `playwright.config.ts` serves the production build with `vite preview` on port 4173 and
 drives Chromium at 1600×1000. Every test also fails on any console error or uncaught exception.
@@ -218,6 +279,55 @@ a prediction.
 With `window.Worker` replaced by a constructor that throws, the engine reports
 "In-browser, main thread" and training still works.
 
+
+### 2.13 Distributions and the Q–Q weight view: `e2e/distributions.spec.ts` (5 tests)
+
+- **Weights:** one Q–Q panel per layer follows training live. It shows the comparison with a normal distribution and with the initial weights, and tooltips name exact quantiles.
+- **Pre-activations, activations and gradients:**
+  - They come from the analysis worker.
+  - The top Q–Q point equals the true maximum shown under the histogram.
+  - Conv 1 reports its blank-input share.
+  - "Dead units" counts over all test digits.
+  - After "Apply to network" in 06, the status and numbers update even though the step number is unchanged.
+- **Other checks:** the inspector's Q–Q view (now against initialisation, with a tooltip), dark theme, and 390 px with stacked panels and no sideways scroll.
+
+| Activations | Inspector Q–Q | Dark |
+| --- | --- | --- |
+| ![](screenshots/10-distributions-activations.png) | ![](screenshots/10-distributions-inspector-qq.png) | ![](screenshots/10-distributions-dark.png) |
+
+### 2.14 Units: `e2e/units.spec.ts` (5 tests)
+
+- **Every layer:** top digits, the detail panel, receptive-field boxes, and synthesised inputs.
+- **While training:** the current input is ranked with the scan's weights, and the status line matches what is shown.
+- **Deep conv stacks:** fields are clipped to the image in text and crops.
+- **Other checks:** the selection follows the network diagram and the inspector, "Show all", keyboard use, and phone width.
+
+![Units](screenshots/11-units-light.png)
+
+### 2.15 Attribution: `e2e/attribution.spec.ts` (4 tests)
+
+- **The four maps:** they explain the prediction for the current input. A picked digit stays pinned until the input changes.
+- **The drawing pad:** maps follow it live, and a blank input says so.
+- **A new network:** clears the old maps at once. An invalid one waits and keeps the pick.
+- **Phone width:** two panels per row at 390 px.
+
+![Attribution](screenshots/12-attribution-light.png)
+
+### 2.16 Embedding: `e2e/embedding.spec.ts` (5 tests)
+
+- **PCA:** computes automatically, draws numerals, and has a hover preview, click-to-probe, digit highlight and mistake rings.
+- **t-SNE:** runs only on request, animates, and is kept when switching back.
+- **Robustness:**
+  - The map keeps its orientation across training steps.
+  - "Apply to network" makes it stale.
+  - Reset keeps the chosen layer.
+  - A dead layer is explained rather than drawn as noise.
+- **Theme and layout:** in both themes, every digit colour keeps at least 4.5:1 contrast against the surface. Phone width works.
+
+| PCA | t-SNE |
+| --- | --- |
+| ![](screenshots/13-embedding-pca.png) | ![](screenshots/13-embedding-tsne.png) |
+
 ---
 
 ## 3. Design review
@@ -230,9 +340,62 @@ The screenshots above were reviewed by eye against the Swiss brief:
 - Red reserved for state and positive weights, blue for negative weights.
 - No shadows, gradients or rounded corners.
 
-The review led to the fixes in section 4.
+The review led to the fixes in section 5.
 
-## 4. Bugs found during verification
+The digit colours in 11 Embedding were checked with the dataviz palette validator against this
+page's own surfaces (`#ffffff` light, `#171716` dark):
+
+- All eight hues pass the normal-vision floor and the contrast check in both themes.
+- Every token clears 4.5:1 against the surface, because the numerals are text.
+- Colour-blind separation between adjacent hues is 7.7. That is legal only with secondary encoding, which the numeral provides.
+- Digits 8 and 9 are deliberate neutrals rather than invented ninth and tenth hues.
+
+## 4. Adversarial review of the analysis views (08–11)
+
+The four analysis sections were built in parallel by separate agents, each owning its own files and
+passing its own unit and browser tests. They were then reviewed by **six independent reviewer
+agents**, each with one lens:
+
+- the maths of 08 Distributions;
+- the maths of 09 Units;
+- the maths of 10 Attribution;
+- the maths of 11 Embedding;
+- whole-app integration, performance and design;
+- code robustness.
+
+Reviewers could not edit the project. Every finding had to carry evidence they had observed: a
+failing assertion, printed numbers, a screenshot, or a concrete input that breaks the code.
+
+**Round 1** produced 47 findings: 4 high, 18 medium and 25 low. Shared root causes were fixed
+centrally (commit `fdc7f05`); each section's findings were fixed by an agent that had to reproduce
+the problem first and then prove the fix with a regression test (commit `732f740`). The high and
+medium findings:
+
+| Finding | Problem (as reproduced) | Fix |
+| --- | --- | --- |
+| DIST-1 (high) | Thinned Q–Q plots drew quantiles at 256 Blom positions, so the 40–60 most extreme values per tail were never plotted. 10 outliers at 1.0 among 25,088 weights vanished; the plot looked normal. | Plot real order statistics and always include the 16 most extreme values per tail and the min/max (test: all 10 outliers drawn). |
+| U1 (high) | The Units detail ranked the current input with the live weights against a histogram from an older scan. After 25 training steps, 9 of 16 filters claimed "as high as the strongest" for a digit not in their top 16. | The input is measured with a copy of the scan's weights; the text says which step it belongs to. |
+| U2 (high) | The rank came from interpolating inside histogram bins. For a ReLU unit where 74% of digits are exactly 0, it said "higher than 2%". | Exact ranks over all 2,000 sorted responses, with ties named ("tied with 63% of digits at 0"). |
+| UX-1 (high) | "Apply to network" in 06 changed the weights without changing the step, so 08–11 never refreshed and still claimed to be current. | `store.weightsRev` counts every real weight change; freshness and caches use it. |
+| F1 / UX-2 / UX-3 | The refresh debounce was restarted by every trainer status tick (~120 ms), so it never fired while training, and sections followed three different policies. | One shared policy in `syncedSection`, with a throttle that ticks cannot postpone. |
+| U3 | The status said "Based on step N" while the previous scan was still shown. | `begin()` / `done(stamp)` record the weights a result was computed from; the status reads "Updating to step N…". |
+| U4 | Every conv card read "active on 100% of digits", and every sigmoid unit too. | Conv: share of positions that fire. Dense: share of digits with z > 0. Output: share of digits predicted. |
+| U5 | The detail panel never said which input "this input" was. | It names the input from its caption. |
+| DIST-2 | Conv 1's flat run at 0 is mostly blank background (z = bias), not ReLU zeros, so the "18.8% exactly zero" figure and the guide contradicted the plot. | A "blank input" share (69%) and a corrected guide. |
+| ATTR-1 | The completeness check printed "360% apart" when z(x) − z(blank) ≈ 0, although IG was accurate. | Gap measured against Σ\|IG\|. |
+| ATTR-2 | Blank-pixel saliency came from max-pool tie-breaking and ReLU-at-0 conventions, which drew a lattice on LeNet. | Analyses split tied pool windows evenly and use the midpoint slope at kinks (`inputGradient(…, symmetric)`); training is unchanged. |
+| EMB-1 | The PCA sign rule flipped the map after a single training step. | Orientation stays continuous with the previous result. |
+| EMB-2 / EMB-3 | Same staleness problem as UX-1; Reset discarded the chosen layer. | Fixed through `weightsRev`; Reset keeps the layer when the architecture is unchanged. |
+| EMB-4 / UX-5 / UX-7 | Digit colours for 1–4 and 9 fell below 3.5:1 contrast. The colour for 7 was the accent red that marks mistakes and the current input. | New tokens, all ≥ 4.5:1 in both themes. 7 is plum/pink, at least 17 ΔE from every other digit colour and 23 from the accent. |
+| UX-4 / F3 | Same as U1, seen from the integration and code reviews. | As U1. |
+
+The 25 low findings were fixed too. They covered tick fallbacks, "−0.00", tooltips during the t-SNE
+animation, flat layers, receptive fields larger than the image, segmented controls on phones, the
+type scale and wording, the redraw cost of the initial weights, and probe redraws while drawing.
+
+**Round 2** (verification) is described below.
+
+## 5. Bugs found during verification
 
 | Found by | Problem | Fix |
 | --- | --- | --- |
@@ -245,7 +408,7 @@ The review led to the fixes in section 4.
 | Screenshot review | Thumbnails overflowed their frames by the border width. | Canvas sized to the frame. |
 | Screenshot review | "1 of your image mixed into training". | Singular and plural copy. |
 
-## 5. Performance
+## 6. Performance
 
 Measured in the build container, a shared 2.8 GHz Xeon. Expect two to three times faster on a recent laptop.
 
@@ -265,3 +428,14 @@ Test accuracy on the 2,000 held-out digits. Each row is one run with seed 1, Ada
 With the old default learning rate of 0.001, the Small CNN reached 92.6 % after one epoch, so the default was raised to 0.003. Accuracy keeps rising with more epochs. The subset is 20,000 digits, so expect a little less than results reported on the full 60,000.
 
 The convolution uses im2col, with the matrix products blocked over four filters. That was about 1.5× faster than direct loops.
+
+Analysis jobs run in their own worker. Times are for the default Small CNN in this container; the page stays interactive because jobs yield every few milliseconds.
+
+| Analysis | Time |
+| --- | --- |
+| Layer statistics (256 digits, plus the dead-unit scan over all 2,000) | ~0.4 s, up to ~1.6 s when a ReLU unit is silent |
+| Top-k scan of one layer (2,000 digits) | 0.3–1.2 s |
+| Activation maximisation of a whole layer (160 steps per unit) | 0.3–5 s |
+| Attribution (32 IG steps, 6×6 occlusion) | ~0.1 s |
+| PCA of a layer (1,000 digits) | 0.3–1.3 s |
+| t-SNE (1,000 digits, 500 iterations) | ~5 s in Chromium |
