@@ -321,6 +321,7 @@ export function mountCharts(): void {
       ], { xMax: ax.xMax, xTicks: ax.ticks, xFmt: ax.fmt, yMin: 0, yMax: 1, yFmt: (v) => `${Math.round(v * 100)}%`, yTicks: [0, 0.25, 0.5, 0.75, 1], empty }),
     );
     const where = xEnd > 0 ? `, ${xEnd < 10 ? fixed(xEnd, 2) : int(xEnd)} epochs so far` : '';
+    lossCanvas.dataset.xTicks = ax.ticks.join(',');
     lossCanvas.setAttribute('aria-label', `Cross-entropy loss per epoch, training and test${where}${lastE ? `; latest test loss ${fixed(lastE.loss, 3)}` : ''}`);
     accCanvas.setAttribute('aria-label', `Accuracy per epoch, training and test${where}${lastE ? `; latest test accuracy ${pct(lastE.acc)}` : ''}`);
 
@@ -494,11 +495,7 @@ export function mountCharts(): void {
     let rowTotal = 0;
     for (let k = 0; k < N; k++) rowTotal += geom.conf[row * N + k];
     const name = (k: number) => (namesAreGlyphs(info) ? info.glyphs[k] : info.classes[k]);
-    showTip(
-      `true ${name(row)} → predicted ${name(c)}\n${int(n)} ${noun(info, n)} · ${share(n, rowTotal)} of the ${int(rowTotal)} ${namesAreGlyphs(info) ? `${row}s` : name(row)}`,
-      e.clientX,
-      e.clientY,
-    );
+    showTip(`true ${name(row)} → predicted ${name(c)}\n${int(n)} of the ${int(rowTotal)} test ${noun(info, rowTotal)} labelled ${name(row)} (${share(n, rowTotal)})`, e.clientX, e.clientY);
   });
   confCanvas.addEventListener('mouseleave', hideTip);
 

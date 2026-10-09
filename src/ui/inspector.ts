@@ -588,7 +588,7 @@ export function mountInspector(): void {
     const rowNames = Array.from({ length: M }, (_, j) => ul(j));
     const left = Math.max(30, measure(rowNames) + 10);
     const top = 18;
-    const colW = cols ? measure(cols) + 8 : 0;
+    const colW = cols ? measure(cols, `500 12px ${MONO}`) + 8 : 0;
     // Small matrices (point networks) get roomy cells so every column can carry its label.
     const roomy = N <= 12;
     let cw = numbers ? 44 : Math.max(3, Math.min(roomy ? 44 : 22, Math.floor((availW - left - 40) / N)));
@@ -599,6 +599,15 @@ export function mountInspector(): void {
     const ctx = fitCanvas(canvas, W, H);
     const labelEvery = cols && cw >= colW ? 1 : Math.max(1, Math.ceil(16 / cw));
     for (let c = 0; c < N; c += labelEvery) label(ctx, cols ? cols[c] : String(c + 1), left + c * cw + cw / 2, 8, 'center');
+    if (cols && i === 0 && store.info.kind === 'points') {
+      // Feature labels (x₁², sin x₂) carry sub- and superscripts: redraw them larger.
+      ctx.clearRect(left, 0, N * cw, top - 2);
+      ctx.font = `500 12px ${MONO}`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = p.ink2;
+      for (let c = 0; c < N; c++) ctx.fillText(cols[c], left + c * cw + cw / 2, 8);
+    }
     label(ctx, 'b', left + N * cw + 8 + cw / 2, 8, 'center');
     for (let j = 0; j < M; j++) label(ctx, rowNames[j], 2, top + j * ch + ch / 2, 'left', j === unit ? p.accent : undefined);
     matrix(ctx, b.W, 0, M, N, left, top, cw, ch, mode, max);
