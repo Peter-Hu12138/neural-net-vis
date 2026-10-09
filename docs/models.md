@@ -84,7 +84,97 @@ cannot load the TypeScript sources directly.
 
 ## Transfer learning, measured
 
-%TRANSFER%
+**Question.** A network trained on MNIST digits has learned convolution filters for strokes and
+edges. Do they help with clothing when only a few labelled clothing images are available? And the
+other way round, Fashion-MNIST to MNIST?
+
+**Setup.** `npx vite-node scripts/pretrain.ts transfer` (the defaults: 3 seeds), with the same
+engine; 60 training runs, 12 minutes of wall time and 34 CPU-minutes on three threads.
+
+- **Source networks:** `mnist-cnn` and `fashion-cnn` from the zoo. Both are the page's Small CNN
+  (conv 3×3×8 → pool → conv 3×3×16 → pool → dense 32 → output), so the comparison is symmetric.
+- **Training data:** only the **first 1,000** or the **first 200** images of the target's official
+  training set (the same images the page trains on first). **Testing:** the target's **full official
+  test set**, 10,000 images.
+- **Budget:** every run sees 20,000 training images: 20 passes over 1,000 images or 100 over 200.
+- **Settings:** Adam, batch 32, learning rate 0.003, which are the page's defaults.
+- **Seeds** 101, 102 and 103 change the new layers' starting weights and the order of the images.
+  The tables show the mean of the three runs, with the lowest and highest in brackets; every run is
+  in `public/models/transfer.json`.
+
+The five conditions, each as it can be done on the page:
+
+1. **From scratch:** random weights, every layer learns.
+2. **Transfer, all frozen:** copy every hidden layer, freeze them, train only a new output layer.
+   This is what the Transfer button does.
+3. **Transfer, conv frozen:** copy every hidden layer, freeze only the two convolution layers; the
+   dense layer and the new output layer learn. On the page: Transfer, then **Unfreeze Dense 3**.
+4. **Transfer, then fine-tune:** condition 2 for the first 10,000 images, then every layer unfrozen
+   for the other 10,000 at learning rate 0.001. On the page: Transfer, train, unlock every layer,
+   lower the learning rate, train on.
+5. **Control, random conv frozen:** like condition 3, but the frozen convolution layers keep their
+   random starting weights instead of the copied ones. It shows how much the copied filters
+   themselves are worth.
+
+### Test accuracy after 20,000 training images
+
+| From → to | Images | From scratch | Transfer, all frozen | Transfer, conv frozen | Transfer, then fine-tune | Control: random conv frozen |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| MNIST → Fashion-MNIST | 1,000 | 81.9% (80.9–82.4) | 63.6% (63.0–64.0) | 82.0% (81.5–82.4) | 81.2% (81.1–81.3) | 81.2% (80.1–82.6) |
+| MNIST → Fashion-MNIST | 200 | 76.0% (75.2–77.1) | 58.8% (58.7–59.2) | 75.0% (74.5–75.4) | 74.6% (73.7–75.4) | 76.6% (75.4–78.1) |
+| Fashion-MNIST → MNIST | 1,000 | 94.0% (93.7–94.2) | 61.7% (60.8–63.0) | 92.8% (92.6–93.0) | 92.3% (92.0–92.6) | 91.8% (90.8–92.5) |
+| Fashion-MNIST → MNIST | 200 | 80.0% (79.4–80.5) | 56.1% (54.9–57.6) | 78.9% (77.3–80.2) | 78.6% (77.7–80.0) | 80.2% (79.3–80.8) |
+
+### Early on: after the first 1,000 and 5,000 training images
+
+| From → to | Images | From scratch | Transfer, all frozen | Transfer, conv frozen | Control: random conv frozen |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| MNIST → Fashion-MNIST | 1,000 | 68.2% → 78.8% | 14.5% → 51.6% | 67.4% → 79.8% | 66.4% → 75.6% |
+| MNIST → Fashion-MNIST | 200 | 67.2% → 75.4% | 16.0% → 50.5% | 63.4% → 73.6% | 65.0% → 73.5% |
+| Fashion-MNIST → MNIST | 1,000 | 75.3% → 91.4% | 11.2% → 37.8% | 59.3% → 88.6% | 72.4% → 88.7% |
+| Fashion-MNIST → MNIST | 200 | 71.4% → 79.7% | 11.5% → 38.5% | 58.6% → 75.9% | 68.9% → 79.5% |
+
+(Fine-tuning is identical to "all frozen" for its first 10,000 images.)
+
+### Training time per run (20,000 images, evaluations excluded)
+
+| From → to | Images | From scratch | Transfer, all frozen | Transfer, conv frozen | Transfer, then fine-tune | Control: random conv frozen |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| MNIST → Fashion-MNIST | 1,000 | 28.7 s | 12.9 s | 13.7 s | 21.8 s | 14.2 s |
+| MNIST → Fashion-MNIST | 200 | 27.1 s | 11.8 s | 12.0 s | 19.2 s | 12.6 s |
+| Fashion-MNIST → MNIST | 1,000 | 28.9 s | 12.1 s | 13.4 s | 21.4 s | 14.2 s |
+| Fashion-MNIST → MNIST | 200 | 28.2 s | 12.5 s | 13.2 s | 19.4 s | 12.5 s |
+
+### What the numbers say
+
+1. **Freezing every copied layer costs a lot.** With only the new output layer learning, accuracy
+   reaches 56–64%, against 76–94% from scratch. The copied dense layer had learned 32 features for
+   telling digits (or clothes) apart, and a single output layer on top of them cannot make up for
+   that. It is also slow to get going: only 330 weights learn.
+2. **Unfreezing the dense layer brings transfer level with training from scratch** (82.0% against
+   81.9% on Fashion-MNIST from 1,000 images; at most 1.2 points behind elsewhere) **in under half the
+   training time** (13 s against 28 s per run), because no gradients flow into the frozen
+   convolutions.
+3. **The copied filters themselves carry little here.** Random, untrained convolution filters,
+   frozen, do about as well: within 1.6 points of the copied ones either way. A dense layer that
+   learns can do a lot with random features. So the time saved comes from freezing, not from what
+   the filters learned.
+4. **No head start.** After the first 1,000 training images, the transferred network is level with
+   training from scratch on Fashion-MNIST (67.4% against 68.2%) and behind it on MNIST (59.3% against
+   75.3%; random filters reach 72.4%): filters learned on clothing slow down the first steps on
+   digits.
+5. **Fine-tuning everything does not help with this little data**: it ends 0.3–0.8 points below
+   keeping the convolutions frozen.
+
+Between two small sets of 28×28 grey pictures, then, transfer mostly saves training time. Transfer
+pays off in accuracy when the source network has learned far more than the new examples can teach,
+as large networks trained on millions of photos have; a zoo small enough to train in a browser tab
+cannot show that. On the page this experiment explains two things: after Transfer the panel offers
+to unfreeze the dense layer, and the Pretrained tab quotes the row that matches the current dataset.
+
+An earlier run that was cut short, at learning rate 0.001 and with fine-tuning at 0.0003, gave the
+same ordering (scratch, then conv frozen, then fine-tuned, then all frozen), with the frozen
+conditions lower still.
 
 ## Using the zoo and your own models on the page
 

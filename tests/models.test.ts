@@ -135,7 +135,7 @@ suite('pretrained model zoo', () => {
     expect(text).toContain(`with the dense layer unlocked as well, ${(r.convFrozen.mean * 100).toFixed(1)}%`);
     expect(text).toContain(`training from scratch (${(r.scratch.mean * 100).toFixed(1)}%)`);
     expect(text).not.toMatch(/-\d/); // true minus signs only
-    expect(controlFinding(r, 'MNIST', 'Fashion')).toContain(`reach ${(r.randomConv!.mean * 100).toFixed(1)}%`);
+    expect(controlFinding(r, 'MNIST', 'Fashion')).toContain(`with random, untrained conv filters frozen instead, ${(r.randomConv!.mean * 100).toFixed(1)}%`);
 
     // Synthetic rows exercise each wording.
     const cell = (mean: number, seconds = 10, early = mean - 0.2) => ({ runs: [mean], mean, seconds, early: [{ seen: 1000, runs: [early], mean: early }] });
@@ -147,7 +147,9 @@ suite('pretrained model zoo', () => {
     expect(transferFinding({ ...row, convFrozen: cell(0.805, 19) }, 'A', 'MNIST')).toContain('level with training from scratch (80.0%).');
     expect(transferFinding({ ...row, convFrozen: cell(0.77, 19) }, 'A', 'MNIST')).toContain('3.0 points below training from scratch');
     expect(controlFinding(row, 'A', 'MNIST')).toContain('worth 10.0 points here');
-    expect(controlFinding({ ...row, randomConv: cell(0.845) }, 'A', 'MNIST')).toContain('add little over random ones');
+    expect(controlFinding({ ...row, randomConv: cell(0.845) }, 'A', 'MNIST')).toContain('the A filters add little here');
+    expect(controlFinding({ ...row, convFrozen: cell(0.8), randomConv: cell(0.805) }, 'A', 'MNIST')).toContain('From A to MNIST, transfer mostly saves training time.');
+    expect(controlFinding({ ...row, randomConv: cell(0.9) }, 'A', 'MNIST')).toContain('random filters did 5.0 points better than the A ones.');
     expect(controlFinding({ ...row, randomConv: undefined }, 'A', 'MNIST')).toBeNull();
   });
 

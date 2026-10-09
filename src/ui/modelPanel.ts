@@ -420,30 +420,30 @@ export function mountModelPanel(): void {
       { key: 'convFrozen', label: 'Conv frozen', title: 'Transfer, then unlock the dense layer: only the conv layers stay frozen' },
       { key: 'fineTune', label: 'Fine-tuned', title: 'Transfer and train the new output layer, then unlock everything and train on at a lower rate' },
     ];
+    // One group of rows per pair of datasets ("MNIST → Fashion"), one row per training-set size.
+    const pairs = [...new Set(rows.map((x) => `${x.from}>${x.to}`))].map((key) => rows.filter((x) => `${x.from}>${x.to}` === key));
     const table = (caption: string, value: (c: TransferCell) => number | undefined) =>
       h(
         'table',
         { class: 'transfer-table' },
         h('caption', null, caption),
-        h(
-          'thead',
-          null,
-          h('tr', null, h('th', { scope: 'col' }, 'From → to'), h('th', { scope: 'col', class: 'num' }, 'Images'), ...cols.map((c) => h('th', { scope: 'col', class: 'num', title: c.title }, c.label))),
-        ),
-        h(
-          'tbody',
-          null,
-          ...rows.map((row) => {
-            const vals = cols.map((c) => value(row[c.key]));
-            const best = Math.max(...vals.map((v) => v ?? -1));
-            return h(
-              'tr',
-              { class: row === r ? 'is-current' : undefined },
-              h('th', { scope: 'row' }, `${short(zooSet(row.from))} → ${short(row.to)}`),
-              h('td', { class: 'num' }, int(row.train)),
-              ...vals.map((v) => h('td', { class: `num${v !== undefined && v === best ? ' is-best' : ''}` }, v === undefined ? '—' : pct(v))),
-            );
-          }),
+        h('thead', null, h('tr', null, h('th', { scope: 'col' }, 'Images'), ...cols.map((c) => h('th', { scope: 'col', class: 'num', title: c.title }, c.label)))),
+        ...pairs.map((group) =>
+          h(
+            'tbody',
+            null,
+            h('tr', { class: 'transfer-group' }, h('th', { scope: 'rowgroup', colspan: String(cols.length + 1) }, `${short(zooSet(group[0].from))} → ${short(group[0].to)}`)),
+            ...group.map((row) => {
+              const vals = cols.map((c) => value(row[c.key]));
+              const best = Math.max(...vals.map((v) => v ?? -1));
+              return h(
+                'tr',
+                { class: row === r ? 'is-current' : undefined },
+                h('th', { scope: 'row', class: 'num' }, int(row.train)),
+                ...vals.map((v) => h('td', { class: `num${v !== undefined && v === best ? ' is-best' : ''}` }, v === undefined ? '—' : pct(v))),
+              );
+            }),
+          ),
         ),
       );
     const seen = rows[0].train * rows[0].epochs;
@@ -452,13 +452,17 @@ export function mountModelPanel(): void {
       'details',
       { class: 'transfer-details', open: detailsOpen },
       h('summary', null, 'All measurements'),
-      h('div', { class: 'transfer-wrap' }, table(`Test accuracy after ${int(seen)} training images (the first N, shown again and again)`, (c) => c.mean)),
-      cp ? h('div', { class: 'transfer-wrap' }, table(`Head start: test accuracy after only the first ${int(cp)}`, (c) => c.early?.[0]?.mean)) : null,
       h(
-        'p',
-        { class: 'hint' },
-        'Frozen is what Transfer does. Conv frozen: Transfer, then unlock the dense layer. Fine-tuned: Transfer, train, then unlock everything and train on at a lower rate. ',
-        `Each number is the mean of ${transfer.seeds} runs, tested on the ${int(10000)} official test images of the target dataset; both source networks are the small CNN preset, trained on all 60,000 images of their own dataset. ${transfer.settings}`,
+        'div',
+        { class: 'transfer-body' },
+        h('div', { class: 'transfer-wrap' }, table(`Test accuracy after ${int(seen)} training images`, (c) => c.mean)),
+        cp ? h('div', { class: 'transfer-wrap' }, table(`After only the first ${int(cp)} training images`, (c) => c.early?.[0]?.mean)) : null,
+        h(
+          'p',
+          { class: 'hint' },
+          'Frozen: what Transfer does. Conv frozen: Transfer, then unlock the dense layer. Fine-tuned: Transfer, train, then unlock everything at a lower learning rate. ',
+          `Images: the first N of the training set, shown again and again until ${int(seen)} have gone by. Means of ${transfer.seeds} runs, each tested on the ${int(10000)} official test images, with Adam at this page's default settings. Both source networks are the small CNN preset, trained on all 60,000 images of their own dataset.`,
+        ),
       ),
     );
     details.addEventListener('toggle', () => (detailsOpen = details.open));

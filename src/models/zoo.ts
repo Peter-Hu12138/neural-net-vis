@@ -103,14 +103,14 @@ export function controlFinding(r: TransferRow, fromShort: string, toShort: strin
   const d = (r.convFrozen.mean - c.mean) * 100;
   const verdict =
     d >= 2
-      ? `so the filters learned on ${fromShort} are worth ${fixed(d, 1)} points here.`
+      ? `so the ${fromShort} filters are worth ${fixed(d, 1)} points here.`
       : d > -2
-        ? `so here the filters learned on ${fromShort} add little over random ones: a dense layer that learns can do a lot with random features.`
-        : `so random filters did ${fixed(-d, 1)} points better than the ones learned on ${fromShort}.`;
-  let s = `Control: the same conv layers with random, untrained weights, frozen, reach ${pct(c.mean)} on ${toShort} with ${int(r.train)} images (copied from ${fromShort}: ${pct(r.convFrozen.mean)}), ${verdict}`;
+        ? `so the ${fromShort} filters add little here: a dense layer that learns can do a lot with random features.`
+        : `so random filters did ${fixed(-d, 1)} points better than the ${fromShort} ones.`;
+  let s = `Control: with random, untrained conv filters frozen instead, ${pct(c.mean)} (copied from ${fromShort}: ${pct(r.convFrozen.mean)}), ${verdict}`;
   // No gain over scratch and none over random filters: say what transfer is for.
   if (d < 2 && r.convFrozen.mean - r.scratch.mean < 0.02) {
-    s += ` From ${fromShort} to ${toShort}, transfer mostly saves training time. It pays off in accuracy when the source network has learned far more than the new examples can teach, as with large networks trained on millions of photos.`;
+    s += ` From ${fromShort} to ${toShort}, transfer mostly saves training time. It pays off in accuracy when the source network has learned far more than the new examples can teach, as large networks trained on millions of photos have.`;
   }
   return s;
 }

@@ -364,8 +364,14 @@
 }
 
 .transfer-details {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.transfer-body {
   display: grid;
-  gap: 10px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 14px;
   min-width: 0;
 }
 
@@ -391,17 +397,41 @@
   margin-bottom: 8px;
 }
 
-.transfer-details .transfer-wrap + .transfer-wrap {
-  margin-top: 12px;
-}
-
 .transfer-details .hint {
   font-size: 12px;
-  margin-top: 8px;
+}
+
+/* A pair of datasets heads its group of rows. */
+.transfer-table .transfer-group th {
+  padding-top: 8px;
+  border-bottom: 0;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.transfer-table tbody th.num {
+  font-family: var(--mono);
+  font-weight: 400;
+  text-align: left;
+  color: var(--ink-2);
 }
 
 /* The row quoted in the headline above. */
-.transfer-table tr.is-current th {
+.transfer-table tr.is-current th.num {
   box-shadow: inset 2px 0 0 var(--ink);
   padding-left: 6px;
+  color: var(--ink);
+}
+
+/* Column heads may wrap ("Conv / frozen") so the table fits a phone-width column. */
+.transfer-table thead th.num {
+  white-space: normal;
+  vertical-align: bottom;
+  letter-spacing: 0.05em;
+}
+
+.transfer-table th:last-child,
+.transfer-table td:last-child {
+  padding-right: 0;
 }
