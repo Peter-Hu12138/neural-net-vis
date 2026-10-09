@@ -1,0 +1,84 @@
+/* ── 01 Architecture: builder additions ───────────────────
+   Freeze toggles, frozen layers, the keep-weights switch and size warnings. */
+
+.layer-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 10px;
+  min-width: 0;
+}
+
+.builder-input {
+  overflow-wrap: anywhere;
+}
+
+/* A frozen layer is hatched and muted: its weights will not move while the rest trains. */
+.layer.is-frozen {
+  background-image: repeating-linear-gradient(-45deg, transparent 0 6px, var(--hair) 6px 7.5px);
+}
+
+.layer.is-frozen .layer-title,
+.layer.is-frozen .layer-fields {
+  color: var(--ink-2);
+}
+
+.freeze {
+  gap: 6px;
+  min-width: 86px;
+  background: var(--bg);
+}
+
+.freeze svg {
+  width: 13px;
+  height: 13px;
+  flex: none;
+}
+
+.freeze[aria-pressed='true'] {
+  background: var(--ink);
+  color: var(--bg);
+}
+
+.freeze[aria-pressed='true']:hover:not(:disabled) {
+  background: var(--ink-2);
+  border-color: var(--ink-2);
+}
+
+.builder-actions .builder-why {
+  flex-basis: 100%;
+  font-size: 12.5px;
+}
+
+.builder-total {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  min-width: 0;
+}
+
+.builder-frozen {
+  font: 400 12px var(--mono);
+  color: var(--muted);
+}
+
+.builder-warn {
+  margin: 12px 0 0;
+}
+
+.builder-keep {
+  display: grid;
+  gap: 4px;
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--hair);
+}
+
+.builder-keep .hint {
+  font-size: 12.5px;
+}
+
+.builder-note {
+  margin-top: 10px;
+}
