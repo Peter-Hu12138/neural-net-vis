@@ -246,8 +246,6 @@ export function mountInspector(): void {
     clear(frozenEl);
     if (frozen) {
       frozenEl.append(
-        h('span', { class: 'tag' }, 'Frozen'),
-        ' ',
         h('b', null, 'Frozen: training leaves these weights alone.'),
         ' The optimizer skips its weights and bias; the error signal still flows through it to any trainable layer below.',
       );
@@ -339,7 +337,7 @@ export function mountInspector(): void {
       const W = Math.max(availW, Math.min(slots, perRow) * (kw + gap));
       const H = 30 + rows * (k * ch + 34) + 30;
       const ctx = fitCanvas(canvas, W, H);
-      label(ctx, colour ? `Filter ${unit + 1}: its ${k}×${k}×3 kernel as a colour patch, then one ${k}×${k} kernel per colour channel` : `Filter ${unit + 1}: one ${k}×${k} kernel per input channel`, 0, 12, 'left', p.ink);
+      label(ctx, colour ? `Filter ${unit + 1}: colour patch, then the R, G and B kernels` : C === 1 ? `Filter ${unit + 1}: its ${k}×${k} kernel` : `Filter ${unit + 1}: one ${k}×${k} kernel per input channel`, 0, 12, 'left', p.ink);
       for (let s = 0; s < slots; s++) {
         const x = (s % perRow) * (kw + gap);
         const y = 30 + Math.floor(s / perRow) * (k * ch + 34);
@@ -354,7 +352,7 @@ export function mountInspector(): void {
           continue;
         }
         const c = s - (colour ? 1 : 0);
-        label(ctx, colour ? `${CHANNELS[c]} channel` : `in-channel ${c + 1}`, x, y + 8);
+        label(ctx, colour ? `${CHANNELS[c]} channel` : C === 1 ? 'weights' : `in-channel ${c + 1}`, x, y + 8);
         matrix(ctx, b.W, (unit * C + c) * kk, k, k, x, y + 18, cw, ch, 'numbers', max);
         regions.push({ x, y: y + 18, w: kw, h: k * ch, rows: k, cols: k, unit, label: (r, cc) => `W[filter ${unit + 1}, ${chName(c)}, ${r}, ${cc}] = ${wv(b.W[(unit * C + c) * kk + r * k + cc])}` });
       }
@@ -369,19 +367,25 @@ export function mountInspector(): void {
     }
     const mm: MatrixMode = mode;
     if (colour) {
-      // One card per filter: the colour patch, then the red, green and blue kernels.
-      const cell = k === 3 ? 12 : 8;
-      const kw = k * cell;
-      const P = kw + 8;
+      // One card per filter: the colour patch, then the red, green and blue kernels. Cells shrink
+      // a little on a phone so two cards fit side by side.
       const gap = 4;
-      const cardW = P + 10 + 3 * kw + 2 * gap;
       const gapX = 22;
+      const card = (cell: number) => {
+        const kw = k * cell;
+        const P = kw + 8;
+        return { cell, kw, P, cardW: P + 10 + 3 * kw + 2 * gap };
+      };
+      const sizes = (k === 3 ? [12, 11, 10, 9, 8] : [8, 7, 6]).map(card);
+      const fit = (c: ReturnType<typeof card>) => Math.max(1, Math.min(F, Math.floor((availW - 8 + gapX) / (c.cardW + gapX))));
+      const pick = sizes.find((c) => fit(c) >= Math.min(2, F)) ?? sizes[sizes.length - 1];
+      const { cell, kw, P, cardW } = pick;
       const cardH = 14 + P + 16;
-      const perRow = Math.max(1, Math.min(F, Math.floor((availW + gapX) / (cardW + gapX))));
+      const perRow = fit(pick);
       const rows = Math.ceil(F / perRow);
-      const ctx = fitCanvas(canvas, Math.max(availW, perRow * (cardW + gapX) - gapX + 4), rows * (cardH + 12) + 4);
+      const ctx = fitCanvas(canvas, Math.max(availW, perRow * (cardW + gapX) - gapX + 8), rows * (cardH + 12) + 4);
       for (let f = 0; f < F; f++) {
-        const x = 2 + (f % perRow) * (cardW + gapX);
+        const x = 4 + (f % perRow) * (cardW + gapX);
         const y = 2 + Math.floor(f / perRow) * (cardH + 12);
         label(ctx, `f${f + 1}`, x, y + 6, 'left', f === unit ? p.accent : undefined);
         const py = y + 14;
@@ -612,6 +616,11 @@ export function mountInspector(): void {
     for (let j = 0; j < M; j++) label(ctx, rowNames[j], 2, top + j * ch + ch / 2, 'left', j === unit ? p.accent : undefined);
     matrix(ctx, b.W, 0, M, N, left, top, cw, ch, mode, max);
     matrix(ctx, b.b, 0, M, 1, left + N * cw + 8, top, cw, ch, mode, maxAbs(b.b) || 1);
+    // Hairline frames, so an all-zero column (fresh biases) still reads as a column.
+    ctx.strokeStyle = p.hair;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(left - 0.5, top - 0.5, N * cw + 1, M * ch + 1);
+    ctx.strokeRect(left + N * cw + 7.5, top - 0.5, cw + 1, M * ch + 1);
     const inName = (c: number) => (cols ? cols[c] : `in ${c + 1}`);
     regions.push({ x: left, y: top, w: N * cw, h: M * ch, rows: M, cols: N, label: (r, c) => `W[${rowNames[r]} ← ${inName(c)}] = ${wv(b.W[r * N + c])}` });
     regions.push({ x: left + N * cw + 8, y: top, w: cw, h: M * ch, rows: M, cols: 1, label: (r) => `bias of ${rowNames[r]} = ${wv(b.b[r])}` });

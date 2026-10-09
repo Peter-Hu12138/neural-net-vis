@@ -411,7 +411,7 @@ function row(...els: HTMLElement[]): HTMLElement {
 
 /** The frozen-layer note for a step: ink rule, not the accent (frozen is a setting, not an alarm). */
 function frozenNote(...parts: (string | Node)[]): HTMLElement {
-  return h('p', { class: 'bp-frozen' }, h('span', { class: 'tag' }, 'Frozen'), ' ', ...parts);
+  return h('p', { class: 'bp-frozen' }, ...parts);
 }
 
 const flatShape = (s: Shape) => s.h > 1;
@@ -583,7 +583,7 @@ function renderInput(el: HTMLElement, t: Trace): void {
       h(
         'p',
         { class: 'bp-text' },
-        `The point ${where} enters as ${F} number${F === 1 ? '' : 's'}, one per input feature you chose in 07 Data.${extra} The training target is ${target}.`,
+        `The point ${where} enters as ${F} number${F === 1 ? '' : 's'}, one per input feature chosen under Input features above.${extra} The training target is ${target}.`,
       ),
       formula(`x = (${c.feats.join(', ')})`, false),
       row(vec(`x · ${F} input feature${F === 1 ? '' : 's'}`, t.x, { labels: c.feats, signed: true })),

@@ -62,6 +62,13 @@ export function mountControls(): void {
   const speedNote = h('span', { class: 'speed-note', id: 'speed-note' });
   const speedField = h('div', { class: 'field bar-speed' }, h('span', { class: 'label', id: 'speed-label' }, 'Speed'), speedSeg, speedNote);
   speedSeg.setAttribute('aria-describedby', 'speed-note');
+  // On a phone the same choice is a menu beside the transport buttons, so the bar keeps its height
+  // (CSS shows one or the other).
+  const speedMenu = selectField('speed-select', 'Speed', SPEED_LABELS, store.speed, (v) => {
+    if (store.speed !== v) setSpeed(v);
+  });
+  speedMenu.classList.add('bar-speed-menu');
+  speedMenu.querySelector('select')!.setAttribute('aria-describedby', 'speed-note');
 
   const stat = (label: string) => {
     const lab = h('span', { class: 'label' }, label);
@@ -102,6 +109,8 @@ export function mountControls(): void {
       b.title = speedTitle(v, many);
     }
     speedNote.textContent = speedTitle(store.speed, many);
+    setSelect(speedMenu, SPEED_LABELS, store.speed);
+    speedMenu.title = speedTitle(store.speed, many);
     const one = noun(store.info);
     sRate.lab.textContent = `${one[0].toUpperCase()}${one.slice(1)}s/s`;
     sRate.el.title = `Training ${many} per second${SPEEDS[store.speed] ? `, capped at ${int(SPEEDS[store.speed]!)} by the speed setting` : ''}`;
@@ -111,7 +120,7 @@ export function mountControls(): void {
   store.on('dataset', renderSpeed);
 
   root.append(
-    h('div', { class: 'bar-group' }, playBtn, stepBtn, epochBtn, resetBtn),
+    h('div', { class: 'bar-group' }, playBtn, stepBtn, epochBtn, resetBtn, speedMenu),
     speedField,
     h('div', { class: 'bar-stats' }, sEpoch.el, sStep.el, sRate.el, sAcc.el),
     hyper,

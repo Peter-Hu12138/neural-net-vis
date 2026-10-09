@@ -110,6 +110,7 @@ const greenPixels = (page: Page) =>
 test('04 shows a colour network’s first-layer kernels as colour patches', async ({ page }) => {
   await open(page);
   await switchTo(page, 'cifar10');
+  await trainUntil(page, '(window.raster.store.status?.step ?? 0) > 60');
   await inspect(page, 0, 'heat', 'conv-colour');
   await expect(inspCanvas(page)).toHaveAttribute(
     'aria-label',
@@ -143,6 +144,8 @@ test('04 shows a colour network’s first-layer kernels as colour patches', asyn
 
   // Without convolutions, the first dense layer's "templates" are colour images.
   await page.getByRole('button', { name: 'Softmax', exact: true }).click();
+  await page.waitForFunction(() => (window as unknown as W).raster.store.evals.length >= 1);
+  await trainUntil(page, '(window.raster.store.status?.step ?? 0) > 300');
   await inspect(page, 0, 'heat', 'dense-templates-colour');
   await expect(inspCanvas(page)).toHaveAttribute('aria-label', 'Output weights: each of the 10 classes’ 3,072 weights as a 32×32 colour image, mid grey is zero');
   expect(await greenPixels(page)).toBeGreaterThan(20);
@@ -398,11 +401,20 @@ test('the speed control caps the trainer and follows the dataset', async ({ page
   await expect(speed.getByRole('button', { name: 'Max' })).toHaveAttribute('aria-pressed', 'true');
   await expect(page.locator('.bar .stat .label').nth(2)).toHaveText('Digits/s');
 
-  // Phone width: the three options stay on one row and nothing scrolls sideways.
+  // Phone width: the choice moves into the button row as a menu, so the sticky bar does not grow.
   await page.setViewportSize({ width: 390, height: 844 });
   await page.waitForTimeout(300);
-  const ys = await speed.locator('button').evaluateAll((bs) => bs.map((b) => Math.round(b.getBoundingClientRect().top)));
-  expect(new Set(ys).size).toBe(1);
+  await expect(speed).toBeHidden();
+  const menu = page.locator('#speed-select');
+  await expect(menu).toBeVisible();
+  await expect(menu).toHaveValue('max');
+  const [menuTop, playTop] = await Promise.all([menu.evaluate((e) => e.getBoundingClientRect().bottom), page.locator('#play').evaluate((e) => e.getBoundingClientRect().bottom)]);
+  expect(Math.abs(menuTop - playTop), 'menu sits in the button row').toBeLessThan(16);
+  expect(await page.locator('.bar').evaluate((e) => e.getBoundingClientRect().height)).toBeLessThanOrEqual(180);
+  await menu.selectOption('slow');
+  expect(await page.evaluate(() => (window as unknown as W).raster.store.speed)).toBe('slow');
+  await expect(menu).toHaveAttribute('title', /^Slow caps training at 300 digits a second/);
+  await menu.selectOption('max');
   expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(0);
   await page.locator('.bar').screenshot({ path: `${SHOTS}/17-core-bar-phone.png` });
 });

@@ -23,7 +23,7 @@
   font-size: 12px;
 }
 
-/* Frozen layers: ink rule and tag, like the marker in 04 (frozen is a setting, not an alarm). */
+/* Frozen layers: an ink rule, like the marker in 04 (frozen is a setting, not an alarm). */
 .bp-frozen {
   margin: 0;
   padding: 8px 10px;
@@ -32,11 +32,6 @@
   background: var(--surface);
   font-size: 13.5px;
   color: var(--ink-2);
-}
-
-.bp-frozen .tag {
-  margin-right: 4px;
-  vertical-align: 1px;
 }
 
 .bp-frozen b {

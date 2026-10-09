@@ -8,6 +8,11 @@
   padding: 5px 9px;
 }
 
+/* The phone version of the speed control (a menu in the button row); hidden on wider screens. */
+.bar .bar-speed-menu {
+  display: none;
+}
+
 /* The full sentence is the control's description for screen readers; sighted readers get it as a
    tooltip on each option. */
 .speed-note {
@@ -24,24 +29,28 @@
 }
 
 @media (max-width: 560px) {
-  /* Three options stay one row of three (the shared phone rule makes segmented controls a 2-column
-     grid, which would leave "Max" alone on a second row). Label to the left, so the row is short. */
-  .bar-speed {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    flex-basis: 100%;
+  /* The sticky bar must not grow on a phone (it would cover what is being drawn or clicked), so the
+     speed becomes a menu in the button row and the buttons get a little more compact. */
+  .bar .bar-speed {
+    display: none;
   }
-  .bar-speed .seg {
-    display: inline-flex;
-    flex-wrap: nowrap;
-    border-width: 2px;
+  .bar .bar-speed-menu {
+    display: grid;
+    margin-left: 4px;
   }
-  .bar-speed .seg button,
-  .bar-speed .seg button + button {
-    border: 0;
+  .bar-speed-menu select {
+    font-size: 13px;
   }
-  .bar-speed .seg button + button {
-    border-left: 2px solid var(--ink);
+  .bar-group {
+    gap: 6px;
+  }
+  .bar-group .btn {
+    height: 30px;
+    padding: 0 8px;
+    font-size: 10.5px;
+  }
+  .bar-group .play {
+    width: 44px;
+    height: 44px;
   }
 }
