@@ -327,6 +327,21 @@ function buildSteps(t: Trace, ui: { eta: number; onEta: (v: number) => void; app
     block: -1,
     dir: 'fwd',
     render: (el) => {
+      const shape = t.blocks[0].inShape;
+      if (shape.c !== 1 || shape.h !== 28 || shape.w !== 28) {
+        // Other inputs: a feature vector (point datasets) or a colour image. (Placeholder until this
+        // step is written out for every dataset.)
+        const vec = shape.h === 1 && shape.w === 1;
+        const feats = store.features;
+        const lines = vec
+          ? Array.from(t.x, (v, i) => `  ${(vec && feats[i] ? feats[i] : `x${i + 1}`).padEnd(8)} ${ns(v, 3, 8)}`)
+          : [`${shape.h}×${shape.w}×${shape.c} values, ${t.x.length.toLocaleString('en-US')} in all.`];
+        el.append(
+          h('p', { class: 'bp-text' }, vec ? `The point enters as ${t.x.length} numbers, one per input feature.` : `The image enters as ${t.x.length.toLocaleString('en-US')} numbers, one per pixel and colour channel.`),
+          work(lines),
+        );
+        return;
+      }
       const lines: string[] = ['Centre crop, rows 10–17, columns 10–17:'];
       for (let y = 10; y < 18; y++) {
         let s = '';
@@ -849,7 +864,8 @@ export function mountBackprop(): void {
 
   const retrace = () => {
     const probe = store.probe;
-    if (!probe) return;
+    // While a new dataset loads, the network can already expect a different input than the probe.
+    if (!probe || probe.x.length !== store.net.inputSize) return;
     const y = target ?? probe.label ?? argmax(store.net.forward(probe.x));
     trace = makeTrace(store.net, probe.x, y);
     steps = buildSteps(trace, {

@@ -342,9 +342,9 @@ test('3-D shells: the cube renders, dragging turns it, the slice slider moves th
   await expect(page.locator('.bd-slice-val')).toHaveText('x₃ = 0.60');
   await page.waitForTimeout(150);
   expect(await img()).not.toBe(before);
-  await page.getByRole('button', { name: 'x₁', exact: true }).click();
+  await page.locator('#boundary').getByRole('button', { name: 'x₁', exact: true }).click();
   await expect(map).toHaveAttribute('data-slice', /^0:/);
-  await page.getByRole('button', { name: 'x₃', exact: true }).click();
+  await page.locator('#boundary').getByRole('button', { name: 'x₃', exact: true }).click();
 
   // Clicking the slice map sets the input to a point on the slice.
   const p = await at(page, 1.1, -1.1, '#boundary .bd-3d canvas.bd-plane');
@@ -387,7 +387,7 @@ test('network view: unit maps for points, images in colour for CIFAR, MNIST unch
   await expect(net).toHaveAttribute('data-view', 'image');
   await expect(net).toHaveAttribute('aria-label', /32×32 colour input/);
   await expect(page.locator('#netview .probe-strip .thumb')).toHaveCount(10);
-  await expect(page.getByRole('button', { name: 'Random test image' })).toBeEnabled();
+  await expect(page.locator('#netview').getByRole('button', { name: 'Random test image' })).toBeEnabled();
   await page.waitForTimeout(300);
   await page.locator('#network').screenshot({ path: `${SHOTS}/15-boundary-network-cifar.png`, style: SHOT_STYLE });
   // Hovering the outputs names the class.
@@ -408,7 +408,7 @@ test('network view: unit maps for points, images in colour for CIFAR, MNIST unch
   await expect(net).toHaveAttribute('data-view', 'points');
   await expect(net).toHaveAttribute('data-tiles', String(2 + 8 + 8 + 2));
   await expect(page.locator('#netview .probe-strip .thumb')).toHaveCount(2);
-  await expect(page.getByRole('button', { name: 'Random test point' })).toBeEnabled();
+  await expect(page.locator('#netview').getByRole('button', { name: 'Random test point' })).toBeEnabled();
   await expect(page.locator('#netview .nv-plane-note')).toContainText('over the whole plane');
   const colours = await net.evaluate((c: HTMLCanvasElement) => {
     const d = c.getContext('2d')!.getImageData(0, 0, c.width, c.height).data;
