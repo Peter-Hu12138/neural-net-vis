@@ -149,7 +149,7 @@ test('pre-activations, activations and gradients come from the layerStats job', 
   }
   await expect(panels.first().locator('.dist-detail')).toHaveText('28×28×8 · ReLU · before pooling');
   await expect(panels.first().locator('.dist-stats')).toContainText('n 20,000 of 1.6M');
-  await expect(panels.nth(3).locator('.dist-detail')).toHaveText('10 logits · no activation function');
+  await expect(panels.nth(3).locator('.dist-detail')).toHaveText('10 logits');
   await expect(panels.nth(3).locator('.dist-stats')).not.toContainText('dead units');
   // ReLU outputs are never negative and often exactly zero.
   const zero = Number((await panels.first().locator('.dist-stats > span', { hasText: 'exactly zero' }).locator('b').textContent())!.replace('%', ''));
@@ -388,4 +388,124 @@ test('390 px phone screen: no sideways scrolling, panels stack', async ({ page }
   await panels.first().scrollIntoViewIfNeeded();
   await page.evaluate(() => window.scrollBy(0, -80));
   await page.screenshot({ path: `${SHOTS}/10-distributions-phone.png` });
+});
+
+// ── Other datasets ────────────────────────────────────────────────────────
+
+type Actions = { setDataset(id: string): Promise<void>; setSpec(spec: unknown[]): void };
+
+/** Switches dataset through the page's actions and waits until its data is loaded. */
+async function switchTo(page: Page, id: string, fact: string) {
+  await page.evaluate((d) => (window as unknown as { raster: { actions: Actions } }).raster.actions.setDataset(d), id);
+  await expect(page.locator('#fact-data')).toContainText(fact, { timeout: 60_000 });
+}
+
+/** Label → value of a panel's stats table. */
+const statsOf = (panel: Locator) =>
+  panel.locator('.dist-stats > span').evaluateAll((els) => Object.fromEntries(els.map((e) => [e.querySelector('.k')?.textContent ?? '', e.querySelector('b')?.textContent ?? ''])));
+
+/** Mean and std cells keep three significant digits in plain decimals ("0.470", "−0.000420", "1.70"), NEW-5. */
+const SIG3 = /^−?(?:[1-9]\.\d\d|[1-9]\d\.\d|[1-9]\d\d|0\.0*[1-9]\d\d|[1-9]\.\d\de−\d+)$/;
+
+async function expectSig3(panels: Locator) {
+  const n = await panels.count();
+  for (let i = 0; i < n; i++) {
+    const s = await statsOf(panels.nth(i));
+    expect(s.mean, `panel ${i} mean`).toMatch(SIG3);
+    expect(s.std, `panel ${i} std`).toMatch(SIG3);
+  }
+}
+
+test('CIFAR-10: colour conv layers in every quantity, worded for images', async ({ page }) => {
+  await open(page);
+  await switchTo(page, 'cifar10', 'CIFAR-10 · 10,000 train');
+  const sec = page.locator('#distributions');
+  await sec.scrollIntoViewIfNeeded();
+  const panels = page.locator('#dist-root .dist-panel');
+  await expect(panels.locator('h3')).toHaveText(['Conv 1', 'Conv 2', 'Dense 3', 'Output']);
+  await expect(panels.first().locator('.dist-detail')).toHaveText('8×3×3×3 weights');
+  await expect(panels.nth(3).locator('.dist-detail')).toHaveText('10×32 weights');
+  await expect(panels.nth(2).locator('.dist-stats')).toContainText('PPCC r');
+  await expectSig3(panels);
+  await expect(page.locator('#dist-root .dist-guide')).toContainText('Photos have almost no blank patches');
+
+  await trainUntil(page, '(window.raster.store.status?.step ?? 0) > 30');
+  await page.click('#dist-q-a');
+  await expect(panels.first().locator('.dist-stats')).toContainText(/dead units \d+ of 8/, { timeout: 60_000 });
+  const step = await raster(page, (r) => r.store.weightsStep);
+  await expect(page.locator('#dist-root .synced-status')).toContainText(`Based on the weights at step ${step.toLocaleString('en-US')}`);
+  await expect(panels.first().locator('.dist-detail')).toHaveText('32×32×8 · ReLU · before pooling');
+  await expect(panels.nth(1).locator('.dist-detail')).toHaveText('16×16×16 · ReLU · before pooling');
+  await expect(panels.nth(3).locator('.dist-detail')).toHaveText('10 logits');
+  // 256 images × 8 filters × 32×32 positions, sampled down to 20,000.
+  await expect(panels.first().locator('.dist-stats')).toContainText('n 20,000 of 2.1M');
+  await expect(panels.nth(2).locator('.dist-stats')).toContainText(/dead units \d+ of 32/);
+  expect(await panels.nth(2).locator('.dist-stats > span', { hasText: 'dead units' }).getAttribute('title')).toMatch(/test images?($|:)/);
+  await expectSig3(panels);
+  expect(await painted(panels.first().locator('canvas').first())).toBeGreaterThan(2000);
+  await sec.screenshot({ path: `${SHOTS}/10-distributions-cifar.png` });
+
+  await page.click('#dist-q-grad');
+  await expect(panels.first().locator('.dist-detail')).toHaveText('8×3×3×3 · mean ∂L/∂W over 256 images');
+  await expect(panels.first().locator('.dist-stats')).toContainText('n 216');
+  await expect(sec).not.toContainText(/digit/i);
+});
+
+test('point datasets: dense layers over the test points, and a notice for an impossible architecture', async ({ page }) => {
+  await open(page);
+  await switchTo(page, 'circle', 'Circle · 300 train');
+  const sec = page.locator('#distributions');
+  await sec.scrollIntoViewIfNeeded();
+  const panels = page.locator('#dist-root .dist-panel');
+  await expect(panels.locator('h3')).toHaveText(['Dense 1', 'Dense 2', 'Output']);
+  await expect(panels.first().locator('.dist-detail')).toHaveText('8×2 weights');
+  await expect(panels.nth(2).locator('.dist-detail')).toHaveText('2×8 weights');
+  await expect(panels.first().locator('.dist-stats')).toContainText('PPCC r');
+  await expect(page.locator('#dist-root .dist-guide')).toContainText('Saturated tanh units pile up at −1 and 1');
+  await expectSig3(panels);
+
+  await trainUntil(page, '(window.raster.store.status?.step ?? 0) > 100');
+  await page.click('#dist-q-a');
+  const step = await raster(page, (r) => r.store.weightsStep);
+  await expect(page.locator('#dist-root .synced-status')).toContainText(`Based on the weights at step ${step.toLocaleString('en-US')}`, { timeout: 30_000 });
+  await expect(panels.first().locator('.dist-detail')).toHaveText('8 · Tanh');
+  await expect(panels.nth(2).locator('.dist-detail')).toHaveText('2 logits');
+  // 256 of the 300 test points × 8 units.
+  await expect(panels.first().locator('.dist-stats')).toContainText('n 2,048');
+  // Tanh has no exact zeros and no dead units to count; its values stay inside (−1, 1).
+  for (let i = 0; i < 3; i++) {
+    await expect(panels.nth(i).locator('.dist-stats')).not.toContainText('exactly zero');
+    await expect(panels.nth(i).locator('.dist-stats')).not.toContainText('dead units');
+  }
+  const range = (await panels.first().locator('canvas').nth(1).getAttribute('aria-label'))!.match(/from (\S+) to (\S+)\.$/)!;
+  for (const v of [range[1], range[2]]) expect(Math.abs(Number(v.replace('−', '-')))).toBeLessThan(1);
+  await expectSig3(panels);
+  await sec.screenshot({ path: `${SHOTS}/10-distributions-points.png` });
+
+  await page.click('#dist-q-grad');
+  await expect(panels.first().locator('.dist-detail')).toHaveText('8×2 · mean ∂L/∂W over 256 points');
+  await expect(sec).not.toContainText(/digit|pixel/i);
+
+  // A 3-D dataset: three coordinates in.
+  await page.click('#dist-q-weights');
+  await switchTo(page, 'shells', 'Shells · ');
+  await expect(panels.first().locator('.dist-detail')).toHaveText('8×3 weights');
+
+  // A conv layer cannot read a list of features: the section says so instead of showing an old network.
+  await page.evaluate(() => (window as unknown as { raster: { actions: Actions } }).raster.actions.setSpec([{ kind: 'conv', filters: 4, kernel: 3, act: 'relu', pool: false }]));
+  await expect(page.locator('#dist-root .dist-arch')).toHaveText('Fix the architecture in 01 to see its distributions.');
+  await expect(page.locator('#dist-root .dist-grid')).toBeHidden();
+  await page.evaluate(() => (window as unknown as { raster: { actions: Actions } }).raster.actions.setSpec([{ kind: 'dense', units: 6, act: 'relu' }]));
+  await expect(page.locator('#dist-root .dist-arch')).toBeHidden();
+  await expect(panels.locator('h3')).toHaveText(['Dense 1', 'Output']);
+  await expect(panels.first().locator('.dist-detail')).toHaveText('6×3 weights');
+
+  // Phone width: the panels stack without sideways scrolling.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.click('#dist-q-a');
+  await expect(panels.first().locator('.dist-stats')).toContainText(/dead units \d+ of 6/, { timeout: 30_000 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(0);
+  await panels.first().scrollIntoViewIfNeeded();
+  await page.evaluate(() => window.scrollBy(0, -80));
+  await page.screenshot({ path: `${SHOTS}/10-distributions-points-phone.png` });
 });
