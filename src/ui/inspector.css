@@ -1,0 +1,32 @@
+/* 04 Weights: the frozen-layer marker. Frozen is a state, but not an alarm, so it is set in ink with
+   a heavy rule rather than in the accent red. */
+
+.insp-frozen {
+  margin: 0 0 12px;
+  padding: 7px 10px;
+  border-left: 3px solid var(--ink);
+  background: var(--surface);
+  font-size: 13px;
+  color: var(--ink-2);
+  max-width: 72ch;
+}
+
+.insp-frozen .tag {
+  margin-right: 4px;
+  vertical-align: 1px;
+}
+
+.insp-frozen b {
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.insp-frozen-kv {
+  font: 600 10px/1 var(--mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 3px 5px;
+  border: 1px solid currentColor;
+  color: var(--ink);
+  align-self: center;
+}

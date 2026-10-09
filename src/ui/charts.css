@@ -1,0 +1,20 @@
+/* 05 Training: the confusion matrix gets room for class names when the classes have them. */
+
+.confusion-wrap.is-wide {
+  grid-template-columns: minmax(0, 340px) minmax(0, 1fr);
+}
+
+.conf-list .conf-pair {
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.conf-list .conf-n {
+  color: var(--muted);
+}
+
+@media (max-width: 520px) {
+  .confusion-wrap.is-wide {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

@@ -1,0 +1,47 @@
+/* Training bar: the speed control sits between the transport buttons and the live stats. */
+
+.bar-speed {
+  align-self: center;
+}
+
+.bar-speed .seg button {
+  padding: 5px 9px;
+}
+
+/* The full sentence is the control's description for screen readers; sighted readers get it as a
+   tooltip on each option. */
+.speed-note {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.bar .stat b {
+  white-space: nowrap;
+}
+
+@media (max-width: 560px) {
+  /* Three options stay one row of three (the shared phone rule makes segmented controls a 2-column
+     grid, which would leave "Max" alone on a second row). Label to the left, so the row is short. */
+  .bar-speed {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-basis: 100%;
+  }
+  .bar-speed .seg {
+    display: inline-flex;
+    flex-wrap: nowrap;
+    border-width: 2px;
+  }
+  .bar-speed .seg button,
+  .bar-speed .seg button + button {
+    border: 0;
+  }
+  .bar-speed .seg button + button {
+    border-left: 2px solid var(--ink);
+  }
+}
