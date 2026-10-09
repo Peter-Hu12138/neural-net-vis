@@ -1,8 +1,8 @@
 import './modelPanel.css';
-import { exportModel, loadModel, readModel, transferModel } from '../actions';
+import { exportModel, loadModel, readModel, setFrozen, transferModel } from '../actions';
 import { datasetInfo, noun, type DatasetId } from '../data/datasets';
 import type { ModelFile } from '../models/format';
-import { fetchIndex, fetchModel, fetchTransfer, fmtBytes, layersSummary, sameShape, shapeWords, type TransferReport, type ZooEntry } from '../models/zoo';
+import { controlFinding, fetchIndex, fetchModel, fetchTransfer, fmtBytes, layersSummary, sameShape, shapeWords, transferFinding, type TransferCell, type TransferReport, type ZooEntry } from '../models/zoo';
 import { blockSignature, type Network } from '../nn/network';
 import type { Shape } from '../nn/types';
 import { store } from '../store';
@@ -17,8 +17,15 @@ type Source = 'zoo' | 'file' | 'browser';
 
 type Origin =
   | { kind: 'random' }
-  | { kind: 'pretrained'; name: string; acc?: number; source: Source; label: string }
+  | { kind: 'pretrained'; name: string; dataset: DatasetId; acc?: number; source: Source; label: string }
   | { kind: 'transfer'; name: string; from: DatasetId; to: string; copied: boolean[]; source: Source; label: string };
+
+/** A line in the status box, optionally with one follow-up action (a button). */
+interface Message {
+  text: string;
+  error: boolean;
+  action?: { label: string; run: () => void };
+}
 
 interface Provenance {
   origin: Origin;
@@ -112,11 +119,13 @@ export function mountModelPanel(): void {
   let transfer: TransferReport | null = null;
   let busy: string | null = null; // id of the model being fetched or applied
   let progress = 0;
-  let message: { text: string; error: boolean } | null = null;
+  let message: Message | null = null;
   let opened: { file: ModelFile; json: unknown; fileName: string } | null = null;
   let armed: string | null = null; // saved model whose Delete awaits confirmation
   let armTimer: ReturnType<typeof setTimeout> | null = null;
   let nameEdited = false;
+  /** Switches section 01 to its Layers view (set once the tabs exist). */
+  let showLayers: () => void = () => {};
 
   let prov: Provenance = { origin: { kind: 'random' }, kept: null };
   let provVersion = store.version;
@@ -132,10 +141,12 @@ export function mountModelPanel(): void {
       case 'random':
         return `Random start (seed ${store.seed})`;
       case 'pretrained': {
-        const acc = o.acc !== undefined ? ` (${pct(o.acc)} test${o.source === 'zoo' ? '' : ' when saved'})` : '';
-        if (o.source === 'zoo') return `${o.name}, pretrained${acc}`;
-        if (o.source === 'file') return `${o.name}, from the file ${o.label}${acc}`;
-        return `${o.name}, saved in this browser${acc}`;
+        // After a switch to another dataset (with kept weights) the accuracy belongs to the old one.
+        const elsewhere = o.dataset !== store.dataset;
+        const acc = o.acc !== undefined ? ` (${pct(o.acc)} test${o.source === 'zoo' ? '' : ' when saved'}${elsewhere ? ' there' : ''})` : '';
+        if (o.source === 'zoo') return `${o.name}, pretrained${elsewhere ? ` on ${datasetName(o.dataset)}` : ''}${acc}`;
+        if (o.source === 'file') return `${o.name}, from the file ${o.label}${elsewhere ? `, trained on ${datasetName(o.dataset)}` : ''}${acc}`;
+        return `${o.name}, saved in this browser${elsewhere ? `, trained on ${datasetName(o.dataset)}` : ''}${acc}`;
       }
       case 'transfer': {
         const copied = o.copied.map((c, i) => c && i < store.net.blocks.length);
@@ -160,7 +171,7 @@ export function mountModelPanel(): void {
 
     const d = store.data;
     const last = store.evals[store.evals.length - 1];
-    if (!store.valid) evalLine.textContent = 'Fix the architecture below to evaluate.';
+    if (!store.valid) evalLine.textContent = 'Fix the architecture under Layers to evaluate.';
     else if (!d) evalLine.textContent = `Test accuracy here: waiting for ${store.info.name} to load…`;
     else if (!last) evalLine.textContent = 'Test accuracy here: evaluating…';
     else evalLine.textContent = `Test accuracy here: ${pct(last.acc)} on ${int(d.testY.length)} test ${noun(store.info, d.testY.length)}${last.step === 0 ? ', before any training' : ''}`;
@@ -176,6 +187,11 @@ export function mountModelPanel(): void {
       else if (kept < total) prov = { origin: prov.origin, kept: Math.min(kept, prov.kept ?? total) };
       provVersion = store.version;
       lastNet = store.net;
+      // A rebuild from elsewhere (an edit, a reset, another dataset) makes the last message stale.
+      if (message) {
+        message = null;
+        renderStatus();
+      }
     }
     renderProv();
     renderZoo();
@@ -190,10 +206,30 @@ export function mountModelPanel(): void {
 
   // ── Actions ─────────────────────────────────────────────
 
-  const say = (text: string, error = false) => {
-    message = { text, error };
+  const say = (text: string, error = false, action?: Message['action']) => {
+    message = { text, error, action };
     renderStatus();
   };
+
+  /** After a transfer into a network with conv and dense hidden layers: offer to let the dense ones learn. */
+  const unfreezeDense = (zooId: string | null): Message['action'] | undefined => {
+    const dense = store.net.blocks.map((b, i) => (b.kind === 'dense' && i < store.net.blocks.length - 1 && store.isFrozen(i) ? i : -1)).filter((i) => i >= 0);
+    if (!dense.length || !store.net.blocks.some((b, i) => b.kind === 'conv' && store.isFrozen(i))) return undefined;
+    const names = dense.map((i) => `Dense ${i + 1}`).join(' and ');
+    return {
+      label: `Unfreeze ${names}`,
+      run: () => {
+        for (const i of dense) setFrozen(i, false);
+        showLayers();
+        document.getElementById(`freeze-${dense[0]}`)?.focus();
+        const r = zooId ? measuredRow(zooId, store.dataset) : null;
+        say(`${names} will learn too; the conv layers stay frozen.${r ? ` Measured on ${int(r.train)} training ${noun(store.info, r.train)}: ${pct(r.convFrozen.mean)}, against ${pct(r.frozen.mean)} with only the output layer learning.` : ''}`);
+      },
+    };
+  };
+
+  /** The measured transfer result for this source model and target dataset, if there is one. */
+  const measuredRow = (zooId: string, to: DatasetId) => transfer?.rows.find((r) => r.from === zooId && r.to === to) ?? null;
 
   async function apply(id: string, mode: 'load' | 'transfer', get: () => Promise<unknown>, origin: () => { source: Source; label: string }): Promise<void> {
     if (busy) return;
@@ -207,14 +243,14 @@ export function mountModelPanel(): void {
       if (mode === 'load') {
         await loadModel(json);
         const o = origin();
-        settle({ kind: 'pretrained', name: file.name, acc: file.meta?.testAccuracy, source: o.source, label: o.label });
+        settle({ kind: 'pretrained', name: file.name, dataset: file.dataset, acc: file.meta?.testAccuracy, source: o.source, label: o.label });
         say(`Loaded ${file.name}, architecture and weights, on ${store.info.name}.`);
       } else {
         transferModel(json);
         const o = origin();
         const copied = store.net.blocks.map((_, i) => i < store.net.blocks.length - 1);
         settle({ kind: 'transfer', name: file.name, from: file.dataset, to: store.info.name, copied, source: o.source, label: o.label });
-        say(`Transferred ${file.name} to ${store.info.name}. Its hidden layers are frozen; press Train to fit the new output layer.`);
+        say(`Transferred ${file.name} to ${store.info.name}. Its hidden layers are frozen, so training fits only the new output layer.`, false, unfreezeDense(o.source === 'zoo' ? id : null));
       }
     } catch (e) {
       say(errText(e), true);
@@ -334,67 +370,99 @@ export function mountModelPanel(): void {
   // ── Status line ─────────────────────────────────────────
 
   const statusBox = h('div', { class: 'model-status', role: 'status', 'aria-live': 'polite' });
+  // The follow-up button sits outside the live region, so it is not read out as part of the message.
+  const statusAction = h('div', { class: 'model-status-action', hidden: true });
   function renderStatus(): void {
-    clear(statusBox);
-    statusBox.classList.toggle('is-error', !!message?.error);
-    if (busy) statusBox.textContent = progress > 0 && progress < 1 ? `Downloading… ${Math.round(progress * 100)}%` : 'Working…';
-    else if (message) statusBox.textContent = message.text;
+    keepFocus(() => {
+      clear(statusBox);
+      clear(statusAction);
+      statusBox.classList.toggle('is-error', !busy && !!message?.error);
+      if (busy) statusBox.textContent = progress > 0 && progress < 1 ? `Downloading… ${Math.round(progress * 100)}%` : 'Working…';
+      else if (message) statusBox.textContent = message.text;
+      const act = !busy ? message?.action : undefined;
+      statusAction.hidden = !act;
+      if (act) statusAction.append(h('button', { type: 'button', class: 'btn btn-sm', id: 'model-status-action', onclick: act.run }, act.label));
+    });
   }
 
   // ── Explanation (measured numbers from transfer.json) ───
 
   const explain = h('div', { class: 'model-explain' });
+  const SHORT: Record<string, string> = { mnist: 'MNIST', fashion: 'Fashion', cifar10: 'CIFAR-10' };
+  const short = (id: string) => SHORT[id] ?? datasetName(id as DatasetId);
+  const zooName = (id: string) => zoo?.find((z) => z.id === id)?.name ?? id;
+  const zooSet = (id: string) => zoo?.find((z) => z.id === id)?.dataset ?? id;
+  let detailsOpen = false;
+
   function renderExplain(): void {
     clear(explain);
     explain.append(
       h(
         'p',
         null,
-        h('b', null, 'Transfer'),
-        ' copies a trained network’s hidden layers into a network for the current dataset and gives it a new output layer for the new classes. The copied layers start ',
+        'A ',
         h('b', null, 'frozen'),
-        ': training leaves their weights alone and fits only the new layer, which is quick and needs few examples. Unfreeze them with the lock buttons below to ',
+        ' layer keeps its weights while the rest of the network trains, which is quick: no gradients have to flow into it. Transferred layers start frozen, so at first only the new output layer learns. Unlock a layer with its lock button under Layers to ',
         h('b', null, 'fine-tune'),
-        ' every layer once the new one has settled.',
+        ' it too.',
       ),
     );
     const rows = transfer?.rows ?? [];
-    if (!rows.length) return;
-    const SHORT: Record<string, string> = { mnist: 'MNIST', fashion: 'Fashion', cifar10: 'CIFAR-10' };
-    const short = (id: string) => SHORT[id] ?? datasetName(id as DatasetId);
-    const sourceSet = (id: string) => zoo?.find((z) => z.id === id)?.dataset ?? id;
-    const table = h(
-      'table',
-      { class: 'transfer-table' },
+    if (!transfer || !rows.length) return;
+    // Headline: the measurement closest to what the reader is looking at.
+    const r = rows.find((x) => x.to === store.dataset) ?? rows[0];
+    const control = controlFinding(r, short(zooSet(r.from)), short(r.to));
+    explain.append(h('div', { class: 'model-measured' }, h('p', null, transferFinding(r, zooName(r.from), datasetName(r.to), transfer.checkpoints?.[0])), control ? h('p', null, control) : null));
+
+    const cols: { key: 'scratch' | 'frozen' | 'convFrozen' | 'fineTune'; label: string; title: string }[] = [
+      { key: 'scratch', label: 'Scratch', title: 'Random starting weights; every layer learns' },
+      { key: 'frozen', label: 'Frozen', title: 'What Transfer does: every copied layer frozen; only the new output layer learns' },
+      { key: 'convFrozen', label: 'Conv frozen', title: 'Transfer, then unlock the dense layer: only the conv layers stay frozen' },
+      { key: 'fineTune', label: 'Fine-tuned', title: 'Transfer and train the new output layer, then unlock everything and train on at a lower rate' },
+    ];
+    const table = (caption: string, value: (c: TransferCell) => number | undefined) =>
       h(
-        'caption',
-        null,
-        `Measured test accuracy after training on only the first N images (mean of ${transfer!.seeds} runs, tested on ${int(10000)} official test images). Frozen is what Transfer does; fine-tuned unfreezes every layer halfway through.`,
-      ),
-      h(
-        'thead',
-        null,
+        'table',
+        { class: 'transfer-table' },
+        h('caption', null, caption),
         h(
-          'tr',
+          'thead',
           null,
-          h('th', { scope: 'col' }, 'From → to'),
-          h('th', { scope: 'col', class: 'num' }, 'N'),
-          h('th', { scope: 'col', class: 'num' }, 'Scratch'),
-          h('th', { scope: 'col', class: 'num', title: 'Copied layers frozen; only the new output layer trains' }, 'Frozen'),
-          h('th', { scope: 'col', class: 'num', title: 'Frozen for half the epochs, then every layer trains at a lower rate' }, 'Fine-tuned'),
+          h('tr', null, h('th', { scope: 'col' }, 'From → to'), h('th', { scope: 'col', class: 'num' }, 'Images'), ...cols.map((c) => h('th', { scope: 'col', class: 'num', title: c.title }, c.label))),
         ),
-      ),
+        h(
+          'tbody',
+          null,
+          ...rows.map((row) => {
+            const vals = cols.map((c) => value(row[c.key]));
+            const best = Math.max(...vals.map((v) => v ?? -1));
+            return h(
+              'tr',
+              { class: row === r ? 'is-current' : undefined },
+              h('th', { scope: 'row' }, `${short(zooSet(row.from))} → ${short(row.to)}`),
+              h('td', { class: 'num' }, int(row.train)),
+              ...vals.map((v) => h('td', { class: `num${v !== undefined && v === best ? ' is-best' : ''}` }, v === undefined ? '—' : pct(v))),
+            );
+          }),
+        ),
+      );
+    const seen = rows[0].train * rows[0].epochs;
+    const cp = transfer.checkpoints?.[0];
+    const details = h(
+      'details',
+      { class: 'transfer-details', open: detailsOpen },
+      h('summary', null, 'All measurements'),
+      h('div', { class: 'transfer-wrap' }, table(`Test accuracy after ${int(seen)} training images (the first N, shown again and again)`, (c) => c.mean)),
+      cp ? h('div', { class: 'transfer-wrap' }, table(`Head start: test accuracy after only the first ${int(cp)}`, (c) => c.early?.[0]?.mean)) : null,
       h(
-        'tbody',
-        null,
-        ...rows.map((r) => {
-          const best = Math.max(r.scratch.mean, r.frozen.mean, r.fineTune.mean);
-          const cell = (v: number) => h('td', { class: `num${v === best ? ' is-best' : ''}` }, pct(v));
-          return h('tr', null, h('th', { scope: 'row' }, `${short(sourceSet(r.from))} → ${short(r.to)}`), h('td', { class: 'num' }, int(r.train)), cell(r.scratch.mean), cell(r.frozen.mean), cell(r.fineTune.mean));
-        }),
+        'p',
+        { class: 'hint' },
+        'Frozen is what Transfer does. Conv frozen: Transfer, then unlock the dense layer. Fine-tuned: Transfer, train, then unlock everything and train on at a lower rate. ',
+        `Each number is the mean of ${transfer.seeds} runs, tested on the ${int(10000)} official test images of the target dataset; both source networks are the small CNN preset, trained on all 60,000 images of their own dataset. ${transfer.settings}`,
       ),
     );
-    explain.append(h('div', { class: 'transfer-wrap' }, table), h('p', { class: 'hint' }, takeaway(rows)));
+    details.addEventListener('toggle', () => (detailsOpen = details.open));
+    explain.append(details);
   }
 
   // ── Your model ──────────────────────────────────────────
@@ -627,13 +695,14 @@ export function mountModelPanel(): void {
   const yours = h(
     'div',
     { class: 'model-yours' },
+    h('p', { class: 'hint' }, 'Keep the current network, architecture and weights, as a file or in this browser, and open it again later, here or on another computer.'),
     h('label', { class: 'field model-name', for: 'model-name' }, h('span', { class: 'label' }, 'Name'), nameInput),
     h(
       'div',
       { class: 'zoo-actions' },
       h('button', { type: 'button', class: 'btn btn-sm', id: 'model-save-file', onclick: saveToFile }, 'Save to file'),
-      h('button', { type: 'button', class: 'btn btn-sm', id: 'model-open-file', onclick: () => fileInput.click() }, 'Open file…'),
       h('button', { type: 'button', class: 'btn btn-sm', id: 'model-save-browser', onclick: saveInBrowser }, 'Save in this browser'),
+      h('button', { type: 'button', class: 'btn btn-sm', id: 'model-open-file', onclick: () => fileInput.click() }, 'Open file…'),
       fileInput,
     ),
     choice,
@@ -642,16 +711,73 @@ export function mountModelPanel(): void {
     savedList,
   );
 
+  // Section 01 shows one view at a time, so it stays about as tall as its neighbours: the layers
+  // (the builder, #builder), the pretrained models, or saving and opening.
+  type Tab = 'layers' | 'pretrained' | 'files';
+  const builderEl = $('builder');
+  builderEl.setAttribute('role', 'tabpanel');
+  builderEl.setAttribute('aria-labelledby', 'tab-layers');
+  const zooHint = h(
+    'p',
+    { class: 'hint zoo-hint' },
+    h('b', null, 'Load'),
+    ' uses a model exactly as it was trained, on its own dataset. ',
+    h('b', null, 'Transfer'),
+    ' keeps its hidden layers, frozen, under a new output layer for the dataset you are on.',
+  );
+  const panels: Record<Tab, HTMLElement> = {
+    layers: builderEl,
+    pretrained: h('div', { class: 'model-panel', id: 'models-pretrained', role: 'tabpanel', 'aria-labelledby': 'tab-pretrained' }, zooHint, zooStatus, zooList, explain),
+    files: h('div', { class: 'model-panel', id: 'models-files', role: 'tabpanel', 'aria-labelledby': 'tab-files' }, yours),
+  };
+  const TABS: { id: Tab; label: string }[] = [
+    { id: 'layers', label: 'Layers' },
+    { id: 'pretrained', label: 'Pretrained' },
+    { id: 'files', label: 'Save and open' },
+  ];
+  let tab: Tab = 'layers';
+  const tabButtons = TABS.map((t) =>
+    h('button', { type: 'button', role: 'tab', id: `tab-${t.id}`, class: 'model-tab', 'aria-controls': t.id === 'layers' ? 'builder' : `models-${t.id}`, onclick: () => selectTab(t.id) }, t.label),
+  );
+  const frozenBadge = h('span', { class: 'model-tab-badge' });
+  tabButtons[0].append(frozenBadge);
+  const tablist = h('div', { class: 'model-tabs', role: 'tablist', 'aria-label': 'Architecture views' }, ...tabButtons);
+  tablist.addEventListener('keydown', (e) => {
+    const k = (e as KeyboardEvent).key;
+    const i = TABS.findIndex((t) => t.id === tab);
+    const next = k === 'ArrowRight' ? (i + 1) % TABS.length : k === 'ArrowLeft' ? (i + TABS.length - 1) % TABS.length : k === 'Home' ? 0 : k === 'End' ? TABS.length - 1 : -1;
+    if (next < 0) return;
+    e.preventDefault();
+    selectTab(TABS[next].id, true);
+  });
+
+  function selectTab(t: Tab, focus = false): void {
+    tab = t;
+    TABS.forEach((x, i) => {
+      const on = x.id === t;
+      tabButtons[i].setAttribute('aria-selected', String(on));
+      tabButtons[i].tabIndex = on ? 0 : -1;
+      panels[x.id].hidden = !on;
+    });
+    if (focus) tabButtons[TABS.findIndex((x) => x.id === t)].focus();
+  }
+  showLayers = () => selectTab('layers');
+
+  /** The Layers tab says how many layers are frozen, so the state shows from the other tabs too. */
+  function renderBadge(): void {
+    const n = store.net.blocks.reduce((s, _, i) => s + (store.isFrozen(i) ? 1 : 0), 0);
+    frozenBadge.textContent = n ? ` · ${n} frozen` : '';
+  }
+
   root.append(
     h('div', { class: 'model-prov' }, h('span', { class: 'label' }, 'Weights'), provLine, evalLine),
     statusBox,
-    h('h3', { class: 'sub model-h' }, 'Pretrained'),
-    zooStatus,
-    zooList,
-    explain,
-    h('h3', { class: 'sub model-h' }, 'Your model'),
-    yours,
+    statusAction,
+    tablist,
+    panels.pretrained,
+    panels.files,
   );
+  selectTab('layers');
 
   function renderAll(): void {
     if (!nameEdited) nameInput.value = defaultName();
@@ -659,18 +785,29 @@ export function mountModelPanel(): void {
     renderStatus();
     renderZoo();
     renderSaved();
+    renderBadge();
   }
 
   renderAll();
   renderExplain();
   store.on('model', onModel);
+  let explained = store.dataset;
   store.on('dataset', () => {
     if (!nameEdited) nameInput.value = defaultName();
     renderZoo();
     renderSaved();
     renderProv();
+    // The headline measurement follows the dataset (loading progress also emits 'dataset').
+    if (store.dataset !== explained) {
+      explained = store.dataset;
+      renderExplain();
+    }
   });
-  store.on('frozen', renderProv);
+  store.on('frozen', () => {
+    renderProv();
+    renderBadge();
+  });
+  store.on('model', renderBadge);
   store.on('data', renderProv);
   store.on('metrics', renderProv);
   store.on('status', renderProv);
@@ -679,20 +816,4 @@ export function mountModelPanel(): void {
     transfer = t;
     renderExplain();
   });
-}
-
-/** One plain sentence on what the measured numbers say, worded from the numbers themselves. */
-function takeaway(rows: TransferReport['rows']): string {
-  const small = rows.filter((r) => r.train === Math.min(...rows.map((x) => x.train)));
-  const parts = small.map((r) => {
-    const best = Math.max(r.frozen.mean, r.fineTune.mean);
-    const gain = (best - r.scratch.mean) * 100;
-    const to = datasetName(r.to);
-    if (gain >= 1) return `on ${to}, starting from transferred layers beat starting from scratch by ${gain.toFixed(1)} points`;
-    if (gain > -1) return `on ${to}, transfer and starting from scratch came out about even`;
-    return `on ${to}, transfer did worse than starting from scratch by ${(-gain).toFixed(1)} points`;
-  });
-  if (!parts.length) return '';
-  const n = int(small[0].train);
-  return `With only ${n} training images, ${parts.join('; ')}. Features learned on one kind of picture help most when the new pictures look alike and labelled examples are scarce.`;
 }

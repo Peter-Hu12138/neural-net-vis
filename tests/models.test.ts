@@ -3,7 +3,7 @@ import { inflateSync } from 'node:zlib';
 import { beforeAll, describe as suite, expect, it, vi } from 'vitest';
 import { datasetInfo } from '../src/data/datasets';
 import { decodeModel, encodeModel } from '../src/models/format';
-import { archParams, layersSummary, parseIndex, shapeWords, type TransferReport, type ZooEntry } from '../src/models/zoo';
+import { archParams, controlFinding, layersSummary, parseIndex, shapeWords, transferFinding, type TransferReport, type ZooEntry } from '../src/models/zoo';
 import { argmax, blockSignature, Network } from '../src/nn/network';
 import type { Arch } from '../src/nn/types';
 
@@ -109,13 +109,52 @@ suite('pretrained model zoo', () => {
     const t = JSON.parse(readFileSync(`${DIR}/transfer.json`, 'utf8')) as TransferReport;
     expect(t.seeds).toBeGreaterThanOrEqual(2);
     expect(t.rows.map((r) => `${r.from}>${r.to}:${r.train}`)).toEqual(['mnist-cnn>fashion:1000', 'mnist-cnn>fashion:200', 'fashion-cnn>mnist:1000', 'fashion-cnn>mnist:200']);
+    const avg = (a: number[]) => a.reduce((s, v) => s + v, 0) / a.length;
     for (const r of t.rows) {
-      for (const c of [r.scratch, r.frozen, r.convFrozen, r.fineTune]) {
+      // Every condition saw the same number of training images.
+      expect(r.train * r.epochs).toBe(t.rows[0].train * t.rows[0].epochs);
+      for (const c of [r.scratch, r.frozen, r.convFrozen, r.fineTune, r.randomConv!]) {
         expect(c.runs).toHaveLength(t.seeds);
-        expect(c.mean).toBeCloseTo(c.runs.reduce((s, v) => s + v, 0) / c.runs.length, 3);
+        expect(c.mean).toBeCloseTo(avg(c.runs), 3);
         expect(c.mean).toBeGreaterThan(0.3);
+        expect(c.seconds).toBeGreaterThan(0);
+        expect(c.early!.map((e) => e.seen)).toEqual(t.checkpoints);
+        for (const e of c.early!) {
+          expect(e.runs).toHaveLength(t.seeds);
+          expect(e.mean).toBeCloseTo(avg(e.runs), 3);
+        }
       }
     }
+  });
+
+  it('words the measured transfer results from the numbers', () => {
+    const t = JSON.parse(readFileSync(`${DIR}/transfer.json`, 'utf8')) as TransferReport;
+    const r = t.rows[0];
+    const text = transferFinding(r, 'MNIST small CNN', 'Fashion-MNIST', t.checkpoints![0]);
+    expect(text).toContain(`with every copied layer frozen, ${(r.frozen.mean * 100).toFixed(1)}%`);
+    expect(text).toContain(`with the dense layer unlocked as well, ${(r.convFrozen.mean * 100).toFixed(1)}%`);
+    expect(text).toContain(`training from scratch (${(r.scratch.mean * 100).toFixed(1)}%)`);
+    expect(text).not.toMatch(/-\d/); // true minus signs only
+    expect(controlFinding(r, 'MNIST', 'Fashion')).toContain(`reach ${(r.randomConv!.mean * 100).toFixed(1)}%`);
+
+    // Synthetic rows exercise each wording.
+    const cell = (mean: number, seconds = 10, early = mean - 0.2) => ({ runs: [mean], mean, seconds, early: [{ seen: 1000, runs: [early], mean: early }] });
+    const row = { from: 'a', to: 'mnist' as const, train: 200, epochs: 100, scratch: cell(0.8, 20, 0.4), frozen: cell(0.6, 8), convFrozen: cell(0.85, 10, 0.7), fineTune: cell(0.84), randomConv: cell(0.75) };
+    const s = transferFinding(row, 'A', 'MNIST', 1000);
+    expect(s).toContain('5.0 points above training from scratch (80.0%), in about half the training time.');
+    expect(s).toContain('The copied dense layer had specialised in the old classes');
+    expect(s).toContain('after the first 1,000 images, 70.0% against 40.0% from scratch.');
+    expect(transferFinding({ ...row, convFrozen: cell(0.805, 19) }, 'A', 'MNIST')).toContain('level with training from scratch (80.0%).');
+    expect(transferFinding({ ...row, convFrozen: cell(0.77, 19) }, 'A', 'MNIST')).toContain('3.0 points below training from scratch');
+    expect(controlFinding(row, 'A', 'MNIST')).toContain('worth 10.0 points here');
+    expect(controlFinding({ ...row, randomConv: cell(0.845) }, 'A', 'MNIST')).toContain('add little over random ones');
+    expect(controlFinding({ ...row, randomConv: undefined }, 'A', 'MNIST')).toBeNull();
+  });
+
+  it('summarises layers in sentence case', () => {
+    expect(layersSummary({ input: { c: 1, h: 28, w: 28 }, layers: [{ kind: 'conv', filters: 6, kernel: 5, act: 'tanh', pool: true }, { kind: 'dense', units: 64, act: 'leaky' }, { kind: 'dense', units: 8, act: 'relu' }], classes: 10 })).toBe(
+      'conv 5×5×6 tanh, pool · dense 64 leaky ReLU · dense 8 ReLU',
+    );
   });
 
   it('describes input shapes in words', () => {

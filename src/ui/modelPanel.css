@@ -1,14 +1,70 @@
 /* ── 01 Architecture: model panel ─────────────────────────
-   Where the weights came from, the pretrained zoo, transfer results, and saving or opening your own
-   model. Sits above the builder; a heavy rule separates the two. */
+   Where the weights came from, then three views of section 01 as tabs: the layers (the builder),
+   the pretrained zoo with the transfer results, and saving or opening your own model. */
 
 .models {
   display: grid;
   gap: 12px;
   min-width: 0;
-  padding-bottom: 18px;
-  margin-bottom: 18px;
+  margin-bottom: 16px;
+}
+
+.model-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 20px;
+  margin-top: 4px;
   border-bottom: 2px solid var(--ink);
+}
+
+.model-tab {
+  appearance: none;
+  margin: 0 0 -2px;
+  padding: 8px 0 6px;
+  border: 0;
+  border-bottom: 4px solid transparent;
+  background: none;
+  color: var(--muted);
+  font: 700 11px/1.2 var(--sans);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.model-tab:hover {
+  color: var(--ink);
+}
+
+.model-tab[aria-selected='true'] {
+  color: var(--ink);
+  border-bottom-color: var(--ink);
+}
+
+.model-tab:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+
+.model-tab-badge {
+  font-family: var(--mono);
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.model-panel {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  padding-top: 4px;
+}
+
+.model-panel[hidden] {
+  display: none;
+}
+
+.zoo-hint {
+  font-size: 13px;
 }
 
 .models:empty {
@@ -50,12 +106,6 @@
   border-left: 3px solid var(--accent);
   background: var(--surface);
   color: var(--ink);
-}
-
-.model-h {
-  margin: 8px 0 0;
-  padding-top: 8px;
-  border-top: 1px solid var(--ink);
 }
 
 .zoo,
@@ -292,4 +342,66 @@
 
 .transfer-table td.num {
   color: var(--ink-2);
+}
+
+/* The follow-up action after a transfer (e.g. "Unfreeze Dense 3"). */
+.model-status-action[hidden] {
+  display: none;
+}
+
+.model-status-action {
+  margin-top: -4px;
+}
+
+/* The headline measurement, under the explanation. */
+.model-measured {
+  display: grid;
+  gap: 6px;
+  padding-left: 10px;
+  border-left: 2px solid var(--hair);
+  color: var(--ink-2);
+  font-size: 13px;
+}
+
+.transfer-details {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.transfer-details > summary {
+  cursor: pointer;
+  width: max-content;
+  max-width: 100%;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink);
+  list-style-position: outside;
+  margin-left: 14px;
+}
+
+.transfer-details > summary:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 3px;
+}
+
+.transfer-details[open] > summary {
+  margin-bottom: 8px;
+}
+
+.transfer-details .transfer-wrap + .transfer-wrap {
+  margin-top: 12px;
+}
+
+.transfer-details .hint {
+  font-size: 12px;
+  margin-top: 8px;
+}
+
+/* The row quoted in the headline above. */
+.transfer-table tr.is-current th {
+  box-shadow: inset 2px 0 0 var(--ink);
+  padding-left: 6px;
 }

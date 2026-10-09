@@ -1,6 +1,8 @@
+import { fixed } from '../analysis/stats';
 import type { DatasetId } from '../data/datasets';
 import { describe } from '../nn/network';
 import { ACTIVATIONS, isImage, type Arch, type Shape } from '../nn/types';
+import { int, pct } from '../ui/format';
 
 /**
  * The pretrained model zoo: public/models/index.json lists the models that scripts/pretrain.ts
@@ -54,6 +56,8 @@ export interface TransferRow {
   convFrozen: TransferCell;
   /** Half the images with the copied layers frozen, then everything unfrozen at a lower rate. */
   fineTune: TransferCell;
+  /** Control: conv layers with random weights, frozen; the dense layers train (as in convFrozen). */
+  randomConv?: TransferCell;
 }
 
 export interface TransferReport {
@@ -67,6 +71,50 @@ export interface TransferReport {
 }
 
 /** Activation names inside a sentence: "ReLU" stays an acronym, the rest are lower case ("tanh"). */
+/** "3.2 points above" / "level with" / "1.5 points below", for two accuracies (0–1). */
+function versus(a: number, b: number): string {
+  const d = (a - b) * 100;
+  if (Math.abs(d) < 1) return 'level with';
+  return `${fixed(Math.abs(d), 1)} points ${d > 0 ? 'above' : 'below'}`;
+}
+
+/**
+ * What one measured transfer row says, in plain words worded from its numbers: the frozen and
+ * conv-frozen results against training from scratch, the time saved, and the head start.
+ */
+export function transferFinding(r: TransferRow, fromName: string, toName: string, checkpoint?: number): string {
+  let s = `Measured on ${toName} with ${int(r.train)} training images, starting from ${fromName}: with every copied layer frozen, ${pct(r.frozen.mean)}; with the dense layer unlocked as well, ${pct(r.convFrozen.mean)}, ${versus(r.convFrozen.mean, r.scratch.mean)} training from scratch (${pct(r.scratch.mean)})`;
+  const ratio = r.convFrozen.seconds && r.scratch.seconds ? r.convFrozen.seconds / r.scratch.seconds : 1;
+  if (ratio <= 0.75) s += `, in ${ratio >= 0.4 && ratio <= 0.6 ? 'about half' : `${Math.round(ratio * 100)}% of`} the training time`;
+  s += '.';
+  if (r.convFrozen.mean - r.frozen.mean >= 0.05) s += ' The copied dense layer had specialised in the old classes, so it has to learn again.';
+  const e1 = r.convFrozen.early?.[0]?.mean;
+  const e0 = r.scratch.early?.[0]?.mean;
+  if (checkpoint && e1 !== undefined && e0 !== undefined && e1 - e0 >= 0.03) {
+    s += ` The copied layers give a head start: after the first ${int(checkpoint)} images, ${pct(e1)} against ${pct(e0)} from scratch.`;
+  }
+  return s;
+}
+
+/** The random-filter control in words: did the copied conv layers carry anything useful? */
+export function controlFinding(r: TransferRow, fromShort: string, toShort: string): string | null {
+  const c = r.randomConv;
+  if (!c) return null;
+  const d = (r.convFrozen.mean - c.mean) * 100;
+  const verdict =
+    d >= 2
+      ? `so the filters learned on ${fromShort} are worth ${fixed(d, 1)} points here.`
+      : d > -2
+        ? `so here the filters learned on ${fromShort} add little over random ones: a dense layer that learns can do a lot with random features.`
+        : `so random filters did ${fixed(-d, 1)} points better than the ones learned on ${fromShort}.`;
+  let s = `Control: the same conv layers with random, untrained weights, frozen, reach ${pct(c.mean)} on ${toShort} with ${int(r.train)} images (copied from ${fromShort}: ${pct(r.convFrozen.mean)}), ${verdict}`;
+  // No gain over scratch and none over random filters: say what transfer is for.
+  if (d < 2 && r.convFrozen.mean - r.scratch.mean < 0.02) {
+    s += ` From ${fromShort} to ${toShort}, transfer mostly saves training time. It pays off in accuracy when the source network has learned far more than the new examples can teach, as with large networks trained on millions of photos.`;
+  }
+  return s;
+}
+
 const actLabel = (id: string) => {
   const label = ACTIVATIONS.find((a) => a.id === id)?.label ?? id;
   return label.replace(/^[A-Z](?=[a-z]+(\s|$))/, (s) => s.toLowerCase());

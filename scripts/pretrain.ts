@@ -698,7 +698,7 @@ const TRANSFER: TransferOptions = {
     { train: 1000, epochs: 20 },
     { train: 200, epochs: 100 },
   ],
-  conditions: ['scratch', 'frozen', 'convFrozen', 'fineTune'],
+  conditions: ['scratch', 'frozen', 'convFrozen', 'fineTune', 'randomConv'],
   checkpoints: [1000, 5000],
   out: join(OUT, 'transfer.json'),
 };
@@ -735,6 +735,9 @@ const CONDITIONS: Record<string, Condition> = {
       { epochs: e / 2, lr: o.fineLr, frozen: m.none },
     ],
   },
+  // Control for convFrozen: the same frozen conv layers, but with random (untrained) weights. If
+  // this does as well, the copied convolutions carried nothing the new task needed.
+  randomConv: { label: 'random conv frozen', copy: () => null, phases: (m, e, o) => [{ epochs: e, lr: o.lr, frozen: m.convOnly }] },
 };
 
 const mean = (a: number[]) => a.reduce((s, v) => s + v, 0) / a.length;
