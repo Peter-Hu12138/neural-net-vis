@@ -67,8 +67,8 @@ export function receptiveBox(arch: Arch, block: number, y: number, x: number, le
 
 /**
  * Side length in input pixels of the field one unit of `block` sees, away from the borders
- * (for example 3 for a first 3×3 conv, 8 for the second conv of the Small CNN preset).
- * Dense and output blocks see the whole 28-pixel image.
+ * (for example 3 for a first 3×3 conv, 8 for the second conv of the Small CNN preset), on any
+ * input size. Dense and output blocks see the whole image (28 pixels for MNIST, 32 for CIFAR-10).
  */
 export function receptiveSize(arch: Arch, block: number, level: 'z' | 'out' = 'z'): number {
   const b = receptiveBox(arch, block, 0, 0, level, false);
@@ -85,7 +85,7 @@ const side = (b: Box) => Math.max(b.y1 - b.y0 + 1, b.x1 - b.x0 + 1);
  * While the nominal field is smaller than the image it is that field, unclipped, so every crop
  * of a layer has the same size and pixels past the image edge show as blank. Once the field is as
  * large as the image (deep stacks reach 38 or 58 pixels) it is the whole image, never more.
- * Dense and output blocks return null.
+ * Boxes are spatial: a colour image's three channels share them. Dense and output blocks return null.
  */
 export function cropBox(arch: Arch, block: number, y: number, x: number): Box | null {
   const b = receptiveBox(arch, block, y, x, 'z', false);
@@ -101,7 +101,8 @@ export function centrePosition(arch: Arch, block: number): { y: number; x: numbe
 
 /**
  * Side length in input pixels of what the unit at the centre of `block`'s map really sees,
- * clipped to the image, so at most 28 (which means the whole image). Dense and output blocks: 28.
+ * clipped to the image, so at most the image's side (which means the whole image). Dense and
+ * output blocks: the image's side.
  */
 export function centreFieldSize(arch: Arch, block: number): number {
   if (!isConvPath(arch, block)) return arch.input.h;

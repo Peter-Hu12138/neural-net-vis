@@ -6,6 +6,8 @@ import { layerStats, type LayerStatsResult } from '../src/analysis/layerStats';
 import type { JobContext, Progress } from '../src/analysis/protocol';
 import { registry } from '../src/analysis/registry';
 import { Network } from '../src/nn/network';
+import { Rng } from '../src/nn/rng';
+import { defaultPointsConfig, pointsData } from '../src/data/datasets';
 import type { LayerSpec } from '../src/nn/types';
 
 /** The bundled MNIST test split (2,000 digits), decoded from its PNG sprite sheet. */
@@ -328,5 +330,76 @@ describe('layerStats job', () => {
       expect(total).toBeLessThan(10_000);
     }
     console.log(`layerStats timings (256 images, 20,000 values, dead-unit scan when needed):\n  ${timings.join('\n  ')}`);
+  });
+});
+
+describe('layerStats on other datasets', () => {
+  /** A job context for any network and stored test set (stored value × scale = input). */
+  const anyContext = (net: Network, testX: Uint8Array | Float32Array, testY: Uint8Array, scale: number): JobContext => {
+    const n = net.inputSize;
+    return {
+      net,
+      arch: net.arch,
+      spec: net.arch.layers,
+      inputSize: n,
+      scale,
+      classes: net.classes,
+      testX,
+      testY,
+      image(i, out = new Float32Array(n)) {
+        for (let j = 0; j < n; j++) out[j] = testX[i * n + j] * scale;
+        return out;
+      },
+    };
+  };
+  const run = (ctx: JobContext, params: object) => {
+    const gen = layerStats(ctx, params);
+    for (;;) {
+      const r = gen.next();
+      if (r.done) return r.value;
+    }
+  };
+
+  it('point datasets: dense tanh layers over the test points, no dead-unit count, no blank inputs', () => {
+    const d = pointsData(defaultPointsConfig('spiral'));
+    const layers: LayerSpec[] = [
+      { kind: 'dense', units: 8, act: 'tanh' },
+      { kind: 'dense', units: 8, act: 'relu' },
+    ];
+    const net = new Network({ input: d.input, layers, classes: 2 }, 2);
+    const r = run(anyContext(net, d.testX, d.testY, 1), { samples: 256, maxValues: 20000 });
+    expect(r.samples).toBe(256);
+    expect(r.layers.map((l) => l.z.length)).toEqual([256 * 8, 256 * 8, 256 * 2]);
+    expect(r.layers.map((l) => l.gW.length)).toEqual([8 * 2, 8 * 8, 2 * 8]);
+    expect(r.layers[0].dead).toBeNull();
+    expect(r.layers[1].dead).not.toBeNull();
+    expect(r.layers[2].dead).toBeNull();
+    // Points are never all zero, so no value sits exactly at the bias.
+    for (const l of r.layers) expect(l.blank).toBe(0);
+    // tanh keeps every activation inside (−1, 1).
+    for (const v of r.layers[0].a) expect(Math.abs(v)).toBeLessThan(1);
+    // The dead-unit scan covers at most the 300 test points.
+    expect(r.activityImages).toBeLessThanOrEqual(d.testY.length);
+  });
+
+  it('colour images: conv maps of a 32×32×3 input, sampled, with a gradient per weight', () => {
+    const rng = new Rng(4);
+    const N = 24;
+    const testX = Uint8Array.from({ length: N * 3072 }, () => Math.floor(256 * rng.next()));
+    const testY = Uint8Array.from({ length: N }, (_, i) => i % 10);
+    const spec: LayerSpec[] = [
+      { kind: 'conv', filters: 4, kernel: 3, act: 'relu', pool: true },
+      { kind: 'dense', units: 16, act: 'relu' },
+    ];
+    const net = new Network({ input: { c: 3, h: 32, w: 32 }, layers: spec, classes: 10 }, 1);
+    const r = run(anyContext(net, testX, testY, 1 / 255), { samples: 8, maxValues: 5000 });
+    expect(r.layers[0].z).toHaveLength(5000);
+    expect(r.layers[0].seen).toBe(8 * 4 * 32 * 32);
+    expect(r.layers[0].gW).toHaveLength(4 * 3 * 3 * 3);
+    expect(r.layers[1].z).toHaveLength(8 * 16);
+    expect(r.layers[2].z).toHaveLength(8 * 10);
+    expect(r.layers[0].activeFraction).toHaveLength(4);
+    // Noise images have no blank patches (only the zero-padded border could be).
+    expect(r.layers[0].blank).toBeLessThan(0.01);
   });
 });

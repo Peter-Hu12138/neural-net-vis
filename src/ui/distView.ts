@@ -341,7 +341,8 @@ export function mountDistributions(): void {
     // The output layer has no activation function: its activations are the logits themselves.
     const detail = isOut ? `${b.z.length} logits` : `${fmtShape(zShape(b))} · ${actLabel}${quantity === 'a' && pooled ? ' · before pooling' : ''}`;
     const extra: StatItem[] = [];
-    if (quantity === 'a' && !isOut) extra.push({ k: 'exactly zero', v: share(Math.round(summary.zero * summary.moments.n), summary.moments.n) });
+    // Only ReLU makes exact zeros; for tanh or sigmoid layers the share would always read 0.0%.
+    if (quantity === 'a' && !isOut && b.spec.act === 'relu') extra.push({ k: 'exactly zero', v: share(Math.round(summary.zero * summary.moments.n), summary.moments.n) });
     if (l.blank > 0)
       extra.push({
         k: 'blank input',

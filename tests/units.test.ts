@@ -1,7 +1,10 @@
 import { readFileSync } from 'node:fs';
 import { inflateSync } from 'node:zlib';
 import { describe as suite, expect, it } from 'vitest';
-import { mnistArch } from '../src/nn/types';
+import { mnistArch, type Arch } from '../src/nn/types';
+import { defaultPointsConfig, pointsData } from '../src/data/datasets';
+import { featurize } from '../src/data/features';
+import { gridCoords, PointEvaluator } from '../src/data/grid';
 import type { JobContext, Progress } from '../src/analysis/protocol';
 import { centreFieldSize, cropBox, receptiveBox, receptiveSize, wholeImage, type Box } from '../src/analysis/receptive';
 import {
@@ -10,12 +13,16 @@ import {
   coveragePhrase,
   forwardTo,
   HIST_BINS,
+  isDead,
   jobs,
   labelSummary,
+  mapScale,
   rankIn,
   rankPhrase,
   sharePct,
+  synthBase,
   topk,
+  unitColumn,
   unitResponse,
   type ActmaxPartial,
   type ActmaxResult,
@@ -723,5 +730,261 @@ suite('labelSummary', () => {
     expect(labelSummary(counts({ 7: 50 }))).toBe('All 50 are 7s.');
     expect(labelSummary(counts({ 3: 12, 5: 11, 8: 9, 1: 8, 2: 6, 0: 4 }))).toBe('Mixed: 3s (12), 5s (11), 8s (9) and 3 other digits.');
     expect(labelSummary(counts({}))).toBe('No digits.');
+  });
+});
+
+suite('labelSummary: ties and class names (NEW-6)', () => {
+  const counts = (m: Record<number, number>, k = 10) => Array.from({ length: k }, (_, d) => m[d] ?? 0);
+  it('names every label tied with the third, with one shared count', () => {
+    // The review case: the bars show 0, 3, 4 and 9 at 7 each; the old text named only 0, 3 and 4.
+    expect(labelSummary(counts({ 0: 7, 1: 1, 2: 5, 3: 7, 4: 7, 5: 2, 6: 6, 7: 4, 8: 4, 9: 7 }))).toBe('Mixed: 0s, 3s, 4s and 9s (7 each) and 6 other digits.');
+    expect(labelSummary(counts({ 3: 12, 5: 7, 8: 7, 1: 7, 2: 6, 0: 4 }))).toBe('Mixed: 3s (12), 1s, 5s and 8s (7 each) and 2 other digits.');
+    // A tie for second that ends the list: one "and" inside the group, none before it.
+    expect(labelSummary(counts({ 1: 30, 0: 10, 3: 10 }))).toBe('Mostly 1s (30), 0s and 3s (10 each).');
+    expect(labelSummary(counts({ 0: 25, 1: 25 }))).toBe('Mostly 0s and 1s (25 each).');
+    // No tie: unchanged.
+    expect(labelSummary(counts({ 3: 12, 5: 11, 8: 9, 1: 8 }))).toBe('Mixed: 3s (12), 5s (11), 8s (9) and 1 other digit.');
+  });
+
+  it('uses class names as they are, for clothes, objects and point classes', () => {
+    const cifar = ['airplane', 'automobile', 'bird', 'cat', 'deer', 'dog', 'frog', 'horse', 'ship', 'truck'];
+    expect(labelSummary(counts({ 0: 18, 2: 8, 1: 5, 3: 3, 4: 2, 5: 3, 6: 1, 7: 2, 8: 4, 9: 4 }), cifar)).toBe('Mixed: airplane (18), bird (8), automobile (5) and 7 other classes.');
+    expect(labelSummary(counts({ 3: 30, 5: 20 }), cifar)).toBe('Mostly cat (30) and dog (20).');
+    const fashion = ['T-shirt/top', 'Trouser', 'Pullover', 'Dress', 'Coat', 'Sandal', 'Shirt', 'Sneaker', 'Bag', 'Ankle boot'];
+    expect(labelSummary(counts({ 9: 40, 7: 6, 5: 4 }), fashion)).toBe('Mostly ankle boot (40), sneaker (6) and sandal (4).');
+    expect(labelSummary(counts({ 0: 20, 6: 20, 2: 10 }), fashion)).toBe('Mixed: t-shirt/top and shirt (20 each) and pullover (10).');
+    const points = ['Class 0', 'Class 1'];
+    expect(labelSummary(counts({ 1: 50 }, 2), points)).toBe('All 50 are labelled class 1.');
+    expect(labelSummary(counts({ 1: 33, 0: 17 }, 2), points)).toBe('Mostly class 1 (33) and class 0 (17).');
+    expect(labelSummary(counts({}, 2), points)).toBe('No labels.');
+  });
+});
+
+suite('wording for every dataset', () => {
+  it('ranks and coverage name the samples: digits, images or points', () => {
+    const r = (below: number, tied: number, above: number) => ({ below, tied, above, n: below + tied + above });
+    expect(rankPhrase(r(1474, 1, 525), 'image')).toBe('higher than 73.7% of the 2,000 test images');
+    expect(rankPhrase(r(0, 300, 0), 'point')).toBe('the same as all 300 test points');
+    expect(rankPhrase(r(298, 1, 1), 'point')).toBe('only 1 of the 300 test points responds more strongly');
+    expect(rankPhrase({ below: 0, tied: 0, above: 0, n: 0 }, 'image')).toBe('with no test images to compare');
+    // The default stays MNIST's.
+    expect(rankPhrase(r(0, 0, 2000))).toBe('lower than all 2,000 test digits');
+    expect(coveragePhrase('dense', 0.37, 0, 'point')).toBe('fires on 37% of points');
+    expect(coveragePhrase('output', 0.104, 1, 'image')).toBe('predicted for 10.4% of images');
+    expect(coveragePhrase('conv', 0.2741, 0, 'image')).toBe('fires at 27% of positions');
+  });
+
+  it('isDead: a hidden unit with one response for every sample, never an output unit (NEW-2)', () => {
+    const net = new Network(mnistArch(SMALL_CNN), 1);
+    // Push one dense unit's bias far below anything its inputs can reach: it never fires.
+    net.blocks[2].b[0] = -1000;
+    const dense = drain(topk(context(net), { block: 2, k: 4, count: 200 })).result;
+    expect(isDead('dense', dense.units[0])).toBe(true);
+    expect(dense.units[0].coverage).toBe(0);
+    // Its "strongest" digits are ordered by pre-activation: the closest to firing come first.
+    const z = dense.units[0].top.map((h) => h.z);
+    for (let i = 1; i < z.length; i++) expect(z[i]).toBeLessThanOrEqual(z[i - 1]);
+    // Units that respond differently to different digits are not dead.
+    expect(dense.units.some((u) => !isDead('dense', u) && u.sorted[0] !== u.sorted[u.sorted.length - 1])).toBe(true);
+    expect(isDead('output', { sorted: Float32Array.from([1, 1, 1]) })).toBe(false);
+    expect(isDead('conv', { sorted: Float32Array.from([0, 0, 0]) })).toBe(true);
+    expect(isDead('dense', { sorted: new Float32Array(0) })).toBe(false);
+  });
+});
+
+/** A job context for any network and stored test set (stored value × scale = input). */
+function anyContext(net: Network, testX: Uint8Array | Float32Array, testY: Uint8Array, scale: number): JobContext {
+  const n = net.inputSize;
+  return {
+    net,
+    arch: net.arch,
+    spec: net.spec,
+    inputSize: n,
+    scale,
+    classes: net.classes,
+    testX,
+    testY,
+    image(i, out = new Float32Array(n)) {
+      for (let j = 0; j < n; j++) out[j] = testX[i * n + j] * scale;
+      return out;
+    },
+  };
+}
+
+const CIFAR_SHAPE = { c: 3, h: 32, w: 32 };
+const colourArch = (layers: LayerSpec[]): Arch => ({ input: CIFAR_SHAPE, layers, classes: 10 });
+
+/** Smooth random colour images: a blob of colour on a coloured ground, like a small photo. */
+function colourImages(n: number, seed: number): { testX: Uint8Array; testY: Uint8Array } {
+  const rng = new Rng(seed);
+  const testX = new Uint8Array(n * 3072);
+  const testY = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    testY[i] = i % 10;
+    const cy = 6 + 20 * rng.next();
+    const cx = 6 + 20 * rng.next();
+    const rad = 3 + 8 * rng.next();
+    for (let ch = 0; ch < 3; ch++) {
+      const ground = 255 * rng.next();
+      const blob = 255 * rng.next();
+      for (let y = 0; y < 32; y++) {
+        for (let x = 0; x < 32; x++) {
+          const t = Math.exp(-((y - cy) ** 2 + (x - cx) ** 2) / (2 * rad * rad));
+          testX[i * 3072 + ch * 1024 + y * 32 + x] = Math.round(ground + (blob - ground) * t);
+        }
+      }
+    }
+  }
+  return { testX, testY };
+}
+
+suite('colour images (CIFAR-10 shape)', () => {
+  it('actmax raises the objective of every layer kind in all three channels, starting from plain grey', () => {
+    const net = new Network(colourArch(SMALL_CNN), 4);
+    const { testX, testY } = colourImages(4, 1);
+    const ctx = anyContext(net, testX, testY, 1 / 255);
+    expect(synthBase(3)).toBe(0.5);
+    expect(synthBase(1)).toBe(0);
+    for (const block of [0, 1, 2, 3]) {
+      const { result, reports } = drain(actmax(ctx, { block, units: [0, 1], steps: 60 }));
+      for (const u of result.units) {
+        expect(u.x).toHaveLength(3072);
+        expect(u.final, `block ${block} unit ${u.unit}: ${u.start} → ${u.final}`).toBeGreaterThan(u.start);
+        expect(Math.min(...u.x)).toBeGreaterThanOrEqual(0);
+        expect(Math.max(...u.x)).toBeLessThanOrEqual(1);
+        let colourful = 0;
+        for (let p = 0; p < 1024; p++) {
+          const r = Math.floor(p / 32);
+          const c = p % 32;
+          const inside = !u.box || (r >= u.box.y0 && r <= u.box.y1 && c >= u.box.x0 && c <= u.box.x1);
+          if (!inside) for (let ch = 0; ch < 3; ch++) expect(u.x[ch * 1024 + p]).toBe(0.5);
+          else if (Math.abs(u.x[p] - u.x[1024 + p]) > 0.05 || Math.abs(u.x[p] - u.x[2048 + p]) > 0.05) colourful++;
+        }
+        // The channels move apart: the result is a colour image, not grey.
+        expect(colourful, `block ${block} unit ${u.unit}`).toBeGreaterThan(0);
+        forwardTo(net, u.x, block);
+        const b = net.blocks[block];
+        const zi = b.kind === 'conv' ? u.unit * b.zShape.h * b.zShape.w + (b.zShape.h >> 1) * b.zShape.w + (b.zShape.w >> 1) : u.unit;
+        expect(b.z[zi]).toBeCloseTo(u.final, 4);
+      }
+      expect((reports[0].partial as ActmaxPartial).x).toHaveLength(3072);
+    }
+  }, 60_000);
+
+  it('a linear conv 1 synthesises the colour pattern its kernel weights describe', () => {
+    // z = b + Σ w·x over the 3×3×3 patch: the optimum pushes each channel's pixel to 1 where its
+    // weight is positive and to 0 where it is negative.
+    const spec: LayerSpec[] = [{ kind: 'conv', filters: 4, kernel: 3, act: 'linear', pool: false }];
+    const net = new Network(colourArch(spec), 12);
+    const { testX, testY } = colourImages(2, 2);
+    const { result } = drain(actmax(anyContext(net, testX, testY, 1 / 255), { block: 0, steps: 160 }));
+    const W = net.blocks[0].W;
+    for (const u of result.units) {
+      expect(u.box).toEqual(box(15, 17, 15, 17));
+      let ss = 0;
+      for (let i = 0; i < 27; i++) ss += W[u.unit * 27 + i] ** 2;
+      const rms = Math.sqrt(ss / 27);
+      for (let ch = 0; ch < 3; ch++) {
+        for (let ky = 0; ky < 3; ky++) {
+          for (let kx = 0; kx < 3; kx++) {
+            const w = W[u.unit * 27 + ch * 9 + ky * 3 + kx];
+            const v = u.x[ch * 1024 + (15 + ky) * 32 + 15 + kx];
+            if (w > 0.5 * rms) expect(v, `filter ${u.unit} channel ${ch} w=${w.toFixed(3)}`).toBeGreaterThan(0.6);
+            if (w < -0.5 * rms) expect(v, `filter ${u.unit} channel ${ch} w=${w.toFixed(3)}`).toBeLessThan(0.4);
+          }
+        }
+      }
+    }
+  });
+
+  it('topk scans colour images: conv hits carry boxes inside the 32×32 image, dense hits none', () => {
+    const net = new Network(colourArch(SMALL_CNN), 2);
+    const { testX, testY } = colourImages(40, 3);
+    const ctx = anyContext(net, testX, testY, 1 / 255);
+    const conv = drain(topk(ctx, { block: 1, k: 4 })).result;
+    expect(conv.count).toBe(40);
+    expect(conv.units).toHaveLength(16);
+    for (const u of conv.units) {
+      for (const hit of u.top) {
+        expect(hit.box).not.toBeNull();
+        expect(hit.box!.y0).toBeGreaterThanOrEqual(0);
+        expect(hit.box!.y1).toBeLessThanOrEqual(31);
+        expect(hit.box!.x1).toBeLessThanOrEqual(31);
+        expect(hit.y).toBeLessThan(16);
+      }
+      expect(u.labelCounts).toHaveLength(10);
+      expect(u.labelCounts.reduce((a, b) => a + b, 0)).toBe(40);
+    }
+    const out = drain(topk(ctx, { block: 3, k: 4 })).result;
+    expect(out.kind).toBe('output');
+    for (const u of out.units) for (const hit of u.top) expect(hit.box).toBeNull();
+    expect(out.units.reduce((a, u) => a + u.coverage, 0)).toBeCloseTo(1, 9);
+  });
+});
+
+suite('point datasets', () => {
+  const tanh2: LayerSpec[] = [
+    { kind: 'dense', units: 8, act: 'tanh' },
+    { kind: 'dense', units: 8, act: 'tanh' },
+  ];
+
+  it('topk ranks the test points of every layer; the output shares sum to 1', () => {
+    const d = pointsData(defaultPointsConfig('circle'));
+    const net = new Network({ input: d.input, layers: tanh2, classes: 2 }, 3);
+    const ctx = anyContext(net, d.testX, d.testY, 1);
+    for (const block of [0, 1, 2]) {
+      const r = drain(topk(ctx, { block, k: 9 })).result;
+      expect(r.count).toBe(d.testY.length);
+      for (const u of r.units) {
+        for (let i = 1; i < u.top.length; i++) expect(u.top[i].value).toBeLessThanOrEqual(u.top[i - 1].value);
+        for (const hit of u.top) expect(hit.box).toBeNull();
+        expect(u.labelCounts).toHaveLength(2);
+        expect(coveragePhrase(r.kind, u.coverage, 0, 'point')).toMatch(/ of points$/);
+      }
+      if (r.kind === 'output') expect(r.units.reduce((a, u) => a + u.coverage, 0)).toBeCloseTo(1, 9);
+    }
+  });
+
+  it('response maps from PointEvaluator activations equal a direct forward pass at every grid point', () => {
+    for (const id of ['circle', 'shells'] as const) {
+      const d = pointsData(defaultPointsConfig(id));
+      const dims = d.points!.dims;
+      const feats = d.points!.features;
+      const net = new Network({ input: d.input, layers: tanh2, classes: 2 }, 5);
+      const ev = new PointEvaluator();
+      ev.sync(net);
+      const res = 9;
+      const fixedAt: number[] = [];
+      if (dims === 3) fixedAt[2] = 0.5;
+      const coords = gridCoords(dims, res, 1.25, [0, 1], fixedAt);
+      const { acts } = ev.evaluate(coords, dims, feats, { activations: true });
+      const x = featurize(coords, dims, feats);
+      for (const block of [0, 1, 2]) {
+        const U = net.blocks[block].out.length;
+        for (const j of [0, U - 1]) {
+          const col = unitColumn(acts![block], U, j);
+          expect(col).toHaveLength(res * res);
+          for (const q of [0, 40, res * res - 1]) {
+            if (dims === 3) expect(coords[q * 3 + 2]).toBeCloseTo(0.5, 6);
+            const v = unitResponse(net, block, j, x.slice(q * feats.length, (q + 1) * feats.length)).value;
+            expect(col[q]).toBeCloseTo(v, 5);
+          }
+        }
+      }
+    }
+  });
+
+  it('mapScale: diverging when any value is negative, sequential from 0 otherwise', () => {
+    const signed = mapScale(Float32Array.from([-0.5, 0.2, 0.9]));
+    expect(signed.signed).toBe(true);
+    expect(signed.max).toBeCloseTo(0.9, 6);
+    expect(signed.lo).toBeCloseTo(-0.5, 6);
+    const relu = mapScale(Float32Array.from([0, 0, 2.5]));
+    expect(relu.signed).toBe(false);
+    expect(relu.max).toBe(2.5);
+    // A map of zeros (a dead unit) still has a usable scale.
+    expect(mapScale(new Float32Array(4)).max).toBe(1);
+    expect(mapScale(new Float32Array(0))).toEqual({ signed: false, max: 1, lo: 0, hi: 0 });
+    expect(Array.from(unitColumn(Float32Array.from([1, 2, 3, 4, 5, 6]), 3, 1))).toEqual([2, 5]);
   });
 });
