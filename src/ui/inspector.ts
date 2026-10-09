@@ -230,17 +230,19 @@ export function mountInspector(): void {
     const i = Math.min(store.selected, blocks.length - 1);
     const b = blocks[i];
     const mode = store.mode;
-    let extra = '';
+    let text = NOTES[mode];
     if (mode !== 'hist' && mode !== 'qq') {
       if (b.kind === 'conv' && colourIn(i)) {
-        extra = ` The square patch shows each filter’s whole ${b.k}×${b.k}×3 kernel as a colour, scaled per filter around mid grey: the colour pattern that excites the filter most. R, G and B beside it are the same weights, one channel at a time.`;
+        text += ` The square patch shows each filter’s whole ${b.k}×${b.k}×3 kernel as a colour, scaled per filter around mid grey: the colour pattern that excites the filter most. R, G and B beside it are the same weights, one channel at a time.`;
       } else if (b.kind === 'dense' && colourIn(i) && mode === 'heat') {
-        extra = ` Here each ${isOutput(i) ? 'class' : 'unit'}’s ${int(b.inSize)} weights are drawn as a ${b.inShape.h}×${b.inShape.w} colour image, scaled around mid grey: the picture that excites it most.`;
+        // Colour images, not a red–blue scale: the heat note would describe the wrong colours.
+        const who = isOutput(i) ? 'class' : 'unit';
+        text = `Each ${who}’s ${int(b.inSize)} weights drawn as a ${b.inShape.h}×${b.inShape.w} colour image: mid grey is zero, and a pixel turns redder, greener or bluer where the weights on that colour channel are positive. Each image is scaled by its own largest weight. It is the picture that excites the ${who} most.`;
       } else if (b.kind === 'dense' && i === 0 && store.info.kind === 'points') {
-        extra = ' Columns are the input features, rows the units of this layer.';
+        text += ' Columns are the input features, rows the units of this layer.';
       }
     }
-    note.textContent = NOTES[mode] + extra;
+    note.textContent = text;
     const frozen = store.isFrozen(i);
     frozenEl.hidden = !frozen;
     clear(frozenEl);
@@ -539,7 +541,7 @@ export function mountInspector(): void {
         const rows = Math.ceil(M / perRow);
         const H = rows * (tile + 22) + 4;
         const ctx = fitCanvas(canvas, availW, H);
-        const fits = !short || measure(Array.from({ length: M }, (_, j) => ul(j))) <= tile + gap - 2;
+        const fits = !short || measure(Array.from({ length: M }, (_, j) => ul(j))) + 8 <= tile + gap; // room for a clear gap between neighbouring labels
         for (let j = 0; j < M; j++) {
           const x = (j % perRow) * (tile + gap);
           const y = Math.floor(j / perRow) * (tile + 22);
@@ -591,28 +593,51 @@ export function mountInspector(): void {
     }
     const rowNames = Array.from({ length: M }, (_, j) => ul(j));
     const left = Math.max(30, measure(rowNames) + 10);
-    const top = 18;
-    const colW = cols ? measure(cols, `500 12px ${MONO}`) + 8 : 0;
-    // Small matrices (point networks) get roomy cells so every column can carry its label.
+    // Feature labels (x₁², sin x₂) carry sub- and superscripts, so they are set larger.
+    const featureCols = !!cols && i === 0 && store.info.kind === 'points';
+    const colFont = featureCols ? `500 12px ${MONO}` : `500 10px ${MONO}`;
+    const colW = cols ? measure(cols, colFont) + 8 : 0;
+    // Small matrices (point networks) get roomy cells so every column can carry its label; when
+    // the labels do not fit side by side (many features on a phone) they turn upright instead.
     const roomy = N <= 12;
     let cw = numbers ? 44 : Math.max(3, Math.min(roomy ? 44 : 22, Math.floor((availW - left - 40) / N)));
-    if (cols && roomy && !numbers) cw = Math.max(cw, Math.min(56, colW));
+    let upright = false;
+    if (cols && roomy && !numbers) {
+      const fit = Math.floor((availW - left - 12) / (N + 1));
+      if (fit >= colW) cw = Math.max(cw, Math.min(56, colW));
+      else {
+        cw = Math.max(16, Math.min(44, fit));
+        upright = cw < colW;
+      }
+    }
+    const top = upright ? colW + 4 : 18;
     const ch = numbers ? 22 : Math.max(Math.min(cw, roomy ? 26 : 22), Math.min(22, cw));
     const W = Math.max(availW, left + (N + 1) * cw + 20);
     const H = top + M * ch + 6;
     const ctx = fitCanvas(canvas, W, H);
-    const labelEvery = cols && cw >= colW ? 1 : Math.max(1, Math.ceil(16 / cw));
-    for (let c = 0; c < N; c += labelEvery) label(ctx, cols ? cols[c] : String(c + 1), left + c * cw + cw / 2, 8, 'center');
-    if (cols && i === 0 && store.info.kind === 'points') {
-      // Feature labels (x₁², sin x₂) carry sub- and superscripts: redraw them larger.
-      ctx.clearRect(left, 0, N * cw, top - 2);
-      ctx.font = `500 12px ${MONO}`;
+    if (upright) {
+      ctx.font = colFont;
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = featureCols ? p.ink2 : p.muted;
+      for (let c = 0; c < N; c++) {
+        ctx.save();
+        ctx.translate(left + c * cw + cw / 2, top - 4);
+        ctx.rotate(-Math.PI / 2);
+        ctx.fillText(cols![c], 0, 0);
+        ctx.restore();
+      }
+    } else if (featureCols) {
+      ctx.font = colFont;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillStyle = p.ink2;
-      for (let c = 0; c < N; c++) ctx.fillText(cols[c], left + c * cw + cw / 2, 8);
+      for (let c = 0; c < N; c++) ctx.fillText(cols![c], left + c * cw + cw / 2, 8);
+    } else {
+      const labelEvery = cols && cw >= colW ? 1 : Math.max(1, Math.ceil(16 / cw));
+      for (let c = 0; c < N; c += labelEvery) label(ctx, cols ? cols[c] : String(c + 1), left + c * cw + cw / 2, 8, 'center');
     }
-    label(ctx, 'b', left + N * cw + 8 + cw / 2, 8, 'center');
+    label(ctx, 'b', left + N * cw + 8 + cw / 2, top - 10, 'center');
     for (let j = 0; j < M; j++) label(ctx, rowNames[j], 2, top + j * ch + ch / 2, 'left', j === unit ? p.accent : undefined);
     matrix(ctx, b.W, 0, M, N, left, top, cw, ch, mode, max);
     matrix(ctx, b.b, 0, M, 1, left + N * cw + 8, top, cw, ch, mode, maxAbs(b.b) || 1);

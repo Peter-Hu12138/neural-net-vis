@@ -229,7 +229,8 @@ test('05 on a point dataset: large confusion cells and an epoch axis for long ru
   await switchTo(page, 'circle');
   // On a phone the speed control is a menu in the button row.
   await page.locator('#speed-select').selectOption('max');
-  await trainUntil(page, '(window.raster.store.status?.epochFraction ?? 0) > 60', 90_000);
+  // Long enough for several test evaluations (the trainer runs one at most every 250 ms).
+  await trainUntil(page, '(window.raster.store.status?.epochFraction ?? 0) > 60 && window.raster.store.evals.length >= 5', 90_000);
   await page.locator('#training').scrollIntoViewIfNeeded();
   await clearTexts(page);
   // A theme change redraws every canvas; use it to collect one full set of labels.
