@@ -1,5 +1,5 @@
 import { loading } from '../actions';
-import { fixed, niceTicks, share, sig } from '../analysis/stats';
+import { fixed, niceTicks, share } from '../analysis/stats';
 import { noun, type DatasetInfo } from '../data/datasets';
 import { store } from '../store';
 import { $, clear, h, int, pct } from './dom';
@@ -191,8 +191,11 @@ function lineChart(canvas: HTMLCanvasElement, w: number, hgt: number, series: Se
   return drawn;
 }
 
-/** A loss for the headline figures: three decimals, or two significant digits once it is tiny (a point dataset learned perfectly). */
-export const lossText = (v: number): string => (v >= 0.0095 || v === 0 ? fixed(v, 3) : sig(v, 2));
+/**
+ * A loss for the headline figures and tooltips: three decimals, four once it is tiny (a point
+ * dataset learned perfectly), and "<0.0001" below that, so neighbouring figures share one format.
+ */
+export const lossText = (v: number): string => (v >= 0.0095 || v <= 0 ? fixed(v, 3) : v >= 0.00005 ? fixed(v, 4) : '<0.0001');
 
 /** EMA smoothing for the noisy per-batch training curve. */
 function smooth(pts: Pt[], a = 0.6): Pt[] {
