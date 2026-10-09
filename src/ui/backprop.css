@@ -1,0 +1,45 @@
+/* 06 Backpropagation: per-dataset additions. */
+
+.bp-body {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+/* A point dataset's example is a small map of the plane, not pixels: draw it smoothly and larger. */
+.bp-sample.is-points canvas {
+  width: 96px;
+  height: 96px;
+  image-rendering: auto;
+}
+
+.bp-pixelated {
+  image-rendering: pixelated;
+}
+
+.bp-target-name {
+  margin-top: 6px;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+/* Frozen layers: an ink rule, like the marker in 04 (frozen is a setting, not an alarm). */
+.bp-frozen {
+  margin: 0;
+  padding: 8px 10px;
+  max-width: 72ch;
+  border-left: 3px solid var(--ink);
+  background: var(--surface);
+  font-size: 13.5px;
+  color: var(--ink-2);
+}
+
+.bp-frozen b {
+  color: var(--ink);
+  font-weight: 700;
+}
+
+/* Worked examples are tables: keep their columns aligned (they scroll sideways on a phone). */
+.bp-body .work {
+  white-space: pre;
+}
