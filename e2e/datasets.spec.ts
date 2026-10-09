@@ -75,7 +75,9 @@ async function onlySelected(page: Page, name: string) {
   expect(pressed.map((t) => t.trim())).toEqual([name]);
 }
 
-const noOverflow = async (page: Page) => expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(0);
+// Polls: right after a resize the canvases redraw on the next frames; what matters is the settled layout.
+const noOverflow = async (page: Page) =>
+  expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth), { timeout: 5_000 }).toBeLessThanOrEqual(0);
 
 /** Screenshot without the sticky control bar covering the element. */
 async function shot(page: Page, selector: string, name: string) {
