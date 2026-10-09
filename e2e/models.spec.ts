@@ -27,12 +27,9 @@ type Raster = {
 const raster = <T>(page: Page, fn: (r: Raster) => T) => page.evaluate(`(${fn.toString()})(window.raster)`) as Promise<T>;
 
 let errors: string[] = [];
-/** Errors from other sections that a test knowingly tolerates (see the points test). */
-let allow: RegExp[] = [];
 
 test.beforeEach(async ({ page }) => {
   errors = [];
-  allow = [];
   page.on('pageerror', (e) => errors.push(e.message));
   page.on('console', (m) => {
     if (m.type() === 'error') errors.push(m.text());
@@ -40,10 +37,7 @@ test.beforeEach(async ({ page }) => {
 });
 
 test.afterEach(() => {
-  expect(
-    errors.filter((e) => !allow.some((r) => r.test(e))),
-    'no console errors or uncaught exceptions',
-  ).toEqual([]);
+  expect(errors, 'no console errors or uncaught exceptions').toEqual([]);
 });
 
 async function open(page: Page) {
@@ -137,8 +131,14 @@ test('transfer MNIST features to Fashion-MNIST: frozen layers stay put while the
   await expect(page.locator('.model-measured')).toContainText(/^Measured on Fashion-MNIST with 1,000 training images, starting from MNIST small CNN: with every copied layer frozen, [\d.]+%/);
   await page.locator('.transfer-details > summary').click();
   await expect(page.locator('.transfer-table')).toHaveCount(2);
-  await expect(page.locator('.transfer-table').first().locator('tbody tr')).toHaveCount(4);
-  await expect(page.locator('.transfer-table').first().locator('tr.is-current th')).toHaveText('MNIST → Fashion');
+  // One group per pair of datasets, one row per training-set size; the quoted row is marked.
+  const first = page.locator('.transfer-table').first();
+  await expect(first.locator('.transfer-group th')).toHaveText(['MNIST → Fashion', 'Fashion → MNIST']);
+  await expect(first.locator('tbody tr:not(.transfer-group)')).toHaveCount(4);
+  await expect(first.locator('tbody').first().locator('tr.is-current th')).toHaveText('1,000');
+  const cells = await first.locator('tr.is-current td').allTextContents();
+  expect(cells).toHaveLength(4);
+  for (const c of cells) expect(c).toMatch(/^\d{2}\.\d%$/);
 
   await tr.click();
   await expect(page.locator('#model-provenance')).toHaveText('Conv and dense layers transferred from MNIST small CNN, frozen; new output layer for Fashion-MNIST');
@@ -216,6 +216,8 @@ test('save to file, then open the file again', async ({ page }) => {
 
 test('save in this browser, list, load, delete, and a full storage explained', async ({ page }) => {
   await open(page);
+  // Saved models carry the test accuracy measured when they were saved.
+  await expect(page.locator('#model-eval')).toContainText('before any training');
   await tab(page, 'Save and open');
   await expect(page.locator('.saved-empty')).toHaveText('Nothing saved in this browser yet.');
   await page.fill('#model-name', 'E2E saved');
@@ -327,9 +329,6 @@ test('keep trained weights when editing: the first conv layer survives a dense-l
 });
 
 test('the builder follows the dataset: features for points, colour for CIFAR-10', async ({ page }) => {
-  // Section 06 (backprop) still formats image-only numbers on point datasets in this branch; its
-  // own fix lands separately. Remove this once it does: this spec checks section 01.
-  allow = [/reading 'toFixed'/];
   await open(page);
   await switchTo(page, 'circle');
   await expect(page.locator('.builder-input')).toHaveText('2 features: x₁, x₂');

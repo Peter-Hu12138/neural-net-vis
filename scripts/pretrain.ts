@@ -7,6 +7,9 @@
  *   npx vite-node scripts/pretrain.ts transfer [--seeds 3]   transfer experiments → transfer.json
  *   npx vite-node scripts/pretrain.ts index                  rewrite public/models/index.json
  *
+ * transfer also takes --lr, --fine-lr, --sizes 1000:20,200:100 (images:epochs), --pairs mnist-cnn,
+ * --conditions scratch,frozen,convFrozen,fineTune,randomConv, --checkpoints 1000,5000 and --out FILE.
+ *
  * Options: --threads N (worker threads, default: CPU count − 1), --raw DIR (holds mnist-raw/,
  * fashion-raw/ and cifar-raw/cifar-10-binary.tar.gz; default $RASTER_RAW or data-raw), or each
  * source on its own: --mnist DIR, --fashion DIR (the four IDX .gz files), --cifar FILE (the
@@ -17,7 +20,8 @@
  * app scales them: pixel × (1/255), colour images channel-major (all R, then G, then B).
  *
  * Training is data-parallel: each worker thread runs its own copy of the network over a slice of
- * every batch, and the main thread adds up the gradients and takes the optimizer step. The workers
+ * every batch, and the main thread adds up the gradients and takes the optimizer step. The transfer
+ * experiment instead runs whole (small) training runs side by side, one per thread. The workers
  * run this same file, bundled once with esbuild (which ships with Vite).
  */
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
@@ -896,7 +900,7 @@ async function main(): Promise<void> {
   } else if (cmd === 'index') {
     writeIndex();
   } else {
-    console.log('Usage: npx vite-node scripts/pretrain.ts check | train [ids…] | transfer [--seeds N] | index   [--threads N] [--raw DIR]');
+    console.log('Usage: npx vite-node scripts/pretrain.ts check | train [ids…] | transfer [--seeds N] [--lr X] [--sizes N:E,…] | index   [--threads N] [--raw DIR]');
     process.exitCode = 1;
     return;
   }
