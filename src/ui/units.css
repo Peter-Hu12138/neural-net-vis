@@ -1,0 +1,177 @@
+/* ── 09 Units: point datasets and named classes ───────────
+   Mini scatters and response maps on the cards, the response map and point lists in the detail
+   panel, and label rows for datasets whose classes have names. */
+
+/* Card figures for point datasets: a scatter of the test points and the unit's response map. */
+.units-scatter {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 1;
+  background: var(--surface);
+}
+
+.units-scatter.is-blank {
+  background: var(--hair);
+  opacity: 0.45;
+}
+
+.units-synth .units-map {
+  display: block;
+  width: 100%;
+  height: 100%;
+  /* A smooth field, not pixels: let the browser interpolate the 48×48 grid. */
+  image-rendering: auto;
+}
+
+.units-card.is-dead .units-card-foot {
+  color: var(--ink);
+}
+
+/* ── Detail: response map ── */
+
+.units-plane {
+  width: 100%;
+  max-width: 340px;
+}
+
+.units-plane canvas {
+  display: block;
+  max-width: 100%;
+  cursor: crosshair;
+}
+
+.units-scale {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font: 400 10px/1 var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.units-scale-bar {
+  display: block;
+  flex: none;
+  border: 1px solid var(--hair);
+}
+
+.units-plane-note {
+  font-size: 12px;
+}
+
+/* ── Detail: test points as rows ── */
+
+.units-points {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.units-point {
+  display: grid;
+  grid-template-columns: 10px 1.6ch minmax(4.5ch, auto) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 3px 6px;
+  border: 1px solid var(--hair);
+  border-radius: 0;
+  background: transparent;
+  color: var(--ink);
+  font: 400 11px/1.4 var(--mono);
+  font-variant-numeric: tabular-nums;
+  text-align: left;
+  cursor: pointer;
+}
+
+.units-point:hover {
+  border-color: var(--ink);
+}
+
+.units-point[aria-pressed='true'] {
+  border-color: var(--accent);
+  outline: 1.5px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.units-point-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 1px solid var(--ink);
+}
+
+.units-point-cls {
+  font-weight: 600;
+}
+
+.units-point-id {
+  color: var(--muted);
+}
+
+.units-point-xy {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.units-point-v {
+  font-weight: 500;
+  justify-self: end;
+}
+
+/* ── Detail: label counts for named classes ── */
+
+.units-label-rows {
+  display: grid;
+  gap: 2px;
+  max-width: 360px;
+}
+
+.units-label-row {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 9.5em) minmax(24px, 1fr) 3ch;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.units-label-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+
+.units-label-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink);
+}
+
+.units-label-hbar {
+  position: relative;
+  height: 10px;
+  border-left: 1px solid var(--ink);
+}
+
+.units-label-hbar > span {
+  position: absolute;
+  inset: 1px auto 1px 0;
+  background: var(--ink-2);
+}
+
+.units-label-row .units-label-n {
+  font: 400 11px/1 var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  text-align: right;
+}
+
+.units-label-row.is-max .units-label-n {
+  color: var(--ink);
+  font-weight: 600;
+}

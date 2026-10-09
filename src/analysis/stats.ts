@@ -674,12 +674,12 @@ export function fixed(v: number, d: number): string {
 
 /**
  * `v` to `digits` significant digits, keeping trailing zeros ("0.450"), so values in one column
- * line up; exponent form when tiny or huge.
+ * line up. Plain decimals down to 1e-4 ("−0.000420"); exponent form when tinier or huge.
  */
 export function sig(v: number, digits = 3): string {
   if (!Number.isFinite(v)) return '—';
   const a = Math.abs(v);
-  if (a === 0 || (a >= 1e-3 && a < Math.pow(10, digits))) {
+  if (a === 0 || (a >= 1e-4 && a < Math.pow(10, digits))) {
     const s = v.toPrecision(digits);
     if (!s.includes('e')) return /^-0\.?0*$/.test(s) ? s.slice(1) : minus(s);
   }

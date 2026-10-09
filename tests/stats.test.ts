@@ -555,6 +555,19 @@ describe('number formatting', () => {
     expect(sig(0)).toBe('0.00');
   });
 
+  it('sig stays in plain decimals down to 1e-4, so a column of means does not switch to exponents (review NEW-5)', () => {
+    expect(sig(-4.2e-4)).toBe('−0.000420');
+    expect(sig(0.0907)).toBe('0.0907');
+    expect(sig(-0.00319)).toBe('−0.00319');
+    expect(sig(1.7)).toBe('1.70');
+    expect(sig(0.47)).toBe('0.470');
+    expect(sig(1e-4)).toBe('0.000100');
+    expect(sig(9.99e-5)).toBe('9.99e−5');
+    expect(sig(-0.00004)).toBe('−4.00e−5');
+    // Never a "−0.00…" for a value that rounds to nothing.
+    expect(sig(-0)).toBe('0.00');
+  });
+
   it('share shows a non-empty sliver as <0.1% instead of 0.0% (review: 2 of 8,192)', () => {
     expect(share(2, 8192)).toBe('<0.1%');
     expect(share(0, 8192)).toBe('0.0%');
