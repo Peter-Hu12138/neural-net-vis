@@ -400,6 +400,14 @@ async function switchTo(page: Page, id: string, fact: string) {
   await expect(page.locator('#fact-data')).toContainText(fact, { timeout: 60_000 });
 }
 
+/** Screenshot of the whole section; the sticky control bar would otherwise cover its top. */
+async function shotSection(page: Page, name: string) {
+  await page.mouse.move(0, 0);
+  const style = await page.addStyleTag({ content: '#bar { position: static !important; }' });
+  await page.locator('#distributions').screenshot({ path: `${SHOTS}/${name}` });
+  await style.evaluate((el) => (el as Element).remove());
+}
+
 /** Label → value of a panel's stats table. */
 const statsOf = (panel: Locator) =>
   panel.locator('.dist-stats > span').evaluateAll((els) => Object.fromEntries(els.map((e) => [e.querySelector('.k')?.textContent ?? '', e.querySelector('b')?.textContent ?? ''])));
@@ -443,7 +451,7 @@ test('CIFAR-10: colour conv layers in every quantity, worded for images', async 
   expect(await panels.nth(2).locator('.dist-stats > span', { hasText: 'dead units' }).getAttribute('title')).toMatch(/test images?($|:)/);
   await expectSig3(panels);
   expect(await painted(panels.first().locator('canvas').first())).toBeGreaterThan(2000);
-  await sec.screenshot({ path: `${SHOTS}/10-distributions-cifar.png` });
+  await shotSection(page, '10-distributions-cifar.png');
 
   await page.click('#dist-q-grad');
   await expect(panels.first().locator('.dist-detail')).toHaveText('8×3×3×3 · mean ∂L/∂W over 256 images');
@@ -480,7 +488,7 @@ test('point datasets: dense layers over the test points, and a notice for an imp
   const range = (await panels.first().locator('canvas').nth(1).getAttribute('aria-label'))!.match(/from (\S+) to (\S+)\.$/)!;
   for (const v of [range[1], range[2]]) expect(Math.abs(Number(v.replace('−', '-')))).toBeLessThan(1);
   await expectSig3(panels);
-  await sec.screenshot({ path: `${SHOTS}/10-distributions-points.png` });
+  await shotSection(page, '10-distributions-points.png');
 
   await page.click('#dist-q-grad');
   await expect(panels.first().locator('.dist-detail')).toHaveText('8×2 · mean ∂L/∂W over 256 points');
@@ -505,6 +513,7 @@ test('point datasets: dense layers over the test points, and a notice for an imp
   await page.click('#dist-q-a');
   await expect(panels.first().locator('.dist-stats')).toContainText(/dead units \d+ of 6/, { timeout: 30_000 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(0);
+  await page.addStyleTag({ content: '#bar { position: static !important; }' });
   await panels.first().scrollIntoViewIfNeeded();
   await page.evaluate(() => window.scrollBy(0, -80));
   await page.screenshot({ path: `${SHOTS}/10-distributions-points-phone.png` });
