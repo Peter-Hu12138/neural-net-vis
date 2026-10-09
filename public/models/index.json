@@ -4,7 +4,7 @@
     "name": "MNIST LeNet",
     "dataset": "mnist",
     "description": "LeNet-style: two 5×5 tanh convolutions with max-pooling, then 64 tanh units. The architecture of the LeNet-ish preset.",
-    "layers": "conv 5×5×6 Tanh, pool · conv 5×5×16 Tanh, pool · dense 64 Tanh",
+    "layers": "conv 5×5×6 tanh, pool · conv 5×5×16 tanh, pool · dense 64 tanh",
     "arch": {
       "input": {
         "c": 1,

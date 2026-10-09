@@ -384,17 +384,21 @@ interface RunJob {
   /** Start from these weights for the blocks marked in `copy` (transfer), else from scratch. */
   source: Float32Array[] | null;
   copy: boolean[] | null;
+  /** Also measure test accuracy once this many training images have been seen (the head start). */
+  checkpoints: number[];
 }
 
 interface RunResult {
   label: string;
   acc: number;
   loss: number;
+  /** Time spent training (evaluations excluded), in seconds. */
   seconds: number;
+  /** Test accuracy at each checkpoint, in order. */
+  early: number[];
 }
 
 function runJob(job: RunJob, sets: Sets): RunResult {
-  const t0 = performance.now();
   const split = sets[job.set];
   const net = new Network(job.arch, job.seed);
   if (job.source && job.copy) {
@@ -407,12 +411,28 @@ function runJob(job: RunJob, sets: Sets): RunResult {
   const opt = new Optimizer(net, 'adam', job.phases[0].lr);
   const rng = new Rng(job.seed * 7919 + 3);
   const x = new Float32Array(size(job.arch.input));
+  const test = (): { acc: number; loss: number } => {
+    let correct = 0;
+    let loss = 0;
+    const t = split.test;
+    for (let i = 0; i < t.n; i++) {
+      const y = loadSample(t, i, x);
+      const p = net.forward(x);
+      if (argmax(p) === y) correct++;
+      loss += -Math.log(Math.max(p[y], 1e-12));
+    }
+    return { acc: correct / t.n, loss: loss / t.n };
+  };
   let order = permutation(job.train, rng);
   let cursor = 0;
+  let seen = 0;
+  let trainMs = 0;
+  const early: number[] = [];
   for (const ph of job.phases) {
     opt.lr = ph.lr;
     const steps = Math.ceil((ph.epochs * job.train) / job.batch);
     for (let s = 0; s < steps; s++) {
+      const t0 = performance.now();
       net.zeroGrad();
       for (let k = 0; k < job.batch; k++) {
         if (cursor >= job.train) {
@@ -424,18 +444,13 @@ function runJob(job: RunJob, sets: Sets): RunResult {
         net.backward(y, false, ph.frozen ?? undefined);
       }
       opt.step(1 / job.batch, ph.frozen ?? undefined);
+      seen += job.batch;
+      trainMs += performance.now() - t0;
+      while (early.length < job.checkpoints.length && seen >= job.checkpoints[early.length]) early.push(test().acc);
     }
   }
-  let correct = 0;
-  let loss = 0;
-  const test = split.test;
-  for (let i = 0; i < test.n; i++) {
-    const y = loadSample(test, i, x);
-    const p = net.forward(x);
-    if (argmax(p) === y) correct++;
-    loss += -Math.log(Math.max(p[y], 1e-12));
-  }
-  return { label: job.label, acc: correct / test.n, loss: loss / test.n, seconds: (performance.now() - t0) / 1000 };
+  const final = test();
+  return { label: job.label, acc: final.acc, loss: final.loss, seconds: trainMs / 1000, early };
 }
 
 function workerMain(): void {
@@ -654,56 +669,101 @@ function writeIndex(): ZooEntry[] {
 
 // ── Transfer experiments ──────────────────────────────────────────────────
 
-const TRANSFER = {
+interface TransferOptions {
+  seeds: number;
+  /** Learning rate for every condition (the page's Adam default is 0.003). */
+  lr: number;
+  /** Learning rate for the second, everything-unfrozen phase of fine-tuning. */
+  fineLr: number;
+  batch: number;
+  pairs: { from: string; to: SetName }[];
+  sizes: { train: number; epochs: number }[];
+  conditions: string[];
+  /** Test accuracy is also measured after this many training images (the head start). */
+  checkpoints: number[];
+  out: string;
+}
+
+const TRANSFER: TransferOptions = {
+  seeds: 3,
+  lr: 0.003,
+  fineLr: 0.001,
+  batch: 32,
   pairs: [
-    { from: 'mnist-cnn', to: 'fashion' as SetName },
-    { from: 'fashion-cnn', to: 'mnist' as SetName },
+    { from: 'mnist-cnn', to: 'fashion' },
+    { from: 'fashion-cnn', to: 'mnist' },
   ],
+  // Every condition sees 20,000 training images, whatever N is.
   sizes: [
     { train: 1000, epochs: 20 },
-    { train: 200, epochs: 60 },
+    { train: 200, epochs: 100 },
   ],
-  lr: 0.001,
-  fineLr: 0.0003,
-  batch: 32,
+  conditions: ['scratch', 'frozen', 'convFrozen', 'fineTune'],
+  checkpoints: [1000, 5000],
+  out: join(OUT, 'transfer.json'),
+};
+
+/** Per block of the source network: which blocks to copy, and which to hold frozen in each phase. */
+interface Masks {
+  hidden: boolean[];
+  convOnly: boolean[];
+  none: boolean[];
+}
+
+type Phase = RunJob['phases'][number];
+
+interface Condition {
+  label: string;
+  copy: (m: Masks) => boolean[] | null;
+  phases: (m: Masks, epochs: number, o: TransferOptions) => Phase[];
+}
+
+/** The conditions compared, each as it would be done on the page. */
+const CONDITIONS: Record<string, Condition> = {
+  // Random weights, every layer trains.
+  scratch: { label: 'scratch', copy: () => null, phases: (_, e, o) => [{ epochs: e, lr: o.lr, frozen: null }] },
+  // What Transfer does: every copied hidden layer frozen, only the new output layer trains.
+  frozen: { label: 'all copied layers frozen', copy: (m) => m.hidden, phases: (m, e, o) => [{ epochs: e, lr: o.lr, frozen: m.hidden }] },
+  // Transfer, then unlock the dense layer: only the conv layers stay frozen.
+  convFrozen: { label: 'conv frozen', copy: (m) => m.hidden, phases: (m, e, o) => [{ epochs: e, lr: o.lr, frozen: m.convOnly }] },
+  // Transfer and train the new output layer, then unlock everything and go on at a lower rate.
+  fineTune: {
+    label: 'fine-tune',
+    copy: (m) => m.hidden,
+    phases: (m, e, o) => [
+      { epochs: e / 2, lr: o.lr, frozen: m.hidden },
+      { epochs: e / 2, lr: o.fineLr, frozen: m.none },
+    ],
+  },
 };
 
 const mean = (a: number[]) => a.reduce((s, v) => s + v, 0) / a.length;
 
-async function transfer(sets: Sets, bundle: string, threads: number, seeds: number): Promise<void> {
+async function transfer(sets: Sets, bundle: string, threads: number, o: TransferOptions): Promise<void> {
   const jobs: RunJob[] = [];
-  const rows: { pair: (typeof TRANSFER.pairs)[number]; size: (typeof TRANSFER.sizes)[number]; idx: Record<string, number[]> }[] = [];
-  for (const pair of TRANSFER.pairs) {
+  const rows: { pair: TransferOptions['pairs'][number]; size: TransferOptions['sizes'][number]; idx: Record<string, number[]> }[] = [];
+  for (const key of o.conditions) if (!CONDITIONS[key]) throw new Error(`Unknown condition ${key}; known: ${Object.keys(CONDITIONS).join(', ')}`);
+  for (const pair of o.pairs) {
     const { file, net: src } = decodeModel(JSON.parse(readFileSync(join(OUT, `${pair.from}.json`), 'utf8')));
     const arch: Arch = { ...file.arch, classes: 10 };
     const B = src.blocks.length;
-    const hidden = Array.from({ length: B }, (_, i) => i < B - 1);
-    const convOnly = src.blocks.map((b) => b.kind === 'conv');
-    const all = Array.from({ length: B }, () => false);
+    const masks: Masks = {
+      hidden: Array.from({ length: B }, (_, i) => i < B - 1),
+      convOnly: src.blocks.map((b) => b.kind === 'conv'),
+      none: Array.from({ length: B }, () => false),
+    };
     const source = src.getWeights();
-    for (const size of TRANSFER.sizes) {
-      const idx: Record<string, number[]> = { scratch: [], frozen: [], convFrozen: [], fineTune: [] };
-      for (let s = 0; s < seeds; s++) {
+    for (const size of o.sizes) {
+      const idx: Record<string, number[]> = Object.fromEntries(o.conditions.map((c) => [c, []]));
+      for (let s = 0; s < o.seeds; s++) {
         const seed = 101 + s;
-        const base = { arch, seed, set: pair.to, train: size.train, batch: TRANSFER.batch };
         const tag = `${pair.from} → ${pair.to}, ${size.train} images, seed ${seed}`;
-        const add = (key: string, job: RunJob) => {
+        for (const key of o.conditions) {
+          const c = CONDITIONS[key];
+          const copy = c.copy(masks);
           idx[key].push(jobs.length);
-          jobs.push(job);
-        };
-        add('scratch', { ...base, label: `${tag}: scratch`, phases: [{ epochs: size.epochs, lr: TRANSFER.lr, frozen: null }], source: null, copy: null });
-        add('frozen', { ...base, label: `${tag}: frozen`, phases: [{ epochs: size.epochs, lr: TRANSFER.lr, frozen: hidden }], source, copy: hidden });
-        add('convFrozen', { ...base, label: `${tag}: conv frozen`, phases: [{ epochs: size.epochs, lr: TRANSFER.lr, frozen: convOnly }], source, copy: hidden });
-        add('fineTune', {
-          ...base,
-          label: `${tag}: fine-tune`,
-          phases: [
-            { epochs: size.epochs / 2, lr: TRANSFER.lr, frozen: hidden },
-            { epochs: size.epochs / 2, lr: TRANSFER.fineLr, frozen: all },
-          ],
-          source,
-          copy: hidden,
-        });
+          jobs.push({ arch, seed, set: pair.to, train: size.train, batch: o.batch, label: `${tag}: ${c.label}`, phases: c.phases(masks, size.epochs, o), source: copy ? source : null, copy, checkpoints: o.checkpoints });
+        }
       }
       rows.push({ pair, size, idx });
     }
@@ -712,33 +772,62 @@ async function transfer(sets: Sets, bundle: string, threads: number, seeds: numb
   const pool = new Pool(bundle, threads, sets, null);
   const results = await pool.runAll(jobs, (_, r) => console.log(`  ${r.label}: ${(r.acc * 100).toFixed(2)}% (${r.seconds.toFixed(0)} s)`));
   await pool.close();
+  const r4 = (v: number) => Math.round(v * 10000) / 10000;
   const cell = (ids: number[]): TransferCell => {
-    const runs = ids.map((i) => Math.round(results[i].acc * 10000) / 10000);
-    return { runs, mean: Math.round(mean(runs) * 10000) / 10000 };
+    const runs = ids.map((i) => r4(results[i].acc));
+    const early = o.checkpoints.map((seen, k) => {
+      const at = ids.map((i) => r4(results[i].early[k]));
+      return { seen, runs: at, mean: r4(mean(at)) };
+    });
+    return { runs, mean: r4(mean(runs)), seconds: Math.round(mean(ids.map((i) => results[i].seconds)) * 10) / 10, early };
   };
+  const seen = o.sizes.map((s) => s.train * s.epochs);
   const report: TransferReport = {
     created: new Date().toISOString(),
-    seeds,
+    seeds: o.seeds,
+    checkpoints: o.checkpoints,
     testSet: { mnist: OFFICIAL_TEST.mnist, fashion: OFFICIAL_TEST.fashion },
-    settings: `Training images: the first N of the official training set. Adam, batch ${TRANSFER.batch}, learning rate ${TRANSFER.lr}; fine-tuning trains half the epochs frozen, then half with every layer at ${TRANSFER.fineLr}. Seeds change the new layers' starting weights and the shuffling.`,
+    settings:
+      `Training images: the first N of the official training set, ${seen.every((v) => v === seen[0]) ? `${int(seen[0])} training images seen in every run` : 'a fixed number of epochs per N'}. ` +
+      `Adam, batch ${o.batch}, learning rate ${o.lr} (the page's default). Fine-tuning trains only the new output layer for the first half, ` +
+      `then every layer at ${o.fineLr}. Seeds change the new layers' starting weights and the shuffling.`,
     rows: rows.map(
-      (r): TransferRow => ({
-        from: r.pair.from,
-        to: r.pair.to,
-        train: r.size.train,
-        epochs: r.size.epochs,
-        scratch: cell(r.idx.scratch),
-        frozen: cell(r.idx.frozen),
-        convFrozen: cell(r.idx.convFrozen),
-        fineTune: cell(r.idx.fineTune),
-      }),
+      (r) =>
+        ({
+          from: r.pair.from,
+          to: r.pair.to,
+          train: r.size.train,
+          epochs: r.size.epochs,
+          ...Object.fromEntries(Object.entries(r.idx).map(([k, ids]) => [k, cell(ids)])),
+        }) as TransferRow,
     ),
   };
-  writeFileSync(join(OUT, 'transfer.json'), JSON.stringify(report, null, 2) + '\n');
-  const p = (c: TransferCell) => `${(c.mean * 100).toFixed(1)}%`;
-  console.log('\n| From → to | Training images | From scratch | Transfer, all copied layers frozen | Transfer, conv layers frozen | Transfer, then fine-tune all |');
-  console.log('| --- | ---: | ---: | ---: | ---: | ---: |');
-  for (const r of report.rows) console.log(`| ${r.from} → ${NAMES[r.to as SetName]} | ${int(r.train)} | ${p(r.scratch)} | ${p(r.frozen)} | ${p(r.convFrozen)} | ${p(r.fineTune)} |`);
+  mkdirSync(dirname(o.out), { recursive: true });
+  writeFileSync(o.out, JSON.stringify(report, null, 2) + '\n');
+  console.log(`wrote ${o.out}`);
+  const p = (c?: TransferCell) => (c ? `${(c.mean * 100).toFixed(1)}% (${c.early!.map((e) => (e.mean * 100).toFixed(1)).join(', ')}; ${c.seconds} s)` : '–');
+  const keys = o.conditions;
+  console.log(`\nFinal test accuracy (after ${o.checkpoints.map(int).join(', ')} images; training seconds per run)`);
+  console.log(`| From → to | Training images | ${keys.map((k) => CONDITIONS[k].label).join(' | ')} |`);
+  console.log(`| --- | ---: | ${keys.map(() => '---:').join(' | ')} |`);
+  for (const r of report.rows) {
+    const row = r as unknown as Record<string, TransferCell>;
+    console.log(`| ${r.from} → ${NAMES[r.to as SetName]} | ${int(r.train)} | ${keys.map((k) => p(row[k])).join(' | ')} |`);
+  }
+}
+
+/** Transfer settings from the command line: --seeds, --lr, --fine-lr, --sizes 1000:20,200:100, --pairs, --conditions, --out. */
+function transferOptions(flags: Record<string, string>): TransferOptions {
+  const o = { ...TRANSFER };
+  if (flags.seeds) o.seeds = Math.max(1, Number(flags.seeds));
+  if (flags.lr) o.lr = Number(flags.lr);
+  if (flags['fine-lr']) o.fineLr = Number(flags['fine-lr']);
+  if (flags.sizes) o.sizes = flags.sizes.split(',').map((s) => ({ train: Number(s.split(':')[0]), epochs: Number(s.split(':')[1]) }));
+  if (flags.pairs) o.pairs = TRANSFER.pairs.filter((p) => flags.pairs.split(',').includes(p.from));
+  if (flags.conditions) o.conditions = flags.conditions.split(',');
+  if (flags.checkpoints) o.checkpoints = flags.checkpoints.split(',').map(Number);
+  if (flags.out) o.out = flags.out;
+  return o;
 }
 
 // ── Command line ──────────────────────────────────────────────────────────
@@ -800,7 +889,7 @@ async function main(): Promise<void> {
     writeIndex();
   } else if (cmd === 'transfer') {
     const sets: Sets = { mnist: load.mnist(), fashion: load.fashion() };
-    await transfer(sets, await bundleSelf(), threads, Math.max(1, Number(flags.seeds ?? 3)));
+    await transfer(sets, await bundleSelf(), threads, transferOptions(flags));
   } else if (cmd === 'index') {
     writeIndex();
   } else {

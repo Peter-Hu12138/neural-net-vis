@@ -30,9 +30,13 @@ export interface ZooEntry {
 
 /** One condition of the transfer-learning experiment (public/models/transfer.json). */
 export interface TransferCell {
-  /** Test accuracy per seed. */
+  /** Test accuracy per seed, at the end of training. */
   runs: number[];
   mean: number;
+  /** Mean training time per run, in seconds (evaluations excluded). */
+  seconds?: number;
+  /** Test accuracy part-way, after `seen` training images (see TransferReport.checkpoints). */
+  early?: { seen: number; runs: number[]; mean: number }[];
 }
 
 export interface TransferRow {
@@ -48,19 +52,25 @@ export interface TransferRow {
   frozen: TransferCell;
   /** Copied conv layers frozen; the dense layers (hidden and output) train. */
   convFrozen: TransferCell;
-  /** Half the epochs with the copied layers frozen, then everything unfrozen at a lower rate. */
+  /** Half the images with the copied layers frozen, then everything unfrozen at a lower rate. */
   fineTune: TransferCell;
 }
 
 export interface TransferReport {
   created: string;
   seeds: number;
+  /** Training images seen when the early accuracies were measured. */
+  checkpoints?: number[];
   testSet: Record<string, string>;
   settings: string;
   rows: TransferRow[];
 }
 
-const actLabel = (id: string) => ACTIVATIONS.find((a) => a.id === id)?.label ?? id;
+/** Activation names inside a sentence: "ReLU" stays an acronym, the rest are lower case ("tanh"). */
+const actLabel = (id: string) => {
+  const label = ACTIVATIONS.find((a) => a.id === id)?.label ?? id;
+  return label.replace(/^[A-Z](?=[a-z]+(\s|$))/, (s) => s.toLowerCase());
+};
 
 /** The hidden layers of an architecture in words (the output layer is implied by the classes). */
 export function layersSummary(arch: Arch): string {
