@@ -23,8 +23,10 @@
   font-size: 12px;
 }
 
-/* Frozen layers: an ink rule, like the marker in 04 (frozen is a setting, not an alarm). */
-.bp-frozen {
+/* Frozen layers, and layers no gradient reaches: an ink rule, like the marker in 04 (a setting or
+   a fact about this example, not an alarm). */
+.bp-frozen,
+.bp-dead {
   margin: 0;
   padding: 8px 10px;
   max-width: 72ch;
@@ -34,7 +36,8 @@
   color: var(--ink-2);
 }
 
-.bp-frozen b {
+.bp-frozen b,
+.bp-dead b {
   color: var(--ink);
   font-weight: 700;
 }
@@ -42,4 +45,29 @@
 /* Worked examples are tables: keep their columns aligned (they scroll sideways on a phone). */
 .bp-body .work {
   white-space: pre;
+}
+
+/* A sentence set in the worked-example type: it may wrap. */
+.bp-body .work.bp-wrap {
+  white-space: pre-wrap;
+}
+
+/* A colour photo's centre pixels: one small table per channel, side by side when there is room. */
+.bp-channels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 32px;
+  margin-top: -10px;
+}
+
+/* "frozen" beside a frozen layer's gradient step in the list. */
+.bp-step-tag {
+  margin-left: 8px;
+  padding: 1px 4px;
+  border: 1px solid currentColor;
+  font: 600 9.5px/1.3 var(--mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  vertical-align: 1px;
 }

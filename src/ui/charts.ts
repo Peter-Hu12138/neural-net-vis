@@ -1,8 +1,8 @@
 import { loading } from '../actions';
-import { fixed, niceTicks, share } from '../analysis/stats';
+import { fixed, niceTicks, share, sig } from '../analysis/stats';
 import { noun, type DatasetInfo } from '../data/datasets';
 import { store } from '../store';
-import { $, clear, fmt, h, int, pct } from './dom';
+import { $, clear, h, int, pct } from './dom';
 import { fitCanvas } from './draw';
 import { classColor, css, onThemeChange, palette, sequential, type RGB } from './theme';
 import { hideTip, showTip } from './tip';
@@ -191,6 +191,9 @@ function lineChart(canvas: HTMLCanvasElement, w: number, hgt: number, series: Se
   return drawn;
 }
 
+/** A loss for the headline figures: three decimals, or two significant digits once it is tiny (a point dataset learned perfectly). */
+export const lossText = (v: number): string => (v >= 0.0095 || v === 0 ? fixed(v, 3) : sig(v, 2));
+
 /** EMA smoothing for the noisy per-batch training curve. */
 function smooth(pts: Pt[], a = 0.6): Pt[] {
   let m = NaN;
@@ -274,9 +277,9 @@ export function mountCharts(): void {
     const lastE = evals[evals.length - 1];
     const trainLoss = smooth(pts.map((q) => [q.epoch, q.loss]));
     const trainAcc = smooth(pts.map((q) => [q.epoch, q.acc]));
-    kTrainLoss.b.textContent = lastP ? fmt(trainLoss[trainLoss.length - 1][1], 3) : '—';
+    kTrainLoss.b.textContent = lastP ? lossText(trainLoss[trainLoss.length - 1][1]) : '—';
     kTrainAcc.b.textContent = lastP ? pct(trainAcc[trainAcc.length - 1][1]) : '—';
-    kTestLoss.b.textContent = lastE ? fmt(lastE.loss, 3) : '—';
+    kTestLoss.b.textContent = lastE ? lossText(lastE.loss) : '—';
     kTestAcc.b.textContent = lastE ? pct(lastE.acc) : '—';
 
     const w = Math.max(260, lossBox.clientWidth);
@@ -304,7 +307,7 @@ export function mountCharts(): void {
       ticks = [];
       for (let t = 0; t <= yMax + 1e-9; t += st) ticks.push(t);
     }
-    const lossFmt = (v: number) => fixed(v, 3);
+    const lossFmt = lossText;
     if (draw) drawnCharts.set(
       lossCanvas,
       lineChart(lossCanvas, w, hgt, [
@@ -322,7 +325,7 @@ export function mountCharts(): void {
     );
     const where = xEnd > 0 ? `, ${xEnd < 10 ? fixed(xEnd, 2) : int(xEnd)} epochs so far` : '';
     lossCanvas.dataset.xTicks = ax.ticks.join(',');
-    lossCanvas.setAttribute('aria-label', `Cross-entropy loss per epoch, training and test${where}${lastE ? `; latest test loss ${fixed(lastE.loss, 3)}` : ''}`);
+    lossCanvas.setAttribute('aria-label', `Cross-entropy loss per epoch, training and test${where}${lastE ? `; latest test loss ${lossText(lastE.loss)}` : ''}`);
     accCanvas.setAttribute('aria-label', `Accuracy per epoch, training and test${where}${lastE ? `; latest test accuracy ${pct(lastE.acc)}` : ''}`);
 
     renderConfusion(lastE?.confusion ?? null, draw);

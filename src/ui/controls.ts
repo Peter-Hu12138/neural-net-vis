@@ -68,7 +68,8 @@ export function mountControls(): void {
     if (store.speed !== v) setSpeed(v);
   });
   speedMenu.classList.add('bar-speed-menu');
-  speedMenu.querySelector('select')!.setAttribute('aria-describedby', 'speed-note');
+  const speedSelect = speedMenu.querySelector('select')!;
+  speedSelect.setAttribute('aria-describedby', 'speed-note');
 
   const stat = (label: string) => {
     const lab = h('span', { class: 'label' }, label);
@@ -110,7 +111,7 @@ export function mountControls(): void {
     }
     speedNote.textContent = speedTitle(store.speed, many);
     setSelect(speedMenu, SPEED_LABELS, store.speed);
-    speedMenu.title = speedTitle(store.speed, many);
+    speedSelect.title = speedTitle(store.speed, many);
     const one = noun(store.info);
     sRate.lab.textContent = `${one[0].toUpperCase()}${one.slice(1)}s/s`;
     sRate.el.title = `Training ${many} per second${SPEEDS[store.speed] ? `, capped at ${int(SPEEDS[store.speed]!)} by the speed setting` : ''}`;

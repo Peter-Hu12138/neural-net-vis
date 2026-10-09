@@ -68,6 +68,8 @@ interface Trace {
   loss: number;
   blocks: BT[];
   step: number;
+  /** store.weightsRev when traced: any later change to the weights (training, an applied step) makes it stale. */
+  rev: number;
   version: number;
   /** The architecture the trace was made with (the page may have moved on to another). */
   arch: Arch;
@@ -155,7 +157,7 @@ function makeTrace(net: Network, x: Float32Array, label: number, coords?: Float3
       gb: b.gb.slice(),
     };
   });
-  return { x: x.slice(), label, probs: net.probs.slice(), loss, blocks, step: store.weightsStep, version: store.version, arch: structuredClone(store.arch), ctx: makeCtx(coords) };
+  return { x: x.slice(), label, probs: net.probs.slice(), loss, blocks, step: store.weightsStep, rev: store.weightsRev, version: store.version, arch: structuredClone(store.arch), ctx: makeCtx(coords) };
 }
 
 // ── Labels ────────────────────────────────────────────────────────────────
@@ -224,7 +226,8 @@ function maps(cap: string, data: Float32Array, s: Shape, o: { signed?: boolean; 
     const marked = !!o.mark && (o.mark.c === c || o.mark.c === -1);
     if (lab) {
       ctx.font = `500 9.5px ${MONO}`;
-      ctx.fillStyle = marked ? p.accent : p.muted;
+      // A window marked in every channel (a colour patch) leaves the channel names plain.
+      ctx.fillStyle = o.mark && o.mark.c === c ? p.accent : p.muted;
       ctx.textBaseline = 'top';
       ctx.textAlign = 'left';
       ctx.fillText(o.chans?.[c] ?? String(c + 1), x, y);
@@ -262,6 +265,9 @@ function picture(cap: string, x: Float32Array, s: Shape, px: number): HTMLElemen
   return figure(cap, canvas);
 }
 
+/** Width a figure can use: the page minus its margins on a phone, at most 640 px. */
+const roomForFigures = () => Math.max(260, Math.min(640, (document.documentElement.clientWidth || 1024) - 36));
+
 /** A vector. Short vectors (up to ten values) are always printed; longer ones follow the view mode. */
 function vec(cap: string, data: Float32Array, o: { labels?: string[]; signed?: boolean; max?: number; mark?: number; mark2?: number } = {}): HTMLElement {
   const len = data.length;
@@ -270,7 +276,8 @@ function vec(cap: string, data: Float32Array, o: { labels?: string[]; signed?: b
   const m = figMode();
   const numbers = len <= 10 || (m === 'numbers' && len <= 128);
   const mode: MatrixMode = numbers ? 'numbers' : m === 'hinton' ? 'hinton' : 'heat';
-  const perRow = Math.min(len, numbers ? 10 : 16);
+  // Printed values wrap to fit a phone screen; colour cells keep sixteen to a row.
+  const perRow = Math.max(1, Math.min(len, numbers ? Math.min(10, Math.floor(roomForFigures() / 50)) : 16));
   const rows = Math.ceil(len / perRow);
   const cw = numbers ? 50 : 18;
   const ch = numbers ? 22 : 18;
@@ -412,6 +419,43 @@ function row(...els: HTMLElement[]): HTMLElement {
 /** The frozen-layer note for a step: ink rule, not the accent (frozen is a setting, not an alarm). */
 function frozenNote(...parts: (string | Node)[]): HTMLElement {
   return h('p', { class: 'bp-frozen' }, ...parts);
+}
+
+/** A note on why a gradient is zero (a layer whose units were all off), in the same style. */
+function deadNote(...parts: (string | Node)[]): HTMLElement {
+  return h('p', { class: 'bp-dead' }, ...parts);
+}
+
+const allZero = (a: Float32Array) => a.every((v) => v === 0);
+
+/**
+ * The layer where the gradient stopped for this example: the lowest layer at or above `from` whose
+ * units were all off (a gradient arrived from above, none passed the activation). Null when the
+ * gradient flows.
+ */
+function deadLayer(layers: BT[], from: number): BT | null {
+  for (let j = from; j < layers.length; j++) {
+    const b = layers[j];
+    if (b.isOut) return null;
+    if (allZero(b.dZ) && !allZero(b.dA)) return b;
+    if (!allZero(b.dZ)) return null;
+  }
+  return null;
+}
+
+/** Every unit of `dead` was off for this example: say so where its zero gradients show. */
+function deadExplain(dead: BT, here: BT, c: Ctx): HTMLElement {
+  const what = noun(c.info);
+  if (dead === here) {
+    return deadNote(
+      h('b', null, `Every unit of ${dead.name} was off for this ${what}.`),
+      ` All its pre-activations were at or below 0, where ${actLabel(dead.act)}’s slope is 0, so δ is 0 everywhere and the gradient stops here: from this ${what}, ${dead.name}${dead.index > 0 ? ' and the layers below it' : ''} learn nothing. Units that stay off for every input are called dead; a smaller learning rate, or Leaky ReLU, keeps them alive.`,
+    );
+  }
+  return deadNote(
+    h('b', null, `No gradient reaches ${here.name} from this ${what}.`),
+    ` Every unit of ${dead.name} above was off, so δ is 0 here and so are all of these gradients.`,
+  );
 }
 
 const flatShape = (s: Shape) => s.h > 1;
@@ -597,21 +641,23 @@ function renderInput(el: HTMLElement, t: Trace): void {
     const HW = H * W;
     const y0 = Math.floor(H / 2) - 2;
     const x0 = Math.floor(W / 2) - 2;
-    const lines: (string | [string, boolean])[] = [`Centre 4×4 pixels, rows ${y0}–${y0 + 3}, columns ${x0}–${x0 + 3}:`, `   ${'red'.padEnd(23)}${'green'.padEnd(23)}blue`];
-    for (let y = y0; y < y0 + 4; y++) {
-      let s = '';
-      for (let ch = 0; ch < 3; ch++) {
-        for (let x = x0; x < x0 + 4; x++) s += ns(t.x[ch * HW + y * W + x], 2, 5);
-        s += '   ';
-      }
-      lines.push(s);
-    }
     const mean = (ch: number) => {
       let s = 0;
       for (let i = 0; i < HW; i++) s += t.x[ch * HW + i];
       return s / HW;
     };
-    lines.push('', `Mean of each channel: red ${n(mean(0), 2)} · green ${n(mean(1), 2)} · blue ${n(mean(2), 2)}`, ['target y = ' + t.label + ` (${c.names[t.label]})`, true]);
+    // One small table per channel; they sit side by side when there is room and stack on a phone.
+    const channel = (ch: number) => {
+      const ls: (string | [string, boolean])[] = [[CHANNELS[ch], true]];
+      for (let y = y0; y < y0 + 4; y++) {
+        let r = '';
+        for (let x = x0; x < x0 + 4; x++) r += ns(t.x[ch * HW + y * W + x], 2, 5);
+        ls.push(r);
+      }
+      ls.push(`mean ${n(mean(ch), 2)}`);
+      return work(ls);
+    };
+    const tables = h('div', { class: 'bp-channels' }, channel(0), channel(1), channel(2));
     el.append(
       h(
         'p',
@@ -620,7 +666,9 @@ function renderInput(el: HTMLElement, t: Trace): void {
       ),
       formula(`x ∈ [0, 1]^(3×${H}×${W})`, false),
       row(picture(`x · ${H}×${W} photo`, t.x, shape, 128), maps('Channels · red, green, blue', t.x, shape, { px: 96, signed: false, max: 1, chans: CHANNELS, mark: { c: -1, y: y0, x: x0, h: 4, w: 4 } })),
-      work(lines),
+      h('pre', { class: 'work bp-wrap' }, `Centre 4×4 pixels, rows ${y0}–${y0 + 3}, columns ${x0}–${x0 + 3}, and each channel’s mean over the whole photo:`),
+      tables,
+      work([['target y = ' + t.label + ` (${c.names[t.label]})`, true]]),
     );
     return;
   }
@@ -862,12 +910,28 @@ function frozenBackward(bt: BT, layers: BT[]): HTMLElement | null {
   );
 }
 
+/**
+ * Why a layer's weight gradients are all zero for this example, if they are: no δ arrived (a layer
+ * whose units were all off), or δ arrived but every input to the layer was 0.
+ */
+function zeroGradients(bt: BT, layers: BT[], c: Ctx): HTMLElement | null {
+  const dead = deadLayer(layers, bt.index);
+  if (dead) return deadExplain(dead, bt, c);
+  if (!allZero(bt.gW) || allZero(bt.dZ)) return null;
+  const what = noun(c.info);
+  const prev = bt.index > 0 ? layers[bt.index - 1] : null;
+  return deadNote(
+    h('b', null, `Every input to ${bt.name} is 0 for this ${what}.`),
+    `${prev ? ` All the units of ${prev.name} were off.` : ''} A weight gradient is δ times its input, so every one of them is 0: from this ${what}, only the biases learn.`,
+  );
+}
+
 function denseBackwardSteps(steps: Step[], bt: BT, first: boolean, c: Ctx, layers: BT[]): void {
   const N = bt.inShape.c * bt.inShape.h * bt.inShape.w;
   const M = bt.zShape.c;
   const feats = readsFeatures(c, bt);
   const colour = readsColour(c, bt);
-  if (!bt.isOut) steps.push(activationBackward(bt, bt.zShape));
+  if (!bt.isOut) steps.push(activationBackward(bt, bt.zShape, c, layers));
   steps.push({
     phase: 'Backward pass',
     title: bt.isOut ? 'Output layer: gradients' : `${bt.name}: gradients`,
@@ -920,13 +984,15 @@ function denseBackwardSteps(steps: Step[], bt: BT, first: boolean, c: Ctx, layer
         ),
         work(lines),
       );
+      const why = zeroGradients(bt, layers, c);
+      if (why) el.append(why);
       const fz = frozenBackward(bt, layers);
       if (fz) el.append(fz);
     },
   });
 }
 
-function activationBackward(bt: BT, s: Shape): Step {
+function activationBackward(bt: BT, s: Shape, c: Ctx, layers: BT[]): Step {
   return {
     phase: 'Backward pass',
     title: `${bt.name}: back through ${actLabel(bt.act)}`,
@@ -949,6 +1015,8 @@ function activationBackward(bt: BT, s: Shape): Step {
         ),
         work(lines),
       );
+      const dead = deadLayer(layers, bt.index);
+      if (dead) el.append(deadExplain(dead, bt, c));
     },
   };
 }
@@ -991,7 +1059,7 @@ function convBackwardSteps(steps: Step[], bt: BT, first: boolean, cx: Ctx, layer
       },
     });
   }
-  steps.push(activationBackward(bt, bt.zShape));
+  steps.push(activationBackward(bt, bt.zShape, cx, layers));
   steps.push({
     phase: 'Backward pass',
     title: `${bt.name}: gradients`,
@@ -1020,7 +1088,9 @@ function convBackwardSteps(steps: Step[], bt: BT, first: boolean, cx: Ctx, layer
       for (let i = 0; i < H * W; i++) sb += bt.dZ[f * H * W + i];
       const lines: (string | [string, boolean])[] = [
         [`Largest kernel gradient: ∂L/∂W[${f + 1}, ${cName}, ${ki}, ${kj}]`, true],
-        `  sums δ × input over all ${H * W} positions; ${terms.length} are non-zero. The largest:`,
+        terms.length
+          ? `  sums δ × input over all ${int(H * W)} positions; ${int(terms.length)} ${terms.length === 1 ? 'is' : 'are'} non-zero. The largest:`
+          : `  sums δ × input over all ${int(H * W)} positions; every term is 0.`,
       ];
       for (const q of terms.slice(0, 4)) lines.push(`  δ[${f + 1}, ${q.y}, ${q.x}] · x[${cName}, ${q.y + ki - p}, ${q.x + kj - p}] = ${ns(q.d, 4, 8)} × ${n(q.v, 3)} = ${ns(q.d * q.v, 4, 8)}`);
       if (terms.length > 4) lines.push(`  … ${terms.length - 4} more`);
@@ -1045,6 +1115,8 @@ function convBackwardSteps(steps: Step[], bt: BT, first: boolean, cx: Ctx, layer
         row(maps(first ? '∂L/∂x · input gradient (saliency)' : `∂L/∂x · to ${H}×${W}×${C}`, bt.dX, bt.inShape, { signed: true, px: first ? 168 : 84, chans: colour ? CHANNELS : undefined })),
         work(lines),
       );
+      const why = zeroGradients(bt, layers, cx);
+      if (why) el.append(why);
       const fz = frozenBackward(bt, layers);
       if (fz) el.append(fz);
     },
@@ -1065,26 +1137,44 @@ function renderUpdate(el: HTMLElement, t: Trace, ui: { eta: number; onEta: (v: n
   const lines: (string | [string, boolean])[] = [];
   if (showIdx !== undefined) {
     const sb = t.blocks[showIdx];
+    const where = sb.isOut ? 'the output layer' : sb.name;
+    const unit = (j: number) => String(sb.isOut ? j : j + 1);
+    const minusG = (g: number) => (g < 0 ? `(${n(g, 4)})` : n(g, 4));
     const gi = argmaxAbs(sb.gW);
-    const idx = sb.kind === 'dense' ? `${Math.floor(gi / sb.x.length) + (sb.isOut ? 0 : 1)}, ${readsFeatures(c, sb) ? c.feats[gi % sb.x.length] : (gi % sb.x.length) + 1}` : `${Math.floor(gi / (sb.inShape.c * sb.k * sb.k)) + 1}, …`;
-    lines.push(
-      [`One weight in ${sb.isOut ? 'the output layer' : sb.name}:`, true],
-      `  W[${idx}] ← ${n(sb.W[gi], 4)} − ${eta} × ${sb.gW[gi] < 0 ? `(${n(sb.gW[gi], 4)})` : n(sb.gW[gi], 4)} = ${n(sb.W[gi] - eta * sb.gW[gi], 4)}`,
-      '',
-    );
+    if (sb.gW[gi] !== 0 || allZero(sb.gb)) {
+      let idx: string;
+      if (sb.kind === 'dense') {
+        const N = sb.x.length;
+        idx = `${unit(Math.floor(gi / N))}, ${readsFeatures(c, sb) ? c.feats[gi % N] : (gi % N) + 1}`;
+      } else {
+        const kk = sb.k * sb.k;
+        const C = sb.inShape.c;
+        const ch = Math.floor((gi % (C * kk)) / kk);
+        idx = `${Math.floor(gi / (C * kk)) + 1}, ${readsColour(c, sb) ? CHANNELS[ch] : ch + 1}, ${Math.floor((gi % kk) / sb.k)}, ${gi % sb.k}`;
+      }
+      lines.push([`One weight in ${where}:`, true], `  W[${idx}] ← ${n(sb.W[gi], 4)} − ${eta} × ${minusG(sb.gW[gi])} = ${n(sb.W[gi] - eta * sb.gW[gi], 4)}`, '');
+    } else {
+      // Its inputs were all 0 for this example, so only the biases move.
+      const bi = argmaxAbs(sb.gb);
+      lines.push([`Every weight gradient in ${where} is 0 for this ${noun(c.info)}; one bias:`, true], `  b[${unit(bi)}] ← ${n(sb.b[bi], 4)} − ${eta} × ${minusG(sb.gb[bi])} = ${n(sb.b[bi] - eta * sb.gb[bi], 4)}`, '');
+    }
   }
-  lines.push(['Every layer:', true], '  layer                 ‖∂L/∂W‖     ‖ΔW‖');
+  const col = (v: string) => v.padStart(10);
+  const nameW = Math.max(...t.blocks.map((b) => b.name.length)) + 2;
+  lines.push(['Every layer:', true], `  ${'layer'.padEnd(nameW)}${col('‖∂L/∂W‖')}${col('‖∂L/∂b‖')}${col('‖ΔW‖')}`);
+  const norm = (a: Float32Array) => Math.sqrt(a.reduce((s, v) => s + v * v, 0));
   for (const b of t.blocks) {
-    let g = 0;
-    for (const v of b.gW) g += v * v;
-    const step = frozen[b.index] ? 0 : eta * Math.sqrt(g);
-    lines.push(`  ${b.name.padEnd(18)}${ns(Math.sqrt(g), 4, 10)}${ns(step, 4, 10)}${frozen[b.index] ? '   frozen, not updated' : ''}`);
+    const gw = norm(b.gW);
+    const step = frozen[b.index] ? 0 : eta * gw;
+    lines.push(`  ${b.name.padEnd(nameW)}${ns(gw, 4, 10)}${ns(norm(b.gb), 4, 10)}${ns(step, 4, 10)}${frozen[b.index] ? '   frozen, not updated' : ''}`);
   }
   const before = h('div', { class: 'kpi' }, h('span', { class: 'label' }, 'Loss before'), h('b', null, n(t.loss, 4)), h('span', { class: 'hint' }, `p[${t.label}] = ${n(t.probs[t.label], 3)}`));
   const afterEl = h('div', { class: 'kpi is-accent' }, h('span', { class: 'label' }, 'Loss after'), h('b', null, n(lossAfter, 4)), h('span', { class: 'hint' }, `p[${t.label}] = ${n(after[t.label], 3)}`));
   const allFrozen = frozen.every(Boolean);
   const applyBtn = h('button', { type: 'button', class: 'btn btn-solid', onclick: ui.apply, disabled: allFrozen }, 'Apply to network');
   const frozenNames = t.blocks.filter((b) => frozen[b.index]).map((b) => b.name);
+  // Transfer learning freezes the lower layers and trains the ones above them.
+  const frozenBelowTrainable = showIdx !== undefined && t.blocks.every((b) => !frozen[b.index] || b.index < showIdx);
   el.append(
     h(
       'p',
@@ -1099,14 +1189,14 @@ function renderUpdate(el: HTMLElement, t: Trace, ui: { eta: number; onEta: (v: n
         h('b', null, `Frozen: training leaves ${allFrozen ? 'every layer' : frozenNames.join(', ')} alone.`),
         allFrozen
           ? ' Nothing would change, so there is nothing to apply. Unfreeze a layer in 01 Architecture to train it.'
-          : ` ${frozenNames.length > 1 ? 'Their' : 'Its'} gradients were worked out above, but this step leaves ${frozenNames.length > 1 ? 'their' : 'its'} weights as they are: ΔW = 0. That is how transfer learning keeps what a pretrained layer learned while the layers above it adapt to the new ${c.what === 'digit' ? 'data' : 'classes'}.`,
+          : ` ${frozenNames.length > 1 ? 'Their' : 'Its'} gradients were worked out above, but this step leaves ${frozenNames.length > 1 ? 'their' : 'its'} weights as they are: ΔW = 0.${frozenBelowTrainable ? ` That is how transfer learning keeps what a pretrained layer learned while the layers above it adapt to the new ${c.what === 'digit' ? 'data' : 'classes'}.` : ''}`,
       ),
     );
   }
   el.append(
     h('div', { class: 'tensors', style: { alignItems: 'end' } }, selectField('bp-eta', 'Step size', [0.001, 0.01, 0.03, 0.1, 0.3, 1].map((v) => ({ value: v, label: String(v) })), eta, ui.onEta), h('div', { class: 'loss-compare' }, before, afterEl), applyBtn),
   );
-  if (showIdx !== undefined) {
+  if (showIdx !== undefined && !allZero(t.blocks[showIdx].gW)) {
     const sb = t.blocks[showIdx];
     const ni = 2 * t.blocks.indexOf(sb);
     if (sb.kind === 'dense') {
@@ -1284,9 +1374,10 @@ export function mountBackprop(): void {
       const ctx = fitCanvas(sampleCanvas, 64, 64);
       drawSample(ctx, x, shape, 0, 0, 64, 64);
     }
-    sampleCanvas.setAttribute('aria-label', trace ? `The example: ${probe?.caption ?? noun(info)}` : 'No example yet');
+    const flat3d = pts && info.dims === 3;
+    sampleCanvas.setAttribute('aria-label', trace ? `The example: ${probe?.caption ?? noun(info)}${pts ? `, marked among the test points${flat3d ? ' seen along x₃' : ''}` : ''}` : 'No example yet');
     sampleCap.textContent = probe
-      ? probe.caption
+      ? `${probe.caption}${flat3d && trace ? '. The map looks along x₃, so x₁ and x₂ are its axes.' : ''}`
       : pts
         ? 'Pick a point in 03 or 07 Data.'
         : `Pick ${info.id === 'mnist' ? 'a digit' : 'an image'} in 02 Network or 07 Data${info.id === 'mnist' ? ', or draw one' : ''}.`;
@@ -1306,7 +1397,7 @@ export function mountBackprop(): void {
         info.classes,
       ),
     );
-    if (trace && c && !c.digits) targetWrap.append(h('p', { class: 'hint bp-target-name' }, `y = ${trace.label}: ${c.names[trace.label]}`));
+    if (trace && c && hasName(c, trace.label)) targetWrap.append(h('p', { class: 'hint bp-target-name' }, `y = ${trace.label}: ${c.names[trace.label]}`));
     if (probe && probe.label === null && target === null) {
       const src = probe.key === 'draw' ? 'Your drawing' : probe.key === 'photo' ? 'Your photo' : pts ? 'This point' : 'This input';
       targetWrap.append(h('p', { class: 'hint', style: { marginTop: '6px' } }, `${src} has no label, so the prediction is used. Pick the ${what} you meant.`));
@@ -1319,7 +1410,14 @@ export function mountBackprop(): void {
         phase = s.phase;
         list.append(h('li', { class: 'phase' }, phase));
       }
-      const b = h('button', { type: 'button' }, h('span', { class: 'step-n' }, String(i + 1).padStart(2, '0')), h('span', null, s.title));
+      // A frozen layer's gradient step: training skips its update (the step says why).
+      const frozenStep = s.dir === 'back' && s.title.endsWith('gradients') && store.isFrozen(s.block);
+      const b = h(
+        'button',
+        { type: 'button' },
+        h('span', { class: 'step-n' }, String(i + 1).padStart(2, '0')),
+        h('span', null, s.title, frozenStep ? h('span', { class: 'bp-step-tag' }, 'frozen') : null),
+      );
       b.addEventListener('click', () => go(i));
       list.append(h('li', { class: i === cur ? 'is-current' : i < cur ? 'is-done' : 'is-todo', 'aria-current': i === cur ? 'step' : undefined }, b));
     });
@@ -1331,11 +1429,11 @@ export function mountBackprop(): void {
       refresh.disabled = true;
       return;
     }
-    const stale = trace.version !== store.version || trace.step !== store.weightsStep;
+    const stale = trace.version !== store.version || trace.rev !== store.weightsRev;
     snapNote.textContent = store.running
-      ? `Frozen at training step ${int(trace.step)} while training runs.`
+      ? `Held at training step ${int(trace.step)} while training runs.`
       : stale
-        ? `Frozen at step ${int(trace.step)}; the network is now at step ${int(store.weightsStep)}.`
+        ? `Held at step ${int(trace.step)}; the network is now at step ${int(store.weightsStep)}.`
         : `Using the network's weights at step ${int(trace.step)}.`;
     refresh.disabled = !stale;
   };
@@ -1418,10 +1516,13 @@ export function mountBackprop(): void {
   store.on('status', updateSnap);
   // Frozen while training runs; follows the network whenever training is paused.
   store.on('weights', () => {
-    if (!store.running && trace && trace.version === store.version && trace.step !== store.weightsStep) retrace();
+    if (!store.running && trace && trace.version === store.version && trace.rev !== store.weightsRev) retrace();
     else updateSnap();
   });
-  store.on('frozen', renderStep);
+  store.on('frozen', () => {
+    renderSide();
+    renderStep();
+  });
   store.on('mode', renderStep);
   onThemeChange(() => {
     renderSide();

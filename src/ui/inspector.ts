@@ -1,5 +1,5 @@
 import { initialWeights, select, setMode } from '../actions';
-import { summarize, summarizeFrozen } from '../analysis/stats';
+import { fixed, sig, summarize, summarizeFrozen } from '../analysis/stats';
 import { featureDefs } from '../data/features';
 import type { ConvBlock, DenseBlock } from '../nn/network';
 import { store, type WeightMode } from '../store';
@@ -7,7 +7,7 @@ import { layerDetail, layerName } from './builder';
 import { namesAreGlyphs, shortNames } from './charts';
 import { $, clear, h, int, segmented, selectField } from './dom';
 import { drawMatrix, fitCanvas, maxAbs, type MatrixMode } from './draw';
-import { drawQQ, fixed, SANS as SANS_FONT, sig, type QQSeries } from './qq';
+import { drawQQ, SANS as SANS_FONT, type QQSeries } from './qq';
 import { css, diverging, onThemeChange, palette, sequential, type RGB } from './theme';
 import { hideTip, showTip } from './tip';
 import './inspector.css';

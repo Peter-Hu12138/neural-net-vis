@@ -27,6 +27,7 @@ type W = {
       select(block: number, unit?: number | null): void;
       setMode(mode: string): void;
       pause(): void;
+      applyWeights(w: Float32Array[]): void;
     };
   };
   __texts: string[];
@@ -226,7 +227,8 @@ test('05 on a point dataset: large confusion cells and an epoch axis for long ru
   await page.setViewportSize({ width: 390, height: 844 });
   await open(page);
   await switchTo(page, 'circle');
-  await page.locator('#speed').getByRole('button', { name: 'Max' }).click();
+  // On a phone the speed control is a menu in the button row.
+  await page.locator('#speed-select').selectOption('max');
   await trainUntil(page, '(window.raster.store.status?.epochFraction ?? 0) > 60', 90_000);
   await page.locator('#training').scrollIntoViewIfNeeded();
   await clearTexts(page);
@@ -297,11 +299,12 @@ test('06 steps through every stage on CIFAR-10 and on a point dataset', async ({
       if (i < titles.length - 1) await page.getByRole('button', { name: 'Next →' }).click();
     }
     await expect(page.locator('.dir')).toHaveText('Update');
-    const w0 = await page.evaluate(() => Array.from((window as unknown as W).raster.store.net.getWeights().at(-2)!.slice(0, 20)));
+    // The output layer always learns (its biases at least, even when every input to it is 0).
+    const outParams = () => page.evaluate(() => (window as unknown as W).raster.store.net.getWeights().slice(-2).flatMap((w) => Array.from(w)));
+    const w0 = await outParams();
     await page.getByRole('button', { name: 'Apply to network' }).click();
     await expect(page.locator('#bplab .notice')).toContainText(`The loss on this ${id === 'cifar10' ? 'image' : 'point'} went from`);
-    const w1 = await page.evaluate(() => Array.from((window as unknown as W).raster.store.net.getWeights().at(-2)!.slice(0, 20)));
-    expect(w1).not.toEqual(w0);
+    expect(await outParams()).not.toEqual(w0);
   }
   // The side panel names the classes of the target, and the example is a map of the plane.
   await expect(page.locator('#bplab .bp-side')).toContainText('Target class y');
@@ -332,7 +335,8 @@ test('06 update step leaves frozen layers alone, and 04 marks them', async ({ pa
   const main = page.locator('.bp-main');
   await expect(main.locator('.bp-frozen')).toContainText('Frozen: training leaves Conv 1 alone.');
   await expect(main.locator('.bp-frozen')).toContainText('ΔW = 0');
-  await expect(main.locator('pre.work')).toContainText(/Conv 1\s+[\d.]+\s+0\.0000\s+frozen, not updated/);
+  // Columns: ‖∂L/∂W‖, ‖∂L/∂b‖, then the step ‖ΔW‖, which is 0 for the frozen layer.
+  await expect(main.locator('pre.work')).toContainText(/Conv 1\s+[\d.]+\s+[\d.]+\s+0\.0000\s+frozen, not updated/);
   await page.locator('#backprop').screenshot({ path: `${SHOTS}/17-core-backprop-frozen.png`, style: SHOT_STYLE });
 
   const before = await page.evaluate(() => (window as unknown as W).raster.store.net.getWeights().map((w) => Array.from(w.slice(0, 30))));
@@ -350,6 +354,42 @@ test('06 update step leaves frozen layers alone, and 04 marks them', async ({ pa
   });
   await expect(main.locator('.bp-frozen')).toContainText('Frozen: training leaves every layer alone.');
   await expect(page.getByRole('button', { name: 'Apply to network' })).toBeDisabled();
+});
+
+test('06 explains a gradient that stops at a layer whose units were all off', async ({ page }) => {
+  await open(page);
+  // Push every Dense 3 bias far below zero: all its ReLUs are off for any input.
+  await page.evaluate(() => {
+    const r = (window as unknown as W).raster;
+    const w = r.store.net.getWeights();
+    w[5] = w[5].map(() => -100);
+    r.actions.applyWeights(w);
+  });
+  await page.locator('#backprop').scrollIntoViewIfNeeded();
+  await expect(page.locator('#bplab .bp-side')).toContainText("Using the network's weights at step 0");
+  const step = (name: string) => page.locator('.steps li:not(.phase) button', { hasText: name }).click();
+  const note = page.locator('.bp-main .bp-dead');
+
+  await step('Dense 3: back through ReLU');
+  await expect(note).toContainText('Every unit of Dense 3 was off for this digit.');
+  await expect(note).toContainText('the gradient stops here');
+  await step('Output layer: gradients');
+  await expect(note).toContainText('Every input to Output is 0 for this digit.');
+  await expect(note).toContainText('only the biases learn');
+  await step('Conv 2: gradients');
+  await expect(note).toContainText('No gradient reaches Conv 2 from this digit.');
+  await expect(page.locator('.bp-main pre.work')).toContainText('every term is 0');
+  await page.locator('.steps li:not(.phase) button').last().click();
+  await expect(page.locator('.bp-main pre.work')).toContainText('Every weight gradient in the output layer is 0 for this digit; one bias:');
+  await expect(page.locator('.bp-main pre.work')).toContainText(/b\[\d\] ← /);
+
+  // Applying the step moves only the output biases.
+  const before = await page.evaluate(() => (window as unknown as W).raster.store.net.getWeights().map((w) => Array.from(w)));
+  await page.getByRole('button', { name: 'Apply to network' }).click();
+  await expect(page.locator('#bplab .notice')).toContainText('Applied');
+  const after = await page.evaluate(() => (window as unknown as W).raster.store.net.getWeights().map((w) => Array.from(w)));
+  for (let i = 0; i < 7; i++) expect(after[i], `parameter block ${i} unchanged`).toEqual(before[i]);
+  expect(after[7], 'output biases moved').not.toEqual(before[7]);
 });
 
 test('the speed control caps the trainer and follows the dataset', async ({ page }) => {
