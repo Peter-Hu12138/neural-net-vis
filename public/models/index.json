@@ -1,0 +1,173 @@
+[
+  {
+    "id": "mnist-lenet",
+    "name": "MNIST LeNet",
+    "dataset": "mnist",
+    "description": "LeNet-style: two 5×5 tanh convolutions with max-pooling, then 64 tanh units. The architecture of the LeNet-ish preset.",
+    "layers": "conv 5×5×6 tanh, pool · conv 5×5×16 tanh, pool · dense 64 tanh",
+    "arch": {
+      "input": {
+        "c": 1,
+        "h": 28,
+        "w": 28
+      },
+      "layers": [
+        {
+          "kind": "conv",
+          "filters": 6,
+          "kernel": 5,
+          "act": "tanh",
+          "pool": true
+        },
+        {
+          "kind": "conv",
+          "filters": 16,
+          "kernel": 5,
+          "act": "tanh",
+          "pool": true
+        },
+        {
+          "kind": "dense",
+          "units": 64,
+          "act": "tanh"
+        }
+      ],
+      "classes": 10
+    },
+    "params": 53462,
+    "testAccuracy": 0.9889,
+    "testSet": "10,000 official MNIST test images",
+    "file": "mnist-lenet.json",
+    "bytes": 285844
+  },
+  {
+    "id": "mnist-cnn",
+    "name": "MNIST small CNN",
+    "dataset": "mnist",
+    "description": "The Small CNN preset (the default network): two 3×3 ReLU convolutions with max-pooling, then 32 units.",
+    "layers": "conv 3×3×8 ReLU, pool · conv 3×3×16 ReLU, pool · dense 32 ReLU",
+    "arch": {
+      "input": {
+        "c": 1,
+        "h": 28,
+        "w": 28
+      },
+      "layers": [
+        {
+          "kind": "conv",
+          "filters": 8,
+          "kernel": 3,
+          "act": "relu",
+          "pool": true
+        },
+        {
+          "kind": "conv",
+          "filters": 16,
+          "kernel": 3,
+          "act": "relu",
+          "pool": true
+        },
+        {
+          "kind": "dense",
+          "units": 32,
+          "act": "relu"
+        }
+      ],
+      "classes": 10
+    },
+    "params": 26698,
+    "testAccuracy": 0.9874,
+    "testSet": "10,000 official MNIST test images",
+    "file": "mnist-cnn.json",
+    "bytes": 143088
+  },
+  {
+    "id": "fashion-cnn",
+    "name": "Fashion-MNIST small CNN",
+    "dataset": "fashion",
+    "description": "The Small CNN preset trained on clothing. Same layers as the MNIST small CNN, so either can be transferred to the other.",
+    "layers": "conv 3×3×8 ReLU, pool · conv 3×3×16 ReLU, pool · dense 32 ReLU",
+    "arch": {
+      "input": {
+        "c": 1,
+        "h": 28,
+        "w": 28
+      },
+      "layers": [
+        {
+          "kind": "conv",
+          "filters": 8,
+          "kernel": 3,
+          "act": "relu",
+          "pool": true
+        },
+        {
+          "kind": "conv",
+          "filters": 16,
+          "kernel": 3,
+          "act": "relu",
+          "pool": true
+        },
+        {
+          "kind": "dense",
+          "units": 32,
+          "act": "relu"
+        }
+      ],
+      "classes": 10
+    },
+    "params": 26698,
+    "testAccuracy": 0.9009,
+    "testSet": "10,000 official Fashion-MNIST test images",
+    "file": "fashion-cnn.json",
+    "bytes": 143123
+  },
+  {
+    "id": "cifar10-cnn",
+    "name": "CIFAR-10 CNN",
+    "dataset": "cifar10",
+    "description": "Three 3×3 ReLU convolutions (16, 32, 64 filters), each with max-pooling, then 64 units. Trained with random left–right mirroring.",
+    "layers": "conv 3×3×16 ReLU, pool · conv 3×3×32 ReLU, pool · conv 3×3×64 ReLU, pool · dense 64 ReLU",
+    "arch": {
+      "input": {
+        "c": 3,
+        "h": 32,
+        "w": 32
+      },
+      "layers": [
+        {
+          "kind": "conv",
+          "filters": 16,
+          "kernel": 3,
+          "act": "relu",
+          "pool": true
+        },
+        {
+          "kind": "conv",
+          "filters": 32,
+          "kernel": 3,
+          "act": "relu",
+          "pool": true
+        },
+        {
+          "kind": "conv",
+          "filters": 64,
+          "kernel": 3,
+          "act": "relu",
+          "pool": true
+        },
+        {
+          "kind": "dense",
+          "units": 64,
+          "act": "relu"
+        }
+      ],
+      "classes": 10
+    },
+    "params": 89834,
+    "testAccuracy": 0.7002,
+    "testSet": "10,000 official CIFAR-10 test images",
+    "file": "cifar10-cnn.json",
+    "bytes": 479945
+  }
+]

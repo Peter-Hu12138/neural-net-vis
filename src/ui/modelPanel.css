@@ -1,0 +1,437 @@
+/* ── 01 Architecture: model panel ─────────────────────────
+   Where the weights came from, then three views of section 01 as tabs: the layers (the builder),
+   the pretrained zoo with the transfer results, and saving or opening your own model. */
+
+.models {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  margin-bottom: 16px;
+}
+
+.model-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 20px;
+  margin-top: 4px;
+  border-bottom: 2px solid var(--ink);
+}
+
+.model-tab {
+  appearance: none;
+  margin: 0 0 -2px;
+  padding: 8px 0 6px;
+  border: 0;
+  border-bottom: 4px solid transparent;
+  background: none;
+  color: var(--muted);
+  font: 700 11px/1.2 var(--sans);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.model-tab:hover {
+  color: var(--ink);
+}
+
+.model-tab[aria-selected='true'] {
+  color: var(--ink);
+  border-bottom-color: var(--ink);
+}
+
+.model-tab:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+
+.model-tab-badge {
+  font-family: var(--mono);
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.model-panel {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  padding-top: 4px;
+}
+
+.model-panel[hidden] {
+  display: none;
+}
+
+.zoo-hint {
+  font-size: 13px;
+}
+
+.models:empty {
+  display: none;
+}
+
+.model-prov {
+  display: grid;
+  gap: 2px;
+  padding-left: 10px;
+  border-left: 3px solid var(--ink);
+}
+
+.model-prov-text {
+  margin: 0;
+  font-weight: 700;
+  font-size: 14.5px;
+  line-height: 1.3;
+}
+
+.model-eval {
+  margin: 0;
+  font: 400 12px/1.4 var(--mono);
+  color: var(--ink-2);
+}
+
+.model-status {
+  font-size: 13px;
+  color: var(--ink-2);
+  min-height: 0;
+}
+
+.model-status:empty {
+  display: none;
+}
+
+.model-status.is-error {
+  padding: 8px 10px;
+  border-left: 3px solid var(--accent);
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.zoo,
+.saved {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+}
+
+.zoo-row,
+.saved-row {
+  position: relative;
+  display: grid;
+  gap: 3px;
+  padding: 9px 0 10px;
+  border-bottom: 1px solid var(--hair);
+  min-width: 0;
+}
+
+.zoo-row:first-child,
+.saved-row:first-child {
+  padding-top: 2px;
+}
+
+.zoo-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
+.zoo-name {
+  font-weight: 800;
+  font-size: 15px;
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.zoo-acc {
+  flex: none;
+  font: 500 15px/1 var(--mono);
+}
+
+.zoo-acc-label {
+  font: 400 11px var(--mono);
+  color: var(--muted);
+}
+
+.zoo-meta {
+  font: 400 12px/1.35 var(--mono);
+  color: var(--ink-2);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.zoo-layers {
+  font: 400 11.5px/1.35 var(--mono);
+  color: var(--muted);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.zoo-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 5px;
+  min-width: 0;
+}
+
+.zoo-why {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.zoo-progress {
+  margin-top: 6px;
+}
+
+.zoo-empty:empty {
+  display: none;
+}
+
+.zoo-empty {
+  display: grid;
+  gap: 8px;
+  justify-items: start;
+}
+
+.btn.is-armed {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.btn.is-armed:hover:not(:disabled) {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+/* ── Transfer explanation ── */
+
+.model-explain {
+  display: grid;
+  gap: 8px;
+  font-size: 13.5px;
+  line-height: 1.45;
+}
+
+.model-explain p {
+  margin: 0;
+}
+
+.transfer-wrap {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+.transfer-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.transfer-table caption {
+  caption-side: top;
+  text-align: left;
+  padding-bottom: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.transfer-table th,
+.transfer-table td {
+  padding: 4px 6px 4px 0;
+  border-bottom: 1px solid var(--hair);
+  text-align: left;
+  vertical-align: baseline;
+}
+
+.transfer-table thead th {
+  border-bottom: 1px solid var(--ink);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.transfer-table tbody th {
+  font-weight: 600;
+}
+
+.transfer-table .num {
+  text-align: right;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.transfer-table th.num {
+  font-family: var(--sans);
+}
+
+/* ── Your model ── */
+
+.model-yours {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.model-name input {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  border-bottom: 2px solid var(--ink);
+  border-radius: 0;
+  background: transparent;
+  padding: 3px 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.model-choice {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 2px solid var(--ink);
+  background: var(--surface);
+}
+
+.model-choice-text {
+  margin: 0;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.model-subsub {
+  margin: 6px 0 0;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.saved-empty {
+  font-size: 12.5px;
+}
+
+.visually-hidden {
+  position: absolute !important;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* The best of the three conditions in each row: bold, not coloured (red marks state only). */
+.transfer-table td.num.is-best {
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.transfer-table td.num {
+  color: var(--ink-2);
+}
+
+/* The follow-up action after a transfer (e.g. "Unfreeze Dense 3"). */
+.model-status-action[hidden] {
+  display: none;
+}
+
+.model-status-action {
+  margin-top: -4px;
+}
+
+/* The headline measurement, under the explanation. */
+.model-measured {
+  display: grid;
+  gap: 6px;
+  padding-left: 10px;
+  border-left: 2px solid var(--hair);
+  color: var(--ink-2);
+  font-size: 13px;
+}
+
+.transfer-details {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.transfer-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 14px;
+  min-width: 0;
+}
+
+.transfer-details > summary {
+  cursor: pointer;
+  width: max-content;
+  max-width: 100%;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink);
+  list-style-position: outside;
+  margin-left: 14px;
+}
+
+.transfer-details > summary:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 3px;
+}
+
+.transfer-details[open] > summary {
+  margin-bottom: 8px;
+}
+
+.transfer-details .hint {
+  font-size: 12px;
+}
+
+/* A pair of datasets heads its group of rows. */
+.transfer-table .transfer-group th {
+  padding-top: 8px;
+  border-bottom: 0;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.transfer-table tbody th.num {
+  font-family: var(--mono);
+  font-weight: 400;
+  text-align: left;
+  color: var(--ink-2);
+}
+
+/* The row quoted in the headline above. */
+.transfer-table tr.is-current th.num {
+  box-shadow: inset 2px 0 0 var(--ink);
+  padding-left: 6px;
+  color: var(--ink);
+}
+
+/* Column heads may wrap ("Conv / frozen") so the table fits a phone-width column. */
+.transfer-table thead th.num {
+  white-space: normal;
+  vertical-align: bottom;
+  letter-spacing: 0.05em;
+}
+
+.transfer-table th:last-child,
+.transfer-table td:last-child {
+  padding-right: 0;
+}
