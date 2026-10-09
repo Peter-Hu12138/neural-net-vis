@@ -1,0 +1,251 @@
+/* Section 07 Data (src/ui/dataPanel.ts). */
+
+/* Mistakes in the test grid: red frame and red true→predicted tag. */
+.sample-grid .thumb.is-wrong {
+  border-color: var(--accent);
+}
+
+.thumb-label.is-wrong {
+  color: var(--accent);
+}
+
+/* Glyph → class name key for datasets with named classes. */
+.dp-key {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 2px 16px;
+  margin: 12px 0 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--hair);
+  font-size: 12.5px;
+}
+
+.dp-key div {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  min-width: 0;
+}
+
+.dp-key dt {
+  font: 600 12px var(--mono);
+}
+
+.dp-key dd {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dp-upload-actions {
+  display: grid;
+  gap: 6px;
+}
+
+.upload-meta .field {
+  max-width: 200px;
+}
+
+/* ── Point datasets ── */
+
+.dp-plots {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px 16px;
+  min-width: 0;
+  max-width: 640px;
+}
+
+.dp-panel {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.dp-plot {
+  display: block;
+  cursor: default;
+}
+
+.dp-plot-title {
+  margin: 0;
+  font-size: 13px;
+}
+
+.dp-plot-stat {
+  margin: 0;
+  font: 500 11.5px var(--mono);
+  color: var(--muted);
+}
+
+.dp-plot-note {
+  margin-top: 12px;
+}
+
+/* A small red ring, as drawn around misclassified points. */
+.dp-ring {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border: 1.5px solid var(--accent);
+  border-radius: 50%;
+  vertical-align: -1px;
+}
+
+.dp-side {
+  display: grid;
+  gap: 22px;
+  align-content: start;
+  min-width: 0;
+}
+
+.dp-caption {
+  margin: 0 0 6px;
+  font: 500 12px var(--mono);
+  color: var(--muted);
+}
+
+.dp-vec,
+.dp-counts {
+  border-collapse: collapse;
+  width: 100%;
+  max-width: 360px;
+  font-size: 13px;
+}
+
+.dp-vec th,
+.dp-vec td,
+.dp-counts th,
+.dp-counts td {
+  padding: 3px 8px 3px 0;
+  border-bottom: 1px solid var(--hair);
+  text-align: left;
+  font-weight: 400;
+}
+
+.dp-vec th[scope='colgroup'] {
+  padding-top: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border-bottom: 1px solid var(--ink);
+}
+
+.dp-vec tr:first-child th[scope='colgroup'] {
+  padding-top: 0;
+}
+
+.dp-vec th[scope='row'] {
+  width: 64px;
+  font-family: var(--mono);
+}
+
+.dp-vec td.num,
+.dp-counts .num {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.dp-vec td.num {
+  width: 64px;
+}
+
+.dp-vec sub,
+.dp-vec sup,
+.dp-plot-title sub,
+.dp-plot-title sup {
+  font-size: 0.72em;
+  line-height: 0;
+}
+
+/* A value in [−1, 1] as a bar from the middle: red right for positive, blue left for negative. */
+.dp-bar {
+  position: relative;
+  display: block;
+  height: 10px;
+  min-width: 80px;
+  background: linear-gradient(var(--hair), var(--hair)) 50% 0 / 1px 100% no-repeat;
+}
+
+.dp-bar i {
+  position: absolute;
+  top: 1px;
+  bottom: 1px;
+}
+
+.dp-bar i.is-pos {
+  background: var(--accent);
+}
+
+.dp-bar i.is-neg {
+  background: var(--neg);
+}
+
+.dp-counts thead th {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border-bottom: 1px solid var(--ink);
+}
+
+.dp-counts thead th.num {
+  text-align: right;
+}
+
+.dp-counts .dp-total th,
+.dp-counts .dp-total td {
+  font-weight: 700;
+  border-bottom: 0;
+}
+
+.dp-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-right: 8px;
+  vertical-align: -1px;
+}
+
+.dp-custom {
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0;
+  display: grid;
+  max-width: 480px;
+  border-top: 1px solid var(--ink);
+}
+
+.dp-custom:empty {
+  border-top: 0;
+}
+
+.dp-custom li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--hair);
+  font-size: 13px;
+}
+
+.dp-custom .dp-swatch {
+  margin-right: 0;
+}
+
+/* The class, then the coordinates, which move to a second line as a whole on a narrow screen. */
+.dp-custom-text {
+  min-width: 0;
+}
+
+.dp-custom-text .mono {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
