@@ -268,7 +268,9 @@ export function mountBuilder(): void {
       h(
         'p',
         { class: 'hint builder-note' },
-        'Convolutions use 3×3 or 5×5 kernels, stride 1 and same padding. Editing the architecture resets the training history. A frozen layer keeps its weights while the others train.',
+        pointsData
+          ? 'Each dense layer connects every input feature or unit to every unit of the next. Editing the architecture resets the training history. A frozen layer keeps its weights while the others train.'
+          : 'Convolutions use 3×3 or 5×5 kernels, stride 1 and same padding. Editing the architecture resets the training history. A frozen layer keeps its weights while the others train.',
       ),
     );
 

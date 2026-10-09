@@ -18,7 +18,7 @@ type Source = 'zoo' | 'file' | 'browser';
 type Origin =
   | { kind: 'random' }
   | { kind: 'pretrained'; name: string; acc?: number; source: Source; label: string }
-  | { kind: 'transfer'; name: string; from: DatasetId; copied: boolean[]; source: Source; label: string };
+  | { kind: 'transfer'; name: string; from: DatasetId; to: string; copied: boolean[]; source: Source; label: string };
 
 interface Provenance {
   origin: Origin;
@@ -143,7 +143,7 @@ export function mountModelPanel(): void {
         const nCopied = copied.filter(Boolean).length;
         const state = nFrozen === nCopied ? 'frozen' : nFrozen === 0 ? 'unfrozen' : 'partly frozen';
         const where = o.source === 'zoo' ? o.name : o.source === 'file' ? `${o.name} (file ${o.label})` : `${o.name} (saved in this browser)`;
-        return `${copiedWords(store.net, copied)} transferred from ${where}, ${state}; new output layer for ${store.info.name}`;
+        return `${copiedWords(store.net, copied)} transferred from ${where}, ${state}; new output layer for ${o.to}`;
       }
     }
   };
@@ -208,12 +208,12 @@ export function mountModelPanel(): void {
         await loadModel(json);
         const o = origin();
         settle({ kind: 'pretrained', name: file.name, acc: file.meta?.testAccuracy, source: o.source, label: o.label });
-        say(`Loaded ${file.name}: its architecture and weights, on ${store.info.name}. The test accuracy below is measured on this page's test ${noun(store.info, 2)}.`);
+        say(`Loaded ${file.name}, architecture and weights, on ${store.info.name}.`);
       } else {
         transferModel(json);
         const o = origin();
         const copied = store.net.blocks.map((_, i) => i < store.net.blocks.length - 1);
-        settle({ kind: 'transfer', name: file.name, from: file.dataset, copied, source: o.source, label: o.label });
+        settle({ kind: 'transfer', name: file.name, from: file.dataset, to: store.info.name, copied, source: o.source, label: o.label });
         say(`Transferred ${file.name} to ${store.info.name}. Its hidden layers are frozen; press Train to fit the new output layer.`);
       }
     } catch (e) {
@@ -245,7 +245,19 @@ export function mountModelPanel(): void {
   const transferBlock = (input: Shape): string | null =>
     sameShape(input, store.input) ? null : `Needs ${shapeWords(input)} input`;
 
+  /** Re-renders replace the buttons; keep keyboard focus on the one that was in use. */
+  const keepFocus = (fn: () => void) => {
+    const a = document.activeElement;
+    const id = a instanceof HTMLElement && root.contains(a) ? a.id : '';
+    fn();
+    if (id && document.activeElement !== a) document.getElementById(id)?.focus();
+  };
+
   function renderZoo(): void {
+    keepFocus(drawZoo);
+  }
+
+  function drawZoo(): void {
     clear(zooList);
     clear(zooStatus);
     if (zooError) {
@@ -264,13 +276,14 @@ export function mountModelPanel(): void {
       const fetching = busy === e.id;
       const load = h(
         'button',
-        { type: 'button', class: 'btn btn-sm', 'aria-label': `Load ${e.name}`, title: `Switch to ${datasetName(e.dataset)} and use this network as it is`, disabled: !!busy, onclick: () => void fromZoo(e, 'load') },
+        { type: 'button', id: `zoo-load-${e.id}`, class: 'btn btn-sm', 'aria-label': `Load ${e.name}`, title: `Switch to ${datasetName(e.dataset)} and use this network as it is`, disabled: !!busy, onclick: () => void fromZoo(e, 'load') },
         'Load',
       );
       const tr = h(
         'button',
         {
           type: 'button',
+          id: `zoo-transfer-${e.id}`,
           class: 'btn btn-sm',
           'aria-label': `Transfer ${e.name} to ${store.info.name}`,
           title: why ?? `Copy its hidden layers into a network for ${store.info.name}, frozen, with a new output layer`,
@@ -347,14 +360,16 @@ export function mountModelPanel(): void {
     );
     const rows = transfer?.rows ?? [];
     if (!rows.length) return;
-    const name = (id: string) => zoo?.find((z) => z.id === id)?.name ?? id;
+    const SHORT: Record<string, string> = { mnist: 'MNIST', fashion: 'Fashion', cifar10: 'CIFAR-10' };
+    const short = (id: string) => SHORT[id] ?? datasetName(id as DatasetId);
+    const sourceSet = (id: string) => zoo?.find((z) => z.id === id)?.dataset ?? id;
     const table = h(
       'table',
       { class: 'transfer-table' },
       h(
         'caption',
         null,
-        `Measured: test accuracy after training on only the first N training images (mean of ${transfer!.seeds} runs, ${int(10000)} official test images).`,
+        `Measured test accuracy after training on only the first N images (mean of ${transfer!.seeds} runs, tested on ${int(10000)} official test images). Frozen is what Transfer does; fine-tuned unfreezes every layer halfway through.`,
       ),
       h(
         'thead',
@@ -362,27 +377,21 @@ export function mountModelPanel(): void {
         h(
           'tr',
           null,
-          h('th', { scope: 'col' }, 'Task'),
+          h('th', { scope: 'col' }, 'From → to'),
           h('th', { scope: 'col', class: 'num' }, 'N'),
           h('th', { scope: 'col', class: 'num' }, 'Scratch'),
-          h('th', { scope: 'col', class: 'num', title: 'All copied layers frozen, new output layer trained (what Transfer does)' }, 'Frozen'),
-          h('th', { scope: 'col', class: 'num', title: 'Frozen first, then every layer trained at a lower rate' }, 'Fine-tuned'),
+          h('th', { scope: 'col', class: 'num', title: 'Copied layers frozen; only the new output layer trains' }, 'Frozen'),
+          h('th', { scope: 'col', class: 'num', title: 'Frozen for half the epochs, then every layer trains at a lower rate' }, 'Fine-tuned'),
         ),
       ),
       h(
         'tbody',
         null,
-        ...rows.map((r) =>
-          h(
-            'tr',
-            null,
-            h('th', { scope: 'row' }, `${name(r.from)} → ${datasetName(r.to)}`),
-            h('td', { class: 'num' }, int(r.train)),
-            h('td', { class: 'num' }, pct(r.scratch.mean)),
-            h('td', { class: 'num' }, pct(r.frozen.mean)),
-            h('td', { class: 'num' }, pct(r.fineTune.mean)),
-          ),
-        ),
+        ...rows.map((r) => {
+          const best = Math.max(r.scratch.mean, r.frozen.mean, r.fineTune.mean);
+          const cell = (v: number) => h('td', { class: `num${v === best ? ' is-best' : ''}` }, pct(v));
+          return h('tr', null, h('th', { scope: 'row' }, `${short(sourceSet(r.from))} → ${short(r.to)}`), h('td', { class: 'num' }, int(r.train)), cell(r.scratch.mean), cell(r.frozen.mean), cell(r.fineTune.mean));
+        }),
       ),
     );
     explain.append(h('div', { class: 'transfer-wrap' }, table), h('p', { class: 'hint' }, takeaway(rows)));
@@ -499,6 +508,10 @@ export function mountModelPanel(): void {
   const choice = h('div', { class: 'model-choice' });
 
   function renderSaved(): void {
+    keepFocus(drawSaved);
+  }
+
+  function drawSaved(): void {
     clear(savedList);
     const list = readSaved();
     savedEmpty.textContent = list.length ? '' : 'Nothing saved in this browser yet.';
@@ -510,6 +523,7 @@ export function mountModelPanel(): void {
         'button',
         {
           type: 'button',
+          id: `saved-delete-${e.id}`,
           class: `btn btn-sm${isArmed ? ' is-armed' : ''}`,
           'aria-label': isArmed ? `Confirm: delete ${e.name}` : `Delete ${e.name}`,
           disabled: !!busy,
@@ -522,7 +536,6 @@ export function mountModelPanel(): void {
               renderSaved();
             }, 4000);
             renderSaved();
-            savedList.querySelector<HTMLElement>(`[data-saved="${e.id}"] .is-armed`)?.focus();
           },
         },
         isArmed ? 'Sure?' : 'Delete',
@@ -540,10 +553,10 @@ export function mountModelPanel(): void {
           h(
             'div',
             { class: 'zoo-actions' },
-            h('button', { type: 'button', class: 'btn btn-sm', 'aria-label': `Load ${e.name}`, disabled: !!busy, onclick: () => void apply(e.id, 'load', getSaved(e), () => ({ source: 'browser', label: e.name })) }, 'Load'),
+            h('button', { type: 'button', id: `saved-load-${e.id}`, class: 'btn btn-sm', 'aria-label': `Load ${e.name}`, disabled: !!busy, onclick: () => void apply(e.id, 'load', getSaved(e), () => ({ source: 'browser', label: e.name })) }, 'Load'),
             h(
               'button',
-              { type: 'button', class: 'btn btn-sm', 'aria-label': `Transfer ${e.name} to ${store.info.name}`, title: why ?? undefined, disabled: !!busy || !!why, onclick: () => void apply(e.id, 'transfer', getSaved(e), () => ({ source: 'browser', label: e.name })) },
+              { type: 'button', id: `saved-transfer-${e.id}`, class: 'btn btn-sm', 'aria-label': `Transfer ${e.name} to ${store.info.name}`, title: why ?? undefined, disabled: !!busy || !!why, onclick: () => void apply(e.id, 'transfer', getSaved(e), () => ({ source: 'browser', label: e.name })) },
               'Transfer',
             ),
             del,
