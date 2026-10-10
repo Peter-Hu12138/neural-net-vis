@@ -79,7 +79,7 @@ export interface AttributionResult {
   integrated: Float32Array;
   /** Colour images: the same three quantities per channel (C·H·W, channel-major). */
   channels?: { saliency: Float32Array; gradInput: Float32Array; integrated: Float32Array };
-  /** The signed gradient ∂z_t/∂x (per feature; for images only in `channels`-free form, unused). */
+  /** Point data: the signed gradient ∂z_t/∂x per feature (empty for images). */
   gradient: Float32Array;
   /** Point data with `point` given: ∂z_t/∂coordinates. */
   coordGrad?: Float32Array;
@@ -535,7 +535,7 @@ export function percentText(fraction: number): string {
 export function completenessText(r: Pick<AttributionResult, 'igSum' | 'igExpected' | 'igAbsSum'>, base = 'blank'): { sum: string; expected: string; gap: string; title: string } {
   const g = completenessGap(r.igSum, r.igExpected, r.igAbsSum);
   const ref = g.ref === 'ig' ? 'Σ|IG|' : `|z(x) ${MINUS} z(${base})|`;
-  const what = base === '0' ? 'the input with every feature at 0' : `a ${base} image`;
+  const what = base === '0' ? 'the point at the origin, where every feature is 0,' : `a ${base} image`;
   return {
     sum: `Σ IG = ${sig(r.igSum)};`,
     expected: `z(x) ${MINUS} z(${base}) = ${sig(r.igExpected)}`,
@@ -548,14 +548,16 @@ export function completenessText(r: Pick<AttributionResult, 'igSum' | 'igExpecte
 }
 
 /**
- * Saliency hint addition when the input leaves units on a kink; '' when there are none. With
- * `background` (grey images) it says where those kinks mostly are.
+ * Saliency hint addition when the input leaves units on a kink; '' when there are none. `where`
+ * says what the input is: a grey image on a blank background (the hint then says that is where
+ * the kinks mostly are), a colour image, or a point's features.
  */
-export function kinkText(k: Kinks, background = true): string {
+export function kinkText(k: Kinks, where: 'blank' | 'image' | 'features' = 'blank'): string {
   const kinds = [k.relu ? 'ReLUs at exactly 0' : '', k.pool ? 'tied max-pool windows' : ''].filter(Boolean);
   if (!kinds.length) return '';
-  const where = background ? ' (mostly the blank background)' : '';
-  return `Where the input leaves ${kinds.join(' and ')}${where}, raising and lowering ${background ? 'a pixel' : 'a value'} differ; the map shows the average slope.`;
+  const bg = where === 'blank' ? ' (mostly the blank background)' : '';
+  const move = where === 'features' ? 'raising and lowering a feature' : 'brightening and darkening a pixel';
+  return `Where the input leaves ${kinds.join(' and ')}${bg}, ${move} differ; ${where === 'features' ? 'the slopes shown are averages' : 'the map shows the average slope'}.`;
 }
 
 /**
