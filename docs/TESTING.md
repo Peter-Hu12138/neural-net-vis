@@ -4,16 +4,16 @@ Raster is checked at two levels:
 
 | Level | Tool | Command | What it covers |
 | --- | --- | --- | --- |
-| Unit | Vitest (Node) | `npm test` | Engine maths, trainer and analysis protocols, statistics, every analysis job, preprocessing, bundled data, formatting |
+| Unit | Vitest (Node) | `npm test` | Engine maths on grey, colour and feature inputs, freezing, model files and the zoo, datasets and features, decision-boundary geometry, trainer and analysis protocols, statistics, every analysis job, preprocessing, bundled data, formatting |
 | Browser | Playwright + Chromium | `npm run test:e2e` | Every user-facing feature, run against the production build, with screenshots |
-| Adversarial review | Independent reviewer agents | see section 4 | The analysis views (08–11): maths, behaviour, integration, design and code, each finding backed by a reproduction |
+| Adversarial review | Independent reviewer agents | sections 4 and 7 | The analysis views (08–11), then the datasets release: maths, behaviour, integration, design and code, each finding backed by a reproduction |
 
-Both suites were last run on the current commit: **176/176 unit tests** and **31/31 browser tests** pass.
+Both suites were last run on the complete datasets release: **294/294 unit tests** and **76/76 browser tests** pass.
 
 ```bash
 npm install
 npm test            # unit tests, ~20 s
-npm run test:e2e    # builds, serves dist/ on :4173, runs Chromium, ~7 min
+npm run test:e2e    # builds, serves dist/ on :4173, runs Chromium, ~13 min
 npm run typecheck   # strict TypeScript over src/, tests/ and e2e/
 ```
 
