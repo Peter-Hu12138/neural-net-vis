@@ -587,3 +587,135 @@ test('phone width: no horizontal overflow, panel below the map, tap to pick', as
   expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBe(0);
   await settled(page);
 });
+
+// ── Other datasets ───────────────────────────────────────────────────────
+
+/** Switches dataset through the page's actions and waits until its data is loaded. */
+async function switchTo(page: Page, id: string, fact: string) {
+  await page.evaluate((d) => (window as unknown as { raster: { actions: { setDataset(id: string): Promise<void> } } }).raster.actions.setDataset(d), id);
+  await expect(page.locator('#fact-data')).toContainText(fact, { timeout: 60_000 });
+}
+
+/** Moves the mouse over numerals until the tooltip matches `re`; returns the tooltip text. */
+async function hoverSample(page: Page, re: RegExp): Promise<string> {
+  const box = (await canvas(page).boundingBox())!;
+  for (const s of (await numeralSpots(page)).slice(0, 60)) {
+    await page.mouse.move(box.x + s.x, box.y + s.y);
+    const tip = page.locator('#tip');
+    if ((await tip.isVisible()) && re.test((await tip.textContent()) ?? '')) return (await tip.textContent())!;
+  }
+  throw new Error('no sample could be hovered');
+}
+
+test('CIFAR-10: class names as the legend, colour thumbnails, no digits anywhere', async ({ page }) => {
+  await open(page);
+  await switchTo(page, 'cifar10', 'CIFAR-10 · 10,000 train');
+  await trainUntil(page, '(window.raster.store.weightsStep ?? 0) > 40');
+  await page.locator('#embedding').scrollIntoViewIfNeeded();
+  await settled(page);
+  const names = ['airplane', 'automobile', 'bird', 'cat', 'deer', 'dog', 'frog', 'horse', 'ship', 'truck'];
+  await expect(page.locator('#note-embed')).toHaveText('How a layer arranges 1,000 test images, flattened to two dimensions with PCA or t-SNE.');
+  await expect(page.locator('#embed-layer option').first()).toHaveText('Input pixels · 3,072');
+  await expect(page.locator('#embed-layer option').last()).toHaveText('Output · 10 logits');
+  // The chips name each class beside the numeral it is drawn as: they are the legend.
+  await expect(page.locator('#embed-root .embed-aside .sub').nth(1)).toHaveText('Classes');
+  await expect(page.locator('#embed-root .embed-chip')).toHaveText(names.map((n, k) => `${k} ${n}`));
+  await expect(page.locator('#embed-digit-3')).toHaveAttribute('aria-label', 'Highlight cat (drawn as 3)');
+  await expect(page.locator('#embed-stats')).toContainText('Images 1,000 · 100 of each');
+  await expect(page.locator('#embed-stats')).toContainText('Values per image 32 at Dense 3');
+  await expect(canvas(page)).toHaveAttribute('aria-label', /^PCA map of 1,000 test images at Dense 3, each drawn as the numeral of its class/);
+  expect((await numeralSpots(page)).length).toBeGreaterThan(20);
+
+  // Hover: the image in colour, its class name and the prediction.
+  const tip = await hoverSample(page, /^Test image #\d+/);
+  expect(tip).toMatch(/^Test image #\d+ · [a-z]+ · predicted [a-z]+\nPC1 −?\d+\.\d\d · PC2 −?\d+\.\d\d$/);
+  await expect(page.locator('#embed-root .embed-aside .sub').first()).toHaveText('Hovered image');
+  await expect(page.locator('#embed-preview')).toContainText(/Label: [a-z]+/);
+  const colour = await page.locator('#embed-preview canvas').evaluate((c: HTMLCanvasElement) => {
+    const d = c.getContext('2d')!.getImageData(0, 0, c.width, c.height).data;
+    let n = 0;
+    for (let i = 0; i < d.length; i += 4) if (Math.abs(d[i] - d[i + 1]) > 12 || Math.abs(d[i] - d[i + 2]) > 12) n++;
+    return { n, width: c.getBoundingClientRect().width };
+  });
+  expect(colour.n).toBeGreaterThan(500);
+  expect(colour.width).toBe(104);
+  await page.mouse.move(5, 5);
+  await page.click('#embed-digit-3');
+  await expect(page.locator('#embed-digit-3')).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('#embed-preview')).toContainText('Test image #0');
+  await expect(page.locator('#embed-preview')).toContainText('Label: cat');
+  await shot(page, '13-embedding-cifar.png');
+  await page.click('#embed-digit-3');
+  await expect(page.locator('#embedding')).not.toContainText(/digit/i, { useInnerText: true });
+
+  // The raw photos: 3,072 values each.
+  await page.selectOption('#embed-layer', '-1');
+  await settled(page);
+  await expect(page.locator('#embed-stats')).toContainText('Values per image 3,072 at the input pixels');
+});
+
+test('point data: every test point, class chips, where each point lies in the input', async ({ page }) => {
+  await open(page);
+  await switchTo(page, 'blobs', 'Three blobs · 300 train');
+  await trainUntil(page, '(window.raster.store.weightsStep ?? 0) > 200');
+  await page.locator('#embedding').scrollIntoViewIfNeeded();
+  await settled(page);
+  const n = await raster(page, (r) => (r.store as unknown as { data: { testY: Uint8Array } }).data.testY.length);
+  expect(n).toBeLessThan(1000);
+  const nText = n.toLocaleString('en-US');
+  await expect(page.locator('#note-embed')).toHaveText(`How a layer arranges ${nText} test points, flattened to two dimensions with PCA or t-SNE.`);
+  await expect(page.locator('#embed-layer option')).toHaveText(['Input features · 2', 'Dense 1 · 8', 'Dense 2 · 8', 'Output · 3 logits']);
+  await expect(page.locator('#embed-root .embed-chip')).toHaveText(['Class 0', 'Class 1', 'Class 2']);
+  await expect(page.locator('#embed-stats')).toContainText(new RegExp(`Points ${nText} · (\\d+ of each|every test point)`));
+  await expect(page.locator('#embed-stats')).toContainText('Values per point 8 at Dense 2');
+  await expect(canvas(page)).toHaveAttribute('aria-label', new RegExp(`^PCA map of ${nText} test points at Dense 2`));
+  expect((await numeralSpots(page)).length).toBeGreaterThan(20);
+
+  // The legend's input cross is drawn like the one on the map: halo, ink outline, accent (UX-5).
+  const strokes = await page.locator('#embed-root .embed-cross-icon path').evaluateAll((ps) => ps.map((p) => getComputedStyle(p).stroke));
+  const tokens = await page.evaluate(() => {
+    const probe = document.createElement('i');
+    document.body.append(probe);
+    const out = ['--surface', '--ink', '--accent'].map((t) => {
+      probe.style.color = `var(${t})`;
+      return getComputedStyle(probe).color;
+    });
+    probe.remove();
+    return out;
+  });
+  expect(strokes).toEqual(tokens);
+
+  // Hover: the point's class, the prediction and where it lies in the input plane.
+  const tip = await hoverSample(page, /^Test point #\d+/);
+  expect(tip).toMatch(/^Test point #\d+ · Class \d · predicted Class \d\nPC1 −?\d+\.\d\d · PC2 −?\d+\.\d\d\nAt x₁ −?\d\.\d\d · x₂ −?\d\.\d\d in the input$/);
+  await expect(page.locator('#embed-root .embed-aside .sub').first()).toHaveText('Hovered point');
+  await expect(page.locator('#embed-preview canvas')).toHaveAttribute('aria-label', /^Where the hovered point lies in the input: x₁ −?\d\.\d\d, x₂ −?\d\.\d\d$/);
+  const index = Number(tip.match(/#(\d+)/)![1]);
+  await page.mouse.down();
+  await page.mouse.up();
+  await expect.poll(() => raster(page, (r) => r.store.probe?.key)).toBe(`test:${index}`);
+  await page.mouse.move(5, 5);
+  await expect(page.locator('#embed-preview')).toContainText(`Test point #${index}`);
+  await expect(page.locator('#embed-preview')).toContainText('Marked on the map with a red cross');
+  await shot(page, '13-embedding-points.png');
+
+  // The input layer of 2-D points: PCA only turns the plane, so it shows all of the variance.
+  await page.selectOption('#embed-layer', '-1');
+  await settled(page);
+  await expect(page.locator('#embed-stats')).toContainText('Values per point 2 at the input features');
+  await expect(page.locator('#embed-stats')).toContainText('Variance shown 100.0%');
+
+  // t-SNE on every test point, in the dark.
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await page.selectOption('#embed-layer', '1');
+  await settled(page);
+  await page.click('#embed-method-tsne');
+  await expect(page.locator('#embed-run-text')).toHaveText(/^Iteration \d+ \/ 500 · KL \d+\.\d\d$/, { timeout: 30_000 });
+  await settled(page);
+  await expect(canvas(page)).toHaveAttribute('aria-label', new RegExp(`^t-SNE map of ${nText} test points at Dense 2`));
+  await expect(page.locator('#embed-stats')).toContainText('Perplexity 30');
+  await expect(page.locator('#embed-root .embed-hints')).toContainText('t-SNE moves the points around');
+  await expect(page.locator('#embedding')).not.toContainText(/digit/i, { useInnerText: true });
+  await shot(page, '13-embedding-points-dark.png');
+  await page.emulateMedia({ colorScheme: 'light' });
+});

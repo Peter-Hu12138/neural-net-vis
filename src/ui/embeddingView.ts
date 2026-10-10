@@ -350,6 +350,8 @@ export function mountEmbedding(): void {
         },
         h('span', { class: 'embed-swatch', style: { background: `var(--cat-${d % 10})` } }),
         label ?? h('span', { class: 'embed-chip-glyph' }, g),
+        // A space for the text ("0 airplane"); the flex gap does the spacing on screen.
+        label ? null : ' ',
         label ? null : h('span', { class: 'embed-chip-name' }, name),
       ) as HTMLButtonElement;
       b.addEventListener('click', () => {
