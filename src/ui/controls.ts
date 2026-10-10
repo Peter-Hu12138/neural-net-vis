@@ -6,7 +6,7 @@ import { $, h, int, pct, selectField } from './dom';
 import './controls.css';
 
 const LRS = [0.0001, 0.0003, 0.001, 0.003, 0.01, 0.03, 0.1, 0.3];
-const BATCHES = [1, 8, 16, 32, 64, 128];
+const BATCHES = [1, 8, 10, 16, 32, 64, 128];
 const OPTIMIZERS: { value: 'sgd' | 'momentum' | 'adam'; label: string }[] = [
   { value: 'sgd', label: 'SGD' },
   { value: 'momentum', label: 'Momentum' },
