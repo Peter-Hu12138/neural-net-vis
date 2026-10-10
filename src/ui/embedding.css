@@ -1,0 +1,46 @@
+/* ── 11 Embedding: class names and the current-input mark ──────────────────
+   Loaded after embeddingView.css. With class names (Fashion-MNIST, CIFAR-10, points) the chips
+   read "■ 0 airplane" and double as the legend of the map. Colours come from the theme tokens. */
+
+.embed-chip.embed-chip-named {
+  min-width: 0;
+  padding: 0 9px;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.embed-chip-glyph {
+  font-weight: 700;
+}
+
+.embed-chip-name {
+  font-weight: 500;
+  font-size: 12px;
+}
+
+/* The legend's current-input cross, drawn like the one on the map: a surface halo, a 1 px ink
+   outline and the accent stroke, so it is told apart from a class colour by its shape. */
+.embed-cross-icon {
+  display: inline-block;
+  flex: none;
+  width: 20px;
+  height: 20px;
+  overflow: visible;
+}
+
+.embed-cross-icon .is-halo {
+  stroke: var(--surface);
+}
+
+.embed-cross-icon .is-outline {
+  stroke: var(--ink);
+}
+
+.embed-cross-icon .is-mark {
+  stroke: var(--accent);
+}
+
+/* Point data: the preview shows where the point lies in the input plane. */
+.embed-preview-img {
+  background: var(--surface);
+}
