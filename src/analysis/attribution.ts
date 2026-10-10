@@ -530,12 +530,12 @@ export function percentText(fraction: number): string {
 /**
  * The completeness line under the integrated-gradients map, in three clauses the view may wrap
  * between: "Σ IG = 8.39;" "z(x) − z(blank) = 8.43" "(off by 0.0389, 0.3% of Σ|IG|)". `base` names
- * the all-zero input: "blank" for grey images, "black" for colour ones, "0" for features.
+ * the all-zero input: "blank" for grey images, "black" for colour ones, "origin" for point features.
  */
 export function completenessText(r: Pick<AttributionResult, 'igSum' | 'igExpected' | 'igAbsSum'>, base = 'blank'): { sum: string; expected: string; gap: string; title: string } {
   const g = completenessGap(r.igSum, r.igExpected, r.igAbsSum);
   const ref = g.ref === 'ig' ? 'Σ|IG|' : `|z(x) ${MINUS} z(${base})|`;
-  const what = base === '0' ? 'the point at the origin, where every feature is 0,' : `a ${base} image`;
+  const what = base === 'origin' ? 'the point at the origin, where every feature is 0,' : `a ${base} image`;
   return {
     sum: `Σ IG = ${sig(r.igSum)};`,
     expected: `z(x) ${MINUS} z(${base}) = ${sig(r.igExpected)}`,
@@ -543,7 +543,7 @@ export function completenessText(r: Pick<AttributionResult, 'igSum' | 'igExpecte
     title:
       `Completeness: integrated gradients should add up to the change in the score from ${what} to this one. ` +
       `Σ IG = ${exact(r.igSum)}, z(x) ${MINUS} z(${base}) = ${exact(r.igExpected)}, Σ|IG| = ${exact(r.igAbsSum)}. ` +
-      `The gap is measured against Σ|IG|, the total size of all the ${base === '0' ? 'feature' : 'pixel'} attributions, so it stays meaningful when positive and negative attributions cancel out.`,
+      `The gap is measured against Σ|IG|, the total size of all the ${base === 'origin' ? 'feature' : 'pixel'} attributions, so it stays meaningful when positive and negative attributions cancel out.`,
   };
 }
 
@@ -564,18 +564,28 @@ export function kinkText(k: Kinks, where: 'blank' | 'image' | 'features' = 'blan
  * The integrated gradients of a point's features in words: which feature pushes the score for
  * `target` up the most, and which pushes it down. A feature counts when its share of Σ|IG| is at
  * least 5%. Values carry their sign (+0.82, −0.31).
+ *
+ * Integrated gradients measure from the origin, so with `change` (z(x) − z(origin)) the sentence
+ * starts there: a point deep inside a class can still score lower than the origin does, and then
+ * every feature "pushes away" although the class is predicted.
  */
-export function featureSentence(labels: string[], ig: ArrayLike<number>, target: string): string {
+export function featureSentence(labels: string[], ig: ArrayLike<number>, target: string, change?: number): string {
   let total = 0;
   for (let f = 0; f < labels.length; f++) total += Math.abs(ig[f]);
   const order = labels.map((_, f) => f).sort((a, b) => Math.abs(ig[b]) - Math.abs(ig[a]));
   const counts = (f: number) => total > 1e-6 && Math.abs(ig[f]) >= 0.05 * total && Math.abs(ig[f]) >= 1e-4;
   const up = order.find((f) => ig[f] > 0 && counts(f));
   const down = order.find((f) => ig[f] < 0 && counts(f));
-  if (up === undefined && down === undefined) return `No feature moves the score for ${target} much at this point.`;
+  const from =
+    change === undefined || !Number.isFinite(change)
+      ? ''
+      : Math.abs(change) < 1e-3
+        ? `From the origin to this point, the score for ${target} stays about the same. `
+        : `From the origin to this point, the score for ${target} ${change > 0 ? 'rises' : 'falls'} by ${sig(Math.abs(change))}. `;
+  if (up === undefined && down === undefined) return `${from}No feature moves the score for ${target} much at this point.`;
   const v = (f: number) => sig(ig[f], true);
-  if (up === undefined) return `Every feature that matters pushes away from ${target} here; ${labels[down!]} the most (${v(down!)}).`;
-  const first = `${labels[up]} pushes toward ${target} the most (${v(up)}).`;
+  if (up === undefined) return `${from}Every feature that matters pushes away from ${target} here; ${labels[down!]} the most (${v(down!)}).`;
+  const first = `${from}${labels[up]} pushes toward ${target} the most (${v(up)}).`;
   if (down === undefined) return first;
   return `${first} ${labels[down]} pushes away from it (${v(down)}).`;
 }

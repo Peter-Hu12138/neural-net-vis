@@ -807,7 +807,7 @@ describe('point features', () => {
       expect(r.baseLogit).toBeCloseTo(logitAt(net, [0, 0], 2, ids, 0), 6);
       expect(Math.abs(r.igSum - r.igExpected), ids.join()).toBeLessThan(0.002 * Math.max(1, r.igAbsSum));
     }
-    const text = completenessText({ igSum: 0.5, igExpected: 0.5, igAbsSum: 0.9 }, '0').title;
+    const text = completenessText({ igSum: 0.5, igExpected: 0.5, igAbsSum: 0.9 }, 'origin').title;
     expect(text).toContain('from the point at the origin, where every feature is 0, to this one');
     expect(text).toContain('all the feature attributions');
   });
@@ -847,5 +847,11 @@ describe('point features', () => {
     expect(featureSentence(labels, [0, 0, 0], 'Class 1')).toBe('No feature moves the score for Class 1 much at this point.');
     // a feature with under 5% of the total does not count
     expect(featureSentence(labels, [1, -0.04, 0], 'Class 1')).toBe('x₁ pushes toward Class 1 the most (+1).');
+    // Measured from the origin: a predicted class can still score lower here than there.
+    expect(featureSentence(labels, [-1.24, -3.3, 0], 'Class 0', -4.05)).toBe(
+      'From the origin to this point, the score for Class 0 falls by 4.05. Every feature that matters pushes away from Class 0 here; x₂ the most (−3.3).',
+    );
+    expect(featureSentence(labels, [0.5, 0, 0], 'Class 1', 0.5)).toBe('From the origin to this point, the score for Class 1 rises by 0.5. x₁ pushes toward Class 1 the most (+0.5).');
+    expect(featureSentence(labels, [0, 0, 0], 'Class 1', 0)).toBe('From the origin to this point, the score for Class 1 stays about the same. No feature moves the score for Class 1 much at this point.');
   });
 });

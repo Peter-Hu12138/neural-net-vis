@@ -27,7 +27,7 @@ import { layerName } from './builder';
 import { $, append, clear, fmt, h, int, pct, segmented, selectField } from './dom';
 import { fitCanvas, paintThumb } from './draw';
 import { isCurrent, syncedSection, type Stamp } from './snapshot';
-import { onThemeChange, palette } from './theme';
+import { onThemeChange, palette, type Palette } from './theme';
 import { hideTip, showTip } from './tip';
 
 /**
@@ -103,6 +103,35 @@ interface BaseKey {
   width: number;
   height: number;
   theme: number;
+}
+
+/**
+ * The current-input cross, shared by 10 and 11: four arms around (x, y), drawn as a 2 px surface
+ * halo, then a 1 px ink outline, then the 2 px accent stroke, so it reads by shape on any colour,
+ * including class colours close to the accent (UX-5). Arms run from `gap` to `arm` px out.
+ */
+export function drawInputCross(ctx: CanvasRenderingContext2D, x: number, y: number, p: Palette, arm = 12, gap = 4): void {
+  const layer = (colour: string, width: number, extra: number) => {
+    ctx.strokeStyle = colour;
+    ctx.lineWidth = width;
+    ctx.beginPath();
+    for (const [dx, dy] of [
+      [-1, 0],
+      [1, 0],
+      [0, -1],
+      [0, 1],
+    ]) {
+      ctx.moveTo(x + dx * (gap - extra), y + dy * (gap - extra));
+      ctx.lineTo(x + dx * (arm + extra), y + dy * (arm + extra));
+    }
+    ctx.stroke();
+  };
+  ctx.save();
+  ctx.lineCap = 'butt';
+  layer(p.surface, 8, 3); // the ink outline plus 2 px on every side, ends included
+  layer(p.ink, 4, 1); // 1 px around the accent stroke
+  layer(p.accent, 2, 0);
+  ctx.restore();
 }
 
 let catCache: string[] | null = null;
