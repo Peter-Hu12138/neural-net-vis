@@ -83,9 +83,12 @@ const notes = () => {
   $('note-attr').textContent = pts
     ? 'Which input features drive the prediction for the current point, measured several ways.'
     : 'Which pixels drive the prediction for the current input, measured four different ways.';
-  $('note-embed').textContent = `How a layer arranges 1,000 test ${many}, flattened to two dimensions with PCA or t-SNE.`;
+  // Section 11 maps every test point when there are fewer than 1,000.
+  const n = store.data ? Math.min(1000, store.data.testY.length) : 1000;
+  $('note-embed').textContent = `How a layer arranges ${pts && !store.data ? 'the test points' : `${int(n)} test ${noun(info, n)}`}, flattened to two dimensions with PCA or t-SNE.`;
 };
 store.on('dataset', notes);
+store.on('data', notes);
 notes();
 store.on('data', dataFact);
 
