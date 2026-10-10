@@ -50,6 +50,23 @@
   grid-template-columns: minmax(0, 1fr);
 }
 
+/* Out-of-date results fade like the image maps do, after the same 200 ms. */
+.attr-pts {
+  transition: opacity 120ms ease;
+}
+
+.attr-panels.is-stale .attr-pts {
+  opacity: 0.35;
+  transition: opacity 200ms ease 200ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .attr-pts,
+  .attr-panels.is-stale .attr-pts {
+    transition-duration: 0s;
+  }
+}
+
 .attr-pts {
   display: grid;
   grid-template-columns: minmax(220px, 300px) minmax(0, 1fr);

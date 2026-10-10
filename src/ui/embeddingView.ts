@@ -55,12 +55,12 @@ const SVG = 'http://www.w3.org/2000/svg';
 /** The current-input cross as a small inline SVG for legends, drawn like drawInputCross. */
 export function crossIcon(cls = 'embed-cross-icon'): SVGSVGElement {
   const svg = document.createElementNS(SVG, 'svg');
-  svg.setAttribute('viewBox', '-15 -15 30 30');
+  svg.setAttribute('viewBox', '-17 -17 34 34');
   svg.setAttribute('class', cls);
   svg.setAttribute('aria-hidden', 'true');
   const arms = (extra: number) => {
-    const a = 4 - extra;
-    const b = 11 + extra;
+    const a = 5 - extra;
+    const b = 13 + extra;
     return `M${-b} 0H${-a}M${a} 0H${b}M0 ${-b}V${-a}M0 ${a}V${b}`;
   };
   for (const [cls2, width, extra] of [
@@ -143,9 +143,10 @@ interface BaseKey {
 /**
  * The current-input cross, shared by 10 and 11: four arms around (x, y), drawn as a 2 px surface
  * halo, then a 1 px ink outline, then the 2 px accent stroke, so it reads by shape on any colour,
- * including class colours close to the accent (UX-5). Arms run from `gap` to `arm` px out.
+ * including class colours close to the accent (UX-5). Arms run from `gap` to `arm` px out; the
+ * default gap leaves the numeral at the centre (the marked sample itself) readable.
  */
-export function drawInputCross(ctx: CanvasRenderingContext2D, x: number, y: number, p: Palette, arm = 12, gap = 4): void {
+export function drawInputCross(ctx: CanvasRenderingContext2D, x: number, y: number, p: Palette, arm = 14, gap = 6): void {
   const layer = (colour: string, width: number, extra: number) => {
     ctx.strokeStyle = colour;
     ctx.lineWidth = width;
