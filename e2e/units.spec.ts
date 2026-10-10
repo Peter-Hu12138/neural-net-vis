@@ -79,7 +79,7 @@ test('top digits, detail panel and synthesised inputs for each layer', async ({ 
 
   // Conv 1 (the selected layer) has 8 filters; each card shows 9 receptive-field crops (3×3 px).
   await scanned(page, 8);
-  await expect(page.locator('#units-root .units-key')).toHaveText(
+  await expect(page.locator('#units-root .units-key')).toContainText(
     'Each card: the 3×3 patches of the 9 test digits that excite the filter most (left), and an input synthesised from blank to excite it (right).',
   );
   const crop = await page.locator('#units-root .units-card .units-mosaic canvas').first().evaluate((c: HTMLCanvasElement) => [c.width, c.height]);
@@ -276,7 +276,7 @@ test('deep conv stacks: fields are clipped to the 28×28 image in text and crops
   // Crops are the whole 28×28 digit, never a 38×38 canvas with blank margins.
   const widths = await page.locator('#units-root .units-card .units-mosaic canvas').evaluateAll((cs) => cs.map((c) => (c as HTMLCanvasElement).width));
   expect(new Set(widths)).toEqual(new Set([28]));
-  await expect(page.locator('#units-root .units-key')).toHaveText(
+  await expect(page.locator('#units-root .units-key')).toContainText(
     'Each card: the 9 test digits that excite the filter most (left), and an input synthesised from blank to excite it (right).',
   );
   await cards(page).first().click();
@@ -392,4 +392,243 @@ test('phone width: no horizontal overflow, detail below the cards', async ({ pag
   expect(detail!.y).toBeGreaterThan(grid!.y + grid!.height - 1);
   expect((await status(page).boundingBox())!.height).toBeLessThanOrEqual(30);
   await shot(page, '11-units-phone.png');
+});
+
+// ── Dead units, other datasets ───────────────────────────────────────────
+
+type Page2 = { raster: { store: { net: { getWeights(): Float32Array[] } }; actions: { applyWeights(w: Float32Array[]): void; setDataset(id: string): Promise<void>; setSpec(spec: unknown[]): void } } };
+
+/** Switches dataset through the page's actions and waits until its data is loaded. */
+async function switchTo(page: Page, id: string, fact: string) {
+  await page.evaluate((d) => (window as unknown as Page2).raster.actions.setDataset(d), id);
+  await expect(page.locator('#fact-data')).toContainText(fact, { timeout: 60_000 });
+}
+
+/** How many of the canvases matching `sel` show colour (a pixel whose channels differ), not grey. */
+const colourful = (page: Page, sel: string) =>
+  page.locator(sel).evaluateAll((cs) =>
+    cs.filter((c) => {
+      const el = c as HTMLCanvasElement;
+      if (!el.width || !el.height) return false;
+      const d = el.getContext('2d')!.getImageData(0, 0, el.width, el.height).data;
+      for (let i = 0; i < d.length; i += 4) if (Math.abs(d[i] - d[i + 1]) > 12 || Math.abs(d[i] - d[i + 2]) > 12) return true;
+      return false;
+    }).length,
+  );
+
+test('a unit that never fires says so, and shows the digits closest to firing (NEW-2)', async ({ page }) => {
+  await open(page);
+  await page.locator('#units').scrollIntoViewIfNeeded();
+  await page.selectOption('#units-layer', '2');
+  await scanned(page, 32);
+  // Push Dense 3's first unit's bias far below anything its inputs reach (as "Apply to network" in 06 would change weights).
+  await page.evaluate(() => {
+    const r = (window as unknown as Page2).raster;
+    const ws = r.store.net.getWeights();
+    ws[2 * 2 + 1][0] = -1000;
+    r.actions.applyWeights(ws);
+  });
+  const first = cards(page).first();
+  await expect(first.locator('.units-card-foot')).toHaveText('never fires (dead)', { timeout: 60_000 });
+  await expect(first).toHaveAttribute('aria-label', 'Unit 1: never fires (dead), mean response 0.00. Show details.');
+  await expect(page.locator('#units-root .units-key')).toContainText(/(One unit never fires \(dead\); its card shows|\d+ units never fire \(dead\); their cards show) the digits closest to firing\./);
+  await first.click();
+  const detail = page.locator('#units-detail');
+  await expect(detail.locator('.units-stats')).toContainText('never fires');
+  await expect(detail.locator('.units-stats')).not.toContainText('fires on');
+  await expect(detail).toContainText('Never fires on the 2,000 test digits; digits are ranked by pre-activation instead');
+  await expect(detail.locator('.units-block > .sub').first()).toHaveText('Closest to firing · top 16');
+  await expect(detail.locator('.units-weak-title')).toHaveText('Furthest from firing · bottom 8');
+  await expect(detail).toContainText('Labels of the 50 closest to firing');
+  await expect(detail).not.toContainText('What switches it off');
+  await expect(detail).not.toContainText('Strongest responses');
+  // The current input ties with every digit, and the line says so.
+  await expect(detail.locator('.units-probe')).toContainText('0.000, the same as all 2,000 test digits.');
+
+  // 08 counts it among the dead units.
+  await page.locator('#distributions').scrollIntoViewIfNeeded();
+  await page.click('#dist-q-a');
+  const dead = page.locator('#dist-root .dist-panel').nth(2).locator('.dist-stats > span', { hasText: 'dead units' });
+  await expect(dead).toContainText(/dead units [1-9]\d* of 32/, { timeout: 30_000 });
+  expect((await dead.getAttribute('title'))!.split(': ')[1].split(', ')).toContain('1');
+});
+
+test('CIFAR-10: colour crops and thumbnails, class names, a colour synthesis', async ({ page }) => {
+  await open(page);
+  await switchTo(page, 'cifar10', 'CIFAR-10 · 10,000 train');
+  await trainUntil(page, '(window.raster.store.weightsStep ?? 0) > 40');
+  await page.locator('#units').scrollIntoViewIfNeeded();
+  await scanned(page, 8);
+  await expect(page.locator('#units-root .units-key')).toContainText(
+    'Each card: the 3×3 patches of the 9 test images that excite the filter most (left), and an input synthesised from plain grey to excite it (right).',
+  );
+  const crop = await page.locator('#units-root .units-card .units-mosaic canvas').first().evaluate((c: HTMLCanvasElement) => [c.width, c.height]);
+  expect(crop).toEqual([3, 3]);
+  expect(await colourful(page, '#units-root .units-card .units-mosaic canvas')).toBeGreaterThan(20);
+  await expect(cards(page).first().locator('.units-card-foot')).toHaveText(/^(fires at [<>]?\d+% of positions|never fires \(dead\))$/);
+
+  // Synthesise conv 1: colour patches grown from plain grey.
+  await page.click('#units-synth');
+  await expect(page.locator('#units-root .units-synth-note')).toContainText('Synthesised from the weights at step', { timeout: 90_000 });
+  await expect(page.locator('#units-root .units-card .units-synth canvas:visible')).toHaveCount(8);
+  expect(await colourful(page, '#units-root .units-card .units-synth canvas')).toBeGreaterThan(4);
+  await cards(page).nth(2).click();
+  const detail = page.locator('#units-detail');
+  await expect(detail.locator('h3')).toHaveText('Filter 3');
+  await expect(detail.locator('.units-digit')).toHaveCount(16 + 8);
+  await expect(detail.locator('.units-digit-box')).toHaveCount(16 + 8);
+  expect(await detail.locator('.units-digit canvas').first().evaluate((c: HTMLCanvasElement) => c.width)).toBe(32);
+  await expect(detail).toContainText('Click any image to make it the network’s input.');
+  await expect(detail).toContainText(/pre-activation rose from −?\d+\.\d+ on a plain grey image to −?\d+\.\d+ after 160 steps/);
+  await expect(detail.locator('.units-probe')).toContainText(/^Current input, test image #0 · [a-z]+: −?\d/);
+  await expect(detail.locator('.units-label-row')).toHaveCount(10);
+  await shot(page, '11-units-cifar.png');
+
+  // Dense: whole 32×32 colour images.
+  await page.selectOption('#units-layer', '2');
+  await scanned(page, 32);
+  expect(await page.locator('#units-root .units-card .units-mosaic canvas').first().evaluate((c: HTMLCanvasElement) => c.width)).toBe(32);
+  const foot = await page.locator('#units-root .units-card-foot').allInnerTexts();
+  expect(foot.every((t) => /^(fires on [<>]?\d+% of images|never fires \(dead\))$/.test(t)), foot.join(' | ')).toBe(true);
+
+  // Output: one card per class, named.
+  await expect(page.locator('#units-layer option').last()).toHaveText('Output · 10 logits');
+  await page.selectOption('#units-layer', '3');
+  await scanned(page, 10);
+  await expect(page.locator('#units-root .units-card-title')).toHaveText(['Airplane', 'Automobile', 'Bird', 'Cat', 'Deer', 'Dog', 'Frog', 'Horse', 'Ship', 'Truck']);
+  const predicted = await page.locator('#units-root .units-card-foot').allInnerTexts();
+  expect(predicted.every((t) => /^predicted for [<>]?\d+% of images$/.test(t)), predicted.join(' | ')).toBe(true);
+  await cards(page).nth(3).click();
+  await expect(detail.locator('h3')).toHaveText('Cat');
+  await expect(detail).toContainText('the logit for cat; softmax turns the logits into probabilities. An image is predicted as cat when this logit is the largest of the 10');
+  await expect(detail.locator('.units-label-row')).toHaveCount(10);
+  await expect(detail.locator('.units-label-sum')).toHaveText(/^(Mostly|Mixed:|All)/);
+  await expect(detail.locator('.units-label-sum')).not.toContainText(/\ds \(/);
+  await expect(page.locator('#units')).not.toContainText(/digit/i, { useInnerText: true });
+  await shot(page, '11-units-cifar-output.png');
+});
+
+test('point datasets: top points, response maps over the plane or a slice, point lists', async ({ page }) => {
+  await open(page);
+  await switchTo(page, 'circle', 'Circle · 300 train');
+  await trainUntil(page, '(window.raster.store.weightsStep ?? 0) > 200');
+  await page.locator('#units').scrollIntoViewIfNeeded();
+  await expect(page.locator('#units-layer option')).toHaveText(['Dense 1 · 8 · Tanh', 'Dense 2 · 8 · Tanh', 'Output · 2 logits']);
+  await expect(cards(page)).toHaveCount(8);
+  const maps = page.locator('#units-root .units-card canvas.units-map:visible');
+  await expect(maps).toHaveCount(8, { timeout: 60_000 });
+  await expect(page.locator('#units-root .units-card canvas.units-scatter')).toHaveCount(8);
+  await expect(status(page)).toContainText('Based on the weights at step');
+  // No synthesis: the map already shows the whole input space.
+  await expect(page.locator('#units-synth')).toBeHidden();
+  await expect(page.locator('#units-root .units-synth-note')).toHaveText('Each card maps the unit’s response over the input plane, x₁ across and x₂ up.');
+  await expect(page.locator('#units-root .units-key')).toContainText(
+    'Each card: the 9 test points that excite the unit most, in their class colours among the rest (left), and its response over the input plane (right). Red is positive, blue negative.',
+  );
+  expect(await maps.first().evaluate((c: HTMLCanvasElement) => [c.width, c.height])).toEqual([48, 48]);
+  // Tanh units: the maps are diverging, red where positive and blue where negative.
+  const hues = await maps.evaluateAll((cs) => {
+    let red = 0;
+    let blue = 0;
+    for (const c of cs) {
+      const d = (c as HTMLCanvasElement).getContext('2d')!.getImageData(0, 0, 48, 48).data;
+      for (let i = 0; i < d.length; i += 4) {
+        if (d[i] > d[i + 2] + 60) red++;
+        if (d[i + 2] > d[i] + 60) blue++;
+      }
+    }
+    return { red, blue };
+  });
+  expect(hues.red).toBeGreaterThan(500);
+  expect(hues.blue).toBeGreaterThan(500);
+  const foot = await page.locator('#units-root .units-card-foot').allInnerTexts();
+  expect(foot.every((t) => /^(fires on [<>]?\d+% of points|never fires \(dead\))$/.test(t)), foot.join(' | ')).toBe(true);
+
+  await cards(page).nth(2).click();
+  const detail = page.locator('#units-detail');
+  await expect(detail.locator('h3')).toHaveText('Unit 3');
+  const plane = detail.locator('.units-plane canvas');
+  await expect(plane).toHaveAttribute('aria-label', /^Response map of Unit 3 over the input plane: values from −?[\d.]+ to −?[\d.]+, red positive and blue negative\./);
+  await expect(detail.locator('.units-point')).toHaveCount(16 + 8);
+  await expect(detail.locator('.units-digit')).toHaveCount(0);
+  await expect(detail.locator('.units-label-row')).toHaveCount(2);
+  await expect(detail.locator('.units-label-sum')).toHaveText(/^(Mostly|Mixed:|All \d+ are labelled) class [01]/);
+  await expect(detail).toContainText('Click any point to make it the network’s input.');
+  // A point in the list becomes the network's input.
+  const row = detail.locator('.units-point').first();
+  const idx = await row.getAttribute('data-index');
+  await expect(row).toHaveText(/^[01]#\d+\(−?\d\.\d\d, −?\d\.\d\d\)−?\d\.\d{3}$/);
+  await row.click();
+  expect(await raster(page, (r) => r.store.probe?.key)).toBe(`test:${idx}`);
+  await expect(detail.locator('.units-point').first()).toHaveAttribute('aria-pressed', 'true');
+  await expect(detail.locator('.units-probe')).toContainText(new RegExp(`^Current input, test point #${idx} · Class [01]: [\\d.]+, `));
+  // The map: hover for the response, click to pick a place in the plane.
+  // Centred, so the sticky control bar does not cover it.
+  await plane.evaluate((el) => el.scrollIntoView({ block: 'center' }));
+  const box = (await plane.boundingBox())!;
+  await page.mouse.move(box.x + box.width * 0.13, box.y + box.height * 0.11);
+  await expect(page.locator('#tip')).toContainText('response');
+  await page.mouse.click(box.x + box.width * 0.13, box.y + box.height * 0.11);
+  await expect.poll(() => raster(page, (r) => r.store.probe?.key)).not.toBe(`test:${idx}`);
+  await page.mouse.move(0, 0);
+  await expect(page.locator('#units')).not.toContainText(/digit|pixel|synthes/i, { useInnerText: true });
+  await shot(page, '11-units-points.png');
+
+  // The output layer is named by class.
+  await page.selectOption('#units-layer', '2');
+  await expect(page.locator('#units-root .units-card-title')).toHaveText(['Class 0', 'Class 1']);
+  await expect(page.locator('#units-root .units-card-foot').first()).toHaveText(/^predicted for [<>]?\d+% of points$/, { timeout: 60_000 });
+
+  // 3-D: the maps show the slice set in 03, and follow it.
+  await switchTo(page, 'shells', 'Shells · ');
+  await page.locator('#units').scrollIntoViewIfNeeded();
+  await page.selectOption('#units-layer', '0');
+  await expect(maps).toHaveCount(8, { timeout: 60_000 });
+  await expect(page.locator('#units-root .units-synth-note')).toHaveText('Each card maps the unit’s response over the slice x₃ = 0.00; move the slice in 03 Decision boundary.');
+  await expect(page.locator('#units-root .units-key')).toContainText('its response over the slice x₃ = 0.00 (right)');
+  const before = await maps.first().evaluate((c: HTMLCanvasElement) => c.toDataURL());
+  await page.evaluate(() => {
+    const s = document.getElementById('bd-slice') as HTMLInputElement;
+    s.value = '0.6';
+    s.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await expect(page.locator('#units-root .units-synth-note')).toContainText('x₃ = 0.60');
+  await expect.poll(() => maps.first().evaluate((c: HTMLCanvasElement) => c.toDataURL())).not.toBe(before);
+  await cards(page).first().click();
+  await expect(detail.locator('.units-plane canvas')).toHaveAttribute('aria-label', /over the slice x₃ = 0\.60/);
+  await expect(detail.locator('.units-point').first()).toHaveText(/\(−?\d\.\d\d, −?\d\.\d\d, −?\d\.\d\d\)/);
+  await shot(page, '11-units-points-3d.png');
+
+  // A conv layer cannot read a list of features: the section says what to do.
+  await page.evaluate(() => (window as unknown as Page2).raster.actions.setSpec([{ kind: 'conv', filters: 4, kernel: 3, act: 'relu', pool: false }]));
+  await expect(page.locator('#units-root .units-grid-note')).toHaveText('Fix the architecture in 01 to see what its units respond to.');
+  await expect(page.locator('#units-root .units-layout')).toBeHidden();
+  await page.evaluate(() => (window as unknown as Page2).raster.actions.setSpec([{ kind: 'dense', units: 4, act: 'relu' }]));
+  await expect(page.locator('#units-root .units-grid-note')).toBeHidden();
+  await expect(cards(page)).toHaveCount(4);
+});
+
+test('point datasets at phone width: no horizontal overflow, the map and lists fit', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await open(page);
+  await switchTo(page, 'moons', 'Moons · ');
+  await trainUntil(page, '(window.raster.store.weightsStep ?? 0) > 150');
+  await page.locator('#units').scrollIntoViewIfNeeded();
+  await expect(page.locator('#units-root .units-card canvas.units-map:visible')).toHaveCount(8, { timeout: 60_000 });
+  await cards(page).nth(1).click();
+  await expect(page.locator('#units-detail .units-point')).toHaveCount(24);
+  await expect(page.locator('#units-detail .units-plane canvas')).toBeVisible();
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  expect(overflow, 'no horizontal page scroll at 390 px').toBeLessThanOrEqual(0);
+  const out = await page.locator('#units').evaluate((el) => {
+    const r = el.getBoundingClientRect();
+    const bad: string[] = [];
+    for (const c of el.querySelectorAll<HTMLElement>('*')) {
+      const b = c.getBoundingClientRect();
+      if (b.width && (b.right > r.right + 1 || b.left < r.left - 1) && !c.closest('.canvas-box')) bad.push(`${c.className} ${Math.round(b.left)}–${Math.round(b.right)}`);
+    }
+    return bad;
+  });
+  expect(out, 'nothing pokes out of the section').toEqual([]);
+  await shot(page, '11-units-points-phone.png');
 });

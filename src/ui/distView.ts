@@ -1,15 +1,17 @@
 import './distView.css';
+import './dist.css';
 import { initialWeights } from '../actions';
 import { analysis, isSuperseded } from '../analysis/client';
 import type { LayerStatsResult } from '../analysis/layerStats';
 import { qqTwoSampleSorted, sortedFinite, sortedFrozen, summarizeFrozen, summarizeSorted, type QQTwoSample, type Summary } from '../analysis/stats';
+import { noun } from '../data/datasets';
 import type { Block } from '../nn/network';
 import { ACTIVATIONS, fmtShape } from '../nn/types';
 import { store } from '../store';
 import { layerName } from './builder';
 import { $, clear, h, int, segmented } from './dom';
 import { fitCanvas } from './draw';
-import { drawHistogram, drawQQ, fixed, num, share, type HistPlot, type QQPlot } from './qq';
+import { drawHistogram, drawQQ, fixed, num, share, sig, type HistPlot, type QQPlot } from './qq';
 import { isCurrent, syncedSection, type Stamp } from './snapshot';
 import { onThemeChange } from './theme';
 import { hideTip, showTip } from './tip';
@@ -33,7 +35,7 @@ const COMPARES: { value: Compare; label: string; short: string }[] = [
 const NOUN: Record<Quantity, string> = { weights: 'weights', z: 'values', a: 'values', grad: 'gradients' };
 const QUANTITY_NAME: Record<Quantity, string> = { weights: 'weights', z: 'pre-activations', a: 'activations', grad: 'weight gradients' };
 
-/** Test digits and values per layer for the layerStats job. */
+/** Test samples and values per layer for the layerStats job. */
 const SAMPLES = 256;
 const MAX_VALUES = 20000;
 /** Live weight panels redraw at most this often, and never more than one update per 2× its cost. */
@@ -105,13 +107,17 @@ export function mountDistributions(): void {
   let quantity: Quantity = 'weights';
   let compare: Compare = 'normal';
   /** Last layerStats result for this architecture (complete, or the partial sent while dead units are counted). */
-  let cache: { stamp: Stamp; result: LayerStatsResult } | null = null;
+  let cache: { stamp: Stamp; result: LayerStatsResult; testX: ArrayLike<number> | null } | null = null;
   /** The layerStats job in flight. */
-  let job: { stamp: Stamp; progress: number } | null = null;
+  let job: { stamp: Stamp; progress: number; testX: ArrayLike<number> | null } | null = null;
   let panels: Panel[] = [];
 
   const controls = h('div', { class: 'dist-controls' });
   const error = h('p', { class: 'notice dist-error', hidden: true, role: 'status' });
+  /** Shown instead of the panels while the architecture in 01 is invalid (the network shown would be the last valid one). */
+  const archNote = h('p', { class: 'notice dist-arch', hidden: true, role: 'status' }, 'Fix the architecture in 01 to see its distributions.');
+  /** The "flat run" paragraph of the guide depends on the kind of data. */
+  const flatRun = h('span');
   const guide = h(
     'div',
     { class: 'dist-guide' },
@@ -123,22 +129,32 @@ export function mountDistributions(): void {
       'Each point pairs a quantile of the layer’s values with the same quantile of a normal distribution. Points on the dashed line mean a normal, bell-shaped spread. The line runs through the quartiles, or follows the mean and std when the quartiles almost coincide (most values near 0).',
     ),
     h('p', { class: 'hint' }, h('b', null, 'Ends bend away. '), 'The low end drops below the line and the high end rises above it: heavy tails, with more extreme values than a normal distribution has. The most extreme values are always plotted.'),
-    h(
-      'p',
-      { class: 'hint' },
-      h('b', null, 'Flat run. '),
-      'Many identical values: ReLU’s exact zeros, or, in the first conv layer, blank background. Where a whole input patch is 0, z is just the bias. “Exactly zero” and “blank input” give the shares.',
-    ),
+    h('p', { class: 'hint' }, h('b', null, 'Flat run. '), flatRun),
     h('p', { class: 'hint' }, h('b', null, 'Against initial weights. '), 'Points on y = x mean training has not changed the distribution. A steeper run means the weights spread out; bent ends mean a few weights grew large.'),
   );
   const grid = h('div', { class: 'dist-grid' });
 
   const isJob = () => quantity !== 'weights';
-  /** The cached result, when it belongs to the current architecture and initialisation. */
-  const result = () => (cache && cache.stamp.version === store.version ? cache.result : null);
+  /** The cached result, when it belongs to the current architecture, initialisation and test set. */
+  const result = () => (cache && cache.stamp.version === store.version && cache.testX === (store.data?.testX ?? null) ? cache.result : null);
+  /** True when the loaded data and the network fit together (a dataset switch updates one, then the other). */
+  const ready = () => !!store.data && store.valid && store.data.inputSize === store.net.inputSize && store.data.info.id === store.dataset;
+  /** "digits", "images" or "points". */
+  const many = () => noun(store.info, 2);
 
   const sync = syncedSection(root, () => refresh());
-  root.append(controls, sync.status, error, guide, grid);
+  root.append(controls, sync.status, error, archNote, guide, grid);
+
+  const guideText = () => {
+    const info = store.info;
+    flatRun.textContent =
+      info.kind === 'points'
+        ? 'Many identical values: ReLU’s exact zeros (“exactly zero” gives the share). Saturated tanh units pile up at −1 and 1 instead, which flattens both ends.'
+        : info.image?.shape.c === 1
+          ? 'Many identical values: ReLU’s exact zeros, or, in the first conv layer, blank background. Where a whole input patch is 0, z is just the bias. “Exactly zero” and “blank input” give the shares.'
+          : 'Many identical values: ReLU’s exact zeros. “Exactly zero” gives their share. Photos have almost no blank patches, so the first conv layer has no flat run of biases.';
+  };
+  guideText();
 
   // ── Controls ─────────────────────────────────────────
 
@@ -191,13 +207,15 @@ export function mountDistributions(): void {
 
   /** Job mode with no result: compute now (the common policy allows a first result even while training). */
   const ensureShown = () => {
-    if (isJob() && !result() && !job && store.data && panels.some((p) => p.visible)) runJob();
+    if (isJob() && !result() && !job && ready() && panels.some((p) => p.visible)) runJob();
   };
 
   const runJob = () => {
     if (job && isCurrent(job.stamp)) return;
+    if (!ready()) return;
     const stamp = sync.begin();
-    const mine = { stamp, progress: 0 };
+    const testX = store.data?.testX ?? null;
+    const mine = { stamp, progress: 0, testX };
     job = mine;
     error.hidden = true;
     sync.setProgress(0);
@@ -211,7 +229,7 @@ export function mountDistributions(): void {
         // The distributions are final before the dead-unit scan ends: show them now.
         const partial = pr.partial as LayerStatsResult | undefined;
         if (partial && cache?.stamp !== stamp) {
-          cache = { stamp, result: partial };
+          cache = { stamp, result: partial, testX };
           markBusy();
           if (isJob()) invalidate();
         }
@@ -219,7 +237,7 @@ export function mountDistributions(): void {
       .then((r) => {
         if (job !== mine) return;
         job = null;
-        cache = { stamp, result: r };
+        cache = { stamp, result: r, testX };
         markBusy();
         if (isJob()) {
           invalidate();
@@ -302,29 +320,29 @@ export function mountDistributions(): void {
         summary,
         compare: cmp,
         n: int(summary.moments.n),
-        extra: cmp ? [{ k: 'std at start', v: num(summarizeFrozen(init).moments.std) }] : [],
+        extra: cmp ? [{ k: 'std at start', v: sig(summarizeFrozen(init).moments.std, 3) }] : [],
       };
     }
 
     const r = result();
     if (!r) {
-      const empty = job ? 'Computing…' : store.data ? 'Not computed yet' : 'Waiting for MNIST to load…';
+      const empty = job ? 'Computing…' : store.data ? 'Not computed yet.' : `Waiting for ${store.info.name} to load…`;
       return { ...base, detail: quantity === 'grad' ? `${weightShape(b)} gradients` : fmtShape(zShape(b)), empty };
     }
     const l = r.layers[i];
     if (quantity === 'grad') {
       const sorted = sortedFinite(l.gW);
       const summary = summarizeSorted(sorted);
-      return { ...base, detail: `${weightShape(b)} · mean ∂L/∂W over ${r.samples} digits`, values: sorted, summary, n: int(summary.moments.n) };
+      return { ...base, detail: `${weightShape(b)} · mean ∂L/∂W over ${int(r.samples)} ${noun(store.info, r.samples)}`, values: sorted, summary, n: int(summary.moments.n) };
     }
     const values = sortedFinite(quantity === 'z' ? l.z : l.a);
     const summary = summarizeSorted(values);
     const pooled = b.kind === 'conv' && b.spec.pool;
-    const detail = isOut
-      ? `${b.z.length} logits · no activation function`
-      : `${fmtShape(zShape(b))} · ${actLabel}${quantity === 'a' && pooled ? ' · before pooling' : ''}`;
+    // The output layer has no activation function: its activations are the logits themselves.
+    const detail = isOut ? `${b.z.length} logits` : `${fmtShape(zShape(b))} · ${actLabel}${quantity === 'a' && pooled ? ' · before pooling' : ''}`;
     const extra: StatItem[] = [];
-    if (quantity === 'a' && !isOut) extra.push({ k: 'exactly zero', v: share(Math.round(summary.zero * summary.moments.n), summary.moments.n) });
+    // Only ReLU makes exact zeros; for tanh or sigmoid layers the share would always read 0.0%.
+    if (quantity === 'a' && !isOut && b.spec.act === 'relu') extra.push({ k: 'exactly zero', v: share(Math.round(summary.zero * summary.moments.n), summary.moments.n) });
     if (l.blank > 0)
       extra.push({
         k: 'blank input',
@@ -334,7 +352,7 @@ export function mountDistributions(): void {
     if (quantity === 'a' && !isOut && l.dead !== null) {
       const unit = b.kind === 'conv' ? 'filter' : 'unit';
       if (!r.complete) {
-        extra.push({ k: 'dead units', v: 'counting…', title: `Checking the rest of the ${int(store.data?.testY.length ?? 2000)} test digits for ${unit}s that never fire` });
+        extra.push({ k: 'dead units', v: 'counting…', title: `Checking the rest of the ${int(store.data?.testY.length ?? 0)} test ${many()} for ${unit}s that never fire` });
       } else {
         const dead: number[] = [];
         l.activeFraction.forEach((f, u) => f === 0 && dead.push(u + 1));
@@ -342,8 +360,8 @@ export function mountDistributions(): void {
           k: 'dead units',
           v: `${l.dead} of ${l.activeFraction.length}`,
           title: dead.length
-            ? `${unit === 'filter' ? 'Filters' : 'Units'} that never fired on any of the ${int(r.activityImages)} test digits: ${dead.join(', ')}`
-            : `Every ${unit} fired on at least one test digit`,
+            ? `${unit === 'filter' ? 'Filters' : 'Units'} that never fired on any of the ${int(r.activityImages)} test ${noun(store.info, r.activityImages)}: ${dead.join(', ')}`
+            : `Every ${unit} fired on at least one test ${noun(store.info)}`,
         });
       }
     }
@@ -519,8 +537,8 @@ export function mountDistributions(): void {
     const ref = s.qq.reference;
     const items: StatItem[] = [
       { k: 'n', v: m.n, wide: true },
-      { k: 'mean', v: num(mo.mean) },
-      { k: 'std', v: num(mo.std) },
+      { k: 'mean', v: sig(mo.mean, 3) },
+      { k: 'std', v: sig(mo.std, 3) },
       { k: 'skew', v: fixed(mo.skew, 2) },
       { k: 'ex. kurtosis', v: fixed(mo.excessKurtosis, 2), title: 'Excess kurtosis: 0 for a normal distribution, above 0 for heavier tails' },
       { k: 'PPCC r', v: fixed(s.ppcc, 4), title: 'Probability-plot correlation: how straight the Q–Q plot is. 1 is a perfectly normal shape.' },
@@ -568,7 +586,15 @@ export function mountDistributions(): void {
 
   // syncedSection already requests a refresh on these; weights mode also follows training live.
   store.on('weights', scheduleWeights);
+  /** While the architecture in 01 is invalid, say so instead of showing the last valid network's panels. */
+  function showArch() {
+    const bad = !store.valid;
+    archNote.hidden = !bad;
+    grid.hidden = bad;
+  }
+
   store.on('model', () => {
+    showArch();
     // A job for the previous network can only produce a result nobody can show.
     if (job && job.stamp.version !== store.version) {
       analysis.cancel('distributions');
@@ -582,9 +608,20 @@ export function mountDistributions(): void {
     else for (const p of panels) p.owed = 2;
   });
   store.on('data', () => {
+    // A job over another test set (regenerated points, new features) can only produce a result nobody can show.
+    if (job && job.testX !== (store.data?.testX ?? null)) {
+      analysis.cancel('distributions');
+      job = null;
+      markBusy();
+      if (isJob()) sync.fail();
+    }
     if (!isJob()) return;
     invalidate();
     ensureShown();
+  });
+  store.on('dataset', () => {
+    guideText();
+    showArch();
   });
 
   let queued = false;
@@ -606,6 +643,7 @@ export function mountDistributions(): void {
   }).observe(grid);
 
   renderControls();
+  showArch();
   syncPanels();
   // Nothing is visible before the first intersection callback: draw once so the section is not
   // empty on load; the observer takes over from there.
