@@ -95,6 +95,40 @@ const statusLayout = (page: Page, recompute = false) =>
     };
   }, recompute);
 
+/** Counts the attribution jobs started from now on; returns a reader of the count. */
+async function countRuns(page: Page): Promise<() => Promise<number>> {
+  await page.evaluate(() => {
+    const w = window as unknown as { raster: { analysis: { run: (c: string, ...rest: unknown[]) => unknown } }; e2eAttrRuns?: number; e2eAttrWrapped?: boolean };
+    w.e2eAttrRuns = 0;
+    if (w.e2eAttrWrapped) return;
+    w.e2eAttrWrapped = true;
+    const a = w.raster.analysis;
+    const run = a.run.bind(a);
+    a.run = (c: string, ...rest: unknown[]) => {
+      if (c === 'attribution') w.e2eAttrRuns = (w.e2eAttrRuns ?? 0) + 1;
+      return run(c, ...rest);
+    };
+  });
+  return () => page.evaluate(() => (window as unknown as { e2eAttrRuns: number }).e2eAttrRuns);
+}
+
+/** Switches dataset through the page's actions and waits until its data is loaded. */
+async function switchTo(page: Page, id: string, fact: string) {
+  await page.evaluate((d) => (window as unknown as { raster: { actions: { setDataset(id: string): Promise<void> } } }).raster.actions.setDataset(d), id);
+  await expect(page.locator('#fact-data')).toContainText(fact, { timeout: 60_000 });
+}
+
+/** How many pixels of a canvas show colour (channels that differ), not grey. */
+const colourPixels = (page: Page, id: string) =>
+  page.locator(`#${id}`).evaluate((c: HTMLCanvasElement) => {
+    const d = c.getContext('2d')!.getImageData(0, 0, c.width, c.height).data;
+    let n = 0;
+    for (let i = 0; i < d.length; i += 4) if (Math.abs(d[i] - d[i + 1]) > 12 || Math.abs(d[i] - d[i + 2]) > 12) n++;
+    return n;
+  });
+
+const num = (s: string) => Number(s.replace(/−/g, '-').replace(/^\+/, ''));
+
 test('explains the prediction four ways, pins a chosen digit and follows the input', async ({ page }) => {
   await open(page);
   await trainUntil(page, '(window.raster.store.evals.length >= 2)');
@@ -204,12 +238,20 @@ test('explains the prediction four ways, pins a chosen digit and follows the inp
   await expect(page.locator('#attr-root .synced-status')).toContainText(`Based on the weights at step ${(step + 1).toLocaleString('en-US')}.`);
   await resultFor(page, new RegExp(`^test:0\\|${other}$`));
 
-  // ...and re-selecting the same input (its thumb in 02 Network, already pressed) keeps it.
+  // ...and re-selecting the same input (its thumb in 02 Network, already pressed) keeps it, without
+  // running the same job again (NEW-2).
+  const runs = await countRuns(page);
   await page.locator('#network button.thumb[title="Test digit #0 (a 7)"]').click();
   await page.locator('#attribution').scrollIntoViewIfNeeded();
+  await page.waitForTimeout(800);
   await resultFor(page, new RegExp(`^test:0\\|${other}$`));
   await expect(page.locator(`#attr-target-${other}`)).toHaveAttribute('aria-pressed', 'true');
   await expect(root(page)).toHaveAttribute('data-target', String(other));
+  expect(await runs(), 'no new attribution job for the input already shown').toBe(0);
+  // Recompute still runs it.
+  await page.locator('#attr-root .synced-status button').click();
+  await expect.poll(runs).toBe(1);
+  await resultFor(page, new RegExp(`^test:0\\|${other}$`));
 
   // ...but a new input resets it to the prediction. Swap the input while the section is on screen.
   await raster(page, (r) => {
@@ -380,4 +422,194 @@ test('390 px phone screen: panels wrap two per row, no sideways scrolling', asyn
     const right = await page.locator('#attribution').evaluate((sec) => Math.max(...Array.from(sec.querySelectorAll('*'), (e) => e.getBoundingClientRect().right)));
     expect(right, `section 10 fits at ${width} px`).toBeLessThanOrEqual(width - 16 + 0.5);
   }
+});
+
+// ── Other datasets ───────────────────────────────────────────────────────
+
+/** Waits until the maps on screen belong to the network's current weights. */
+async function upToDate(page: Page) {
+  const step = await raster(page, (r) => r.store.weightsStep);
+  await expect(page.locator('#attr-root .synced-status')).toContainText(`Based on the weights at step ${step.toLocaleString('en-US')}.`, { timeout: 30_000 });
+  await expect(root(page)).toHaveAttribute('data-state', 'done');
+}
+
+test('CIFAR-10: maps over the photo with the channels added up, mean-colour occlusion, class names', async ({ page }) => {
+  await open(page);
+  await switchTo(page, 'cifar10', 'CIFAR-10 · 10,000 train');
+  await trainUntil(page, '(window.raster.store.weightsStep ?? 0) > 60');
+  await page.locator('#attribution').scrollIntoViewIfNeeded();
+  await resultFor(page, /^test:0\|\d$/);
+  await upToDate(page);
+  const names = ['airplane', 'automobile', 'bird', 'cat', 'deer', 'dog', 'frog', 'horse', 'ship', 'truck'];
+  const pred = Number(await root(page).getAttribute('data-pred'));
+  await expect(page.locator('#attr-target-label')).toHaveText('Explain class');
+  await expect(page.locator('#attr-root .attr-chips button')).toHaveText(names);
+  await expect(page.locator(`#attr-target-${pred}`)).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('#attr-target-3')).toHaveAttribute('aria-label', /^Explain cat \(.*true label\)$/);
+  await expect(page.locator('#attr-pred')).toHaveText(new RegExp(`^Predicted ${names[pred]} at \\d+\\.\\d%; explaining ${names[pred]}$`));
+  await expect(page.locator('#attr-root .attr-input-caption')).toHaveText('Input: Test image #0 · cat');
+
+  // Five 32×32 maps at a whole number of screen pixels per image pixel; the input in colour.
+  for (const key of ['input', 'saliency', 'gradInput', 'integrated', 'occlusion']) {
+    expect(await colours(page, `attr-map-${key}`), key).toBeGreaterThan(8);
+    const w = await page.locator(`#attr-map-${key}`).evaluate((c) => c.getBoundingClientRect().width);
+    expect(w % 32, key).toBe(0);
+  }
+  expect(await colourPixels(page, 'attr-map-input')).toBeGreaterThan(200);
+  await expect(page.locator('[data-panel="saliency"] .attr-title')).toHaveText('Saliency Σ|∂z/∂x|');
+  await expect(page.locator('[data-panel="input"] .hint')).toContainText('The 32×32 photo the network sees');
+  await expect(page.locator('[data-panel="gradInput"] .hint')).toContainText('added over its channels');
+  // Occlusion paints with the test images' average colour, shown as a swatch: a muted mid tone.
+  await expect(page.locator('[data-panel="occlusion"] .hint')).toContainText('Paints a 6×6 patch at a time with the average colour');
+  const fill = await page.locator('[data-panel="occlusion"] .attr-fill').evaluate((e) => getComputedStyle(e).backgroundColor);
+  for (const v of fill.match(/\d+/g)!.map(Number).slice(0, 3)) {
+    expect(v).toBeGreaterThan(70);
+    expect(v).toBeLessThan(180);
+  }
+  await expect(page.locator('#attr-root .attr-notes')).toContainText('the average colour of the test images, not black');
+
+  // Completeness over all three channels, measured from a black image.
+  const text = (await page.locator('#attr-check').textContent())!;
+  const m = text.match(/^Σ IG = (\S+); z\(x\) − z\(black\) = (\S+) \((?:off by \S+, ([<\d.]+)% of .+|a match)\)$/);
+  expect(m, text).not.toBeNull();
+  if (m![3]) expect(Number(m![3].replace('<', ''))).toBeLessThan(5);
+
+  // Hover: the pixel's three values, and the attribution split over its channels.
+  const ig = (await page.locator('#attr-map-integrated').boundingBox())!;
+  const cell = ig.width / 32;
+  await page.mouse.move(ig.x + cell * 14.5, ig.y + cell * 12.5);
+  await expect(page.locator('#tip')).toContainText('Row 12, column 14');
+  await expect(page.locator('#tip')).toContainText(/Pixel R \d\.\d\d · G \d\.\d\d · B \d\.\d\d/);
+  await expect(page.locator('#tip')).toContainText(/Integrated gradient \S+ \(R \S+ · G \S+ · B \S+\)/);
+  await shot(page, '12-attribution-cifar.png');
+  await page.mouse.move(0, 0);
+
+  // Another class: the line and the hints name it, and nothing in the section says "digit".
+  const other = (pred + 4) % 10;
+  await page.click(`#attr-target-${other}`);
+  await resultFor(page, new RegExp(`^test:0\\|${other}$`));
+  await expect(page.locator('#attr-pred')).toHaveText(new RegExp(`explaining ${names[other]} \\([\\d.]+%\\)$`));
+  await expect(page.locator('[data-panel="integrated"] .hint')).toContainText(`change in the score for ${names[other]}`);
+  await expect(page.locator('#attribution')).not.toContainText(/digit/i, { useInnerText: true });
+});
+
+test('point data: a bar per feature, the steepest way up on the plane, click or keys to move the point', async ({ page }) => {
+  await open(page);
+  await switchTo(page, 'circle', 'Circle · 300 train');
+  await trainUntil(page, '(window.raster.store.weightsStep ?? 0) > 300');
+  await page.locator('#attribution').scrollIntoViewIfNeeded();
+  await resultFor(page, /^test:0\|\d$/);
+  await upToDate(page);
+  const pred = Number(await root(page).getAttribute('data-pred'));
+  await expect(page.locator('#attr-points')).toBeVisible();
+  await expect(page.locator('[data-panel="input"]')).toBeHidden();
+  await expect(page.locator('#attr-root .attr-chips button')).toHaveText(['Class 0', 'Class 1']);
+  await expect(page.locator('#attr-root .attr-chips .attr-swatch')).toHaveCount(2);
+  await expect(page.locator('#attr-pred')).toHaveText(new RegExp(`^Predicted Class ${pred} at \\d+\\.\\d%; explaining Class ${pred}$`));
+  await expect(page.locator('#attr-root .attr-input-caption')).toHaveText(/^Input: Test point #0 · Class \d$/);
+
+  // One row per input feature (the raw coordinates by default), two bars in each.
+  const rows = page.locator('#attr-features tbody tr');
+  await expect(rows).toHaveCount(2);
+  await expect(rows.locator('.attr-feat-name')).toHaveText(['x₁', 'x₂']);
+  await expect(rows.locator('.attr-bar')).toHaveCount(4);
+  const cells = await rows.evaluateAll((trs) => trs.map((tr) => Array.from(tr.querySelectorAll('.attr-bar-num'), (e) => e.textContent!)));
+  // Completeness: the integrated-gradients column adds up to z(x) − z(origin).
+  const check = (await page.locator('#attr-check').textContent())!;
+  const m = check.match(/^Σ IG = (\S+); z\(x\) − z\(origin\) = (\S+) /);
+  expect(m, check).not.toBeNull();
+  const igSum = cells.reduce((s, c) => s + num(c[1]), 0);
+  expect(Math.abs(igSum - num(m![2]))).toBeLessThan(0.02 * Math.max(1, Math.abs(num(m![2]))));
+  await expect(page.locator('#attr-sentence')).toHaveText(new RegExp(`^From the origin to this point, the score for Class ${pred} (rises|falls) by [\\d.e−]+\\. `));
+  await expect(page.locator('#attr-root .attr-feat-hints')).toContainText('Reading a bar:');
+
+  // The arrow is the gradient with respect to the coordinates: checked against central differences
+  // of the page's own network (here the features are the coordinates themselves).
+  const caption = (await page.locator('#attr-plane-caption').textContent())!;
+  const g = caption.match(/∂z\/∂x₁ (\S+) · ∂z\/∂x₂ (\S+)/);
+  expect(g, caption).not.toBeNull();
+  const fd = await page.evaluate((t) => {
+    const r = (window as unknown as { raster: { store: { probe: { coords: Float32Array }; net: { forward(x: Float32Array): Float32Array; blocks: { z: Float32Array }[] } } } }).raster;
+    const c = r.store.probe.coords;
+    const z = (x1: number, x2: number) => {
+      r.store.net.forward(Float32Array.from([x1, x2]));
+      return r.store.net.blocks[r.store.net.blocks.length - 1].z[t];
+    };
+    const h = 1e-3;
+    return [(z(c[0] + h, c[1]) - z(c[0] - h, c[1])) / (2 * h), (z(c[0], c[1] + h) - z(c[0], c[1] - h)) / (2 * h)];
+  }, pred);
+  expect(Math.abs(num(g![1]) - fd[0])).toBeLessThan(0.01 * Math.abs(fd[0]) + 0.01);
+  expect(Math.abs(num(g![2]) - fd[1])).toBeLessThan(0.01 * Math.abs(fd[1]) + 0.01);
+  expect(await colours(page, 'attr-plane')).toBeGreaterThan(8);
+  await expect(page.locator('#attr-plane')).toHaveAttribute('aria-label', new RegExp(`arrow toward a higher score for Class ${pred}`));
+  await shot(page, '12-attribution-points.png');
+
+  // Re-selecting the same point runs nothing (NEW-2); picking the other class does.
+  const runs = await countRuns(page);
+  await raster(page, (r) => {
+    const a = (r as unknown as { actions: { setProbe(p: unknown): void; testProbe(d: unknown, i: number): unknown }; store: { data: unknown } }).actions;
+    a.setProbe(a.testProbe((r as unknown as { store: { data: unknown } }).store.data, 0));
+  });
+  await page.waitForTimeout(600);
+  expect(await runs()).toBe(0);
+  const other = 1 - pred;
+  await page.click(`#attr-target-${other}`);
+  await resultFor(page, new RegExp(`^test:0\\|${other}$`));
+  expect(await runs()).toBe(1);
+  await expect(page.locator('#attr-sentence')).toContainText(`the score for Class ${other}`);
+
+  // A click on the plane makes that spot the input, and the pick goes back to the prediction.
+  const plane = (await page.locator('#attr-plane').boundingBox())!;
+  await page.mouse.click(plane.x + plane.width * 0.62, plane.y + plane.height * 0.32);
+  await resultFor(page, /^pt:[-\d.]+,[-\d.]+\|\d$/);
+  await expect(page.locator('#attr-root .attr-input-caption')).toHaveText(/^Input: Point \(−?\d\.\d\d, −?\d\.\d\d\)$/);
+  await expect(root(page)).toHaveAttribute('data-target', (await root(page).getAttribute('data-pred'))!);
+  // The arrow keys on the map nudge it by 0.05.
+  const x1 = await raster(page, (r) => (r.store.probe as unknown as { coords: Float32Array }).coords[0]);
+  await page.locator('#attr-plane').focus();
+  await page.keyboard.press('ArrowRight');
+  await expect.poll(() => raster(page, (r) => (r.store.probe as unknown as { coords: Float32Array }).coords[0])).toBeCloseTo(x1 + 0.05, 3);
+  await resultFor(page, /^pt:/);
+
+  // More input features: one row each, labelled as in the dataset strip.
+  await page.evaluate(() => (window as unknown as { raster: { actions: { setFeatures(f: string[]): void } } }).raster.actions.setFeatures(['x1', 'x2', 'x1^2', 'x2^2', 'x1*x2']));
+  await resultFor(page, /^test:0\|\d$/);
+  await expect(rows.locator('.attr-feat-name')).toHaveText(['x₁', 'x₂', 'x₁²', 'x₂²', 'x₁x₂']);
+  await expect(rows.locator('.attr-bar')).toHaveCount(10);
+  await expect(page.locator('#attr-check')).toHaveText(/^Σ IG = \S+; z\(x\) − z\(origin\) = \S+ \(/);
+});
+
+test('3-D points at phone width and in the dark: the slice through the point, three slopes', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await open(page);
+  await switchTo(page, 'helix', 'Double helix · 300 train');
+  await trainUntil(page, '(window.raster.store.weightsStep ?? 0) > 150');
+  await page.locator('#attribution').scrollIntoViewIfNeeded();
+  await resultFor(page, /^test:0\|\d$/);
+  await upToDate(page);
+  await expect(page.locator('#attr-points .attr-pts-plane .attr-title')).toHaveText(/^The point, on the slice x₃ = −?\d\.\d\d$/);
+  await expect(page.locator('#attr-features tbody tr')).toHaveCount(3);
+  await expect(page.locator('#attr-plane-caption')).toContainText('∂z/∂x₃');
+  await expect(page.locator('#attr-points .attr-pts-plane .hint')).toContainText('The arrow is the x₁–x₂ part of the way to move the point');
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  expect(overflow, 'no horizontal page scroll at 390 px').toBeLessThanOrEqual(0);
+  const right = await page.locator('#attribution').evaluate((sec) => Math.max(...Array.from(sec.querySelectorAll('*'), (e) => e.getBoundingClientRect().right)));
+  expect(right).toBeLessThanOrEqual(390 - 16 + 0.5);
+  // The status row stays one line here too.
+  const idle = await statusLayout(page);
+  expect(idle.statusHeight).toBe(28);
+  await shot(page, '12-attribution-points-phone.png');
+
+  // Dark theme: the plane redraws from the dark tokens.
+  await page.setViewportSize({ width: 1600, height: 1000 });
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await page.waitForFunction(() => {
+    const c = document.getElementById('attr-plane') as HTMLCanvasElement;
+    const k = c.width / c.getBoundingClientRect().width;
+    const d = c.getContext('2d')!.getImageData(Math.round(40 * k), Math.round(26 * k), 1, 1).data;
+    return d[0] + d[1] + d[2] < 300;
+  });
+  await page.locator('#attribution').scrollIntoViewIfNeeded();
+  await shot(page, '12-attribution-points-3d-dark.png');
+  await page.emulateMedia({ colorScheme: 'light' });
 });
