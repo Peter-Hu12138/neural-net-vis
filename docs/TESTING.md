@@ -141,6 +141,52 @@ Errors and unknown job names are reported.
 - **Randomized PCA for wide layers:** equals exact PCA when the sketch is as wide as the data. A second pass over very wide layers gives the same result as reading from memory.
 - **Flat layers** are reported as flat. Tick and tooltip labels use a true minus and never "−0.0000".
 
+### 1.12 Datasets, freezing and model files: `tests/foundation.test.ts` (12 tests)
+
+- **Colour images:** shapes and gradients through a 32×32×3 input match finite differences.
+- **Feature vectors:** dense layers work; a convolution on a feature vector is flagged with a reason.
+- **Freezing:** frozen layers keep their weights exactly while the trainable ones change. Training only the head never runs backpropagation through the frozen layers below it; a NaN sentinel in their gradient buffers proves it.
+- **Copying layers** (`copyCompatible`): matching layers are copied and a changed layer starts fresh.
+- **Model files:** architecture, weights and metadata round-trip. Broken files (wrong format, version, architecture, weight count or non-finite weights) are rejected with a message a reader can act on.
+- **Dataset registry:** every dataset has class names, glyphs, and a shape or a dimensionality. Point data keeps its raw coordinates for plotting, with captions and training subsets.
+- **Trainer:** learns a 3-class point dataset end to end (> 95%). A speed cap holds the trainer near the set rate, and lifting it trains at full speed again. Frozen layers stay put, and the trainer waits for data that matches the network.
+
+### 1.13 Point datasets and features: `tests/synthetic.test.ts` (21 tests)
+
+- For each of the 11 generators: the right sizes and split, balanced classes and coordinates in range. Every generator is deterministic per seed, differs across seeds, and spreads with noise.
+- The feature catalogue lists linear, square, product and sine features, and computes each correctly.
+- On the circle, a model with no hidden layer fails on the raw coordinates and succeeds once x₁² and x₂² are added, which is the playground's lesson.
+
+### 1.14 Grid evaluation: `tests/grid.test.ts` (4 tests)
+
+- Grid cells are centred, row 0 is at the top and other axes stay fixed. The plotting domain covers every point.
+- `PointEvaluator` matches the network exactly, follows weight and architecture changes, and never disturbs the page's own network (whose intermediates the views read).
+
+### 1.15 Decision boundaries: `tests/boundary.test.ts` (17 tests)
+
+- **Confidence shading:** 1/K maps to pale and certainty to full colour; ties are pale; discrete mode gives flat tints. Margins and argmax agree on the predicted class.
+- **Marching squares:** finds a straight boundary in the right place, traces a circle as one closed curve at the right radius, resolves saddles, and draws the edges between three class regions.
+- **3-D surfaces:** surface nets put a sphere's vertices at its radius and close the surface; two-class probabilities give the p₀ = p₁ surface; with several classes each pairwise surface appears once.
+- **Orbit camera:** a true rotation for any angles, x₁ to the right and x₃ up when level, back-to-front order, and which side of a slice faces the eye.
+- **Budgets and labels:** the largest grid that fits the time budget, ticks and axis names, and a robust colour scale for unit maps that one runaway unit cannot wash out.
+
+### 1.16 Dataset strip: `tests/datasetPicker.test.ts` (3 tests)
+
+Training-set sizes the point generator produces, subset options that fit images or points, and 3-D projections with the vertical axis up.
+
+### 1.17 Pretrained models and transfer: `tests/models.test.ts` (15 tests)
+
+- **Zoo:** the index is well formed and matches its files; every file decodes and holds finite weights, and the accuracies in the docs match the index. `mnist-cnn` classifies the page's own 2,000 MNIST test digits, decoded from `public/data`, at 97% or more.
+- **Transfer experiment:** every condition is recorded, and the panel's sentences are worded from the measured numbers.
+- **Transfer:** copies exactly the compatible hidden layers, freezes them and adds a fresh output layer. A frozen layer keeps its weights while the new head learns, and an input of another shape is refused in words.
+- **Load, edit, save:** loading on the same dataset uses the exact architecture and weights; keep-weights edits copy only the unchanged layers; a saved model round-trips.
+
+### 1.18 Receptive fields on colour images: `tests/receptive.test.ts` (5 tests)
+
+Small CNN fields on 32×32 match MNIST's sizes and are centred on the larger map; clipping happens at the edge of the 32×32 image; a field larger than the image becomes the whole image; one box covers all three channels, so a pixel outside it in any channel never moves the unit.
+
+The existing analysis tests (1.7–1.11) also gained colour-image, point-dataset and tie cases.
+
 ---
 
 ## 2. Browser tests (`e2e/*.spec.ts`)
@@ -327,6 +373,59 @@ With `window.Worker` replaced by a constructor that throws, the engine reports
 | PCA | t-SNE |
 | --- | --- |
 | ![](screenshots/13-embedding-pca.png) | ![](screenshots/13-embedding-tsne.png) |
+
+### 2.17 Sync policy while training: `e2e/sync.spec.ts` (3 tests)
+
+- On first view during training, each section runs its job once, and the job finishes while training continues. Before the round-2 fix this failed, with 6 restarted runs.
+- After Reset + Play with 08–11 all on screen, every section computes once and shows a result. Before the fix this failed, with no run finishing.
+- At phone width the status row stays one line in every state.
+
+### 2.18 Datasets: `e2e/datasets.spec.ts` (5 tests)
+
+- **Picker:** switches between image and point datasets, with the facts line, loading progress, section 07, the point controls and the train-subset control following. The index is one tab stop, and arrow keys and Enter pick from it.
+- **CIFAR-10 photo mode:** crop, live class probabilities, flip and brightness.
+- **Fashion-MNIST:** drawings fill the frame, and uploaded photos become light-on-black items as in the dataset.
+- **Layout:** dark theme, and phone width without horizontal overflow.
+
+| Dataset strip | 07 on point data |
+| --- | --- |
+| ![](screenshots/14-datasets-picker-light.png) | ![](screenshots/14-datasets-data-points.png) |
+
+### 2.19 Decision boundaries and the network view: `e2e/boundary.spec.ts` (8 tests)
+
+- **Circle:** after training, the colours of 97% or more of the clear sample spots on the canvas match `PointEvaluator`'s predictions.
+- **Interaction:** clicks and arrow keys set the input; Add points and shift-click add training points; the toggles redraw. Spiral and XOR follow training live, at about 10 redraws a second.
+- **3-D:** shells turn when dragged and with the buttons, and the slice slider moves the slice map. The helix, XOR cube and four blobs render a surface.
+- **Network view (02):** unit maps for points, colour images for CIFAR-10, and MNIST unchanged.
+- **Layout:** dark theme, and phone width without overflow.
+
+| 2-D boundary | 3-D boundary (shells) |
+| --- | --- |
+| ![](screenshots/15-boundary-2d-light.png) | ![](screenshots/15-boundary-3d-shells.png) |
+
+### 2.20 Pretrained models, transfer and freezing: `e2e/models.spec.ts` (10 tests)
+
+- **Load:** the pretrained LeNet arrives with its exact architecture and weights and is evaluated on the page.
+- **Transfer:** MNIST features move to Fashion-MNIST, and the frozen layers stay put while the new head learns (weights compared through `window.raster`).
+- **Save and open:** save to a file and open it again; save in the browser, list, load and delete; a full browser storage is explained.
+- **Freezing:** freeze toggles by mouse and keyboard, and keep-weights keeps the first conv layer through a dense-layer edit.
+- **Builder:** follows the dataset (features for points, colour for CIFAR-10). A damaged download is explained in words. Phone width and dark theme.
+
+### 2.21 Weights, training and backprop on every dataset: `e2e/core.spec.ts` (8 tests)
+
+- **04 Weights:** colour kernel patches for CIFAR-10's first layer; feature-labelled weights for a point network; frozen layers marked.
+- **05 Training:** Fashion-MNIST class names in the confusion matrix; large cells and a long-run epoch axis on a point dataset.
+- **06 Backpropagation:**
+  - steps through every stage on CIFAR-10 (23 steps) and on circle (15);
+  - the update leaves frozen layers alone;
+  - a gradient that stops at a layer whose units were all off is explained.
+- **Speed control:** on circle, Normal holds the trainer at 3,300 samples a second or fewer, Max goes above 5,000, Slow stays at 400 or fewer. The speed follows the dataset.
+
+| 04 on CIFAR-10 | 06 with a frozen layer |
+| --- | --- |
+| ![](screenshots/17-core-inspector-cifar-conv.png) | ![](screenshots/17-core-backprop-frozen.png) |
+
+The 08–11 specs (2.13–2.16) gained CIFAR-10 and point-dataset cases.
 
 ---
 
