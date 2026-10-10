@@ -12,9 +12,14 @@ import {
   gradTimesInput,
   igAlphas,
   jobs,
+  coordinateGradient,
+  featureSentence,
   kinkText,
   logitGradient,
+  meanColour,
   occlusionMap,
+  patchIsFilled,
+  sumChannels,
   oneHot,
   patchGrid,
   patchIsBlank,
@@ -31,7 +36,8 @@ import type { FromAnalyzer } from '../src/analysis/protocol';
 import { Network } from '../src/nn/network';
 import { Optimizer } from '../src/nn/optim';
 import { Rng } from '../src/nn/rng';
-import type { LayerSpec } from '../src/nn/types';
+import type { Arch, LayerSpec } from '../src/nn/types';
+import { featureCatalog, featurize } from '../src/data/features';
 
 // ── Real digits from the bundled sprites (8-bit greyscale PNG, filter 0 on every row) ──
 
@@ -622,4 +628,230 @@ describe('attribution job', () => {
     // the job saw the same weights: its logit matches the source network's
     expect(r.logit).toBeCloseTo(targetLogit(source, x, 7), 5);
   }, 20_000);
+});
+
+// ── Colour images (CIFAR-10 shape) ──────────────────────────────────────
+
+const COLOUR: Arch['input'] = { c: 3, h: 32, w: 32 };
+const colourArch = (layers: LayerSpec[]): Arch => ({ input: COLOUR, layers, classes: 10 });
+
+/** A smooth random "photo": channel-major 3×32×32 values in [0, 1]; with `fill`, a 10×10 corner block of that colour. */
+function photo(seed: number, fill: number[] = []): Float32Array {
+  const rng = new Rng(seed);
+  const x = new Float32Array(3 * 1024);
+  const f = [rng.next() * 6, rng.next() * 6, rng.next() * 6];
+  for (let c = 0; c < 3; c++) {
+    for (let y = 0; y < 32; y++) {
+      for (let k = 0; k < 32; k++) x[c * 1024 + y * 32 + k] = Math.min(1, Math.max(0, 0.5 + 0.35 * Math.sin((y + f[c]) / 4) * Math.cos((k - f[c]) / 5) + 0.08 * rng.normal()));
+    }
+    if (fill.length) for (let y = 22; y < 32; y++) for (let k = 22; k < 32; k++) x[c * 1024 + y * 32 + k] = fill[c];
+  }
+  return x;
+}
+
+describe('colour images', () => {
+  const fill = [Math.fround(0.47), Math.fround(0.46), Math.fround(0.42)];
+
+  it('adds the channels up: saliency as Σ|g_c|, gradient × input and integrated gradients as signed sums', () => {
+    const net = new Network(colourArch(SMALL_CNN), 4);
+    const x = photo(1);
+    const r = computeAttribution(net, { x, target: 3, igSteps: 8, occlusion: { size: 6, stride: 2 }, fill });
+    const { grad } = logitGradient(net, x, 3);
+    expect(r.kind).toBe('image');
+    expect(r.shape).toEqual(COLOUR);
+    expect(r.saliency).toHaveLength(1024);
+    expect(r.gradInput).toHaveLength(1024);
+    expect(r.integrated).toHaveLength(1024);
+    expect(r.occlusion).toHaveLength(1024);
+    expect(r.channels!.integrated).toHaveLength(3072);
+    expect(r.gradient).toHaveLength(0);
+    for (const p of [0, 77, 500, 1023]) {
+      let s = 0;
+      let gx = 0;
+      let ig = 0;
+      for (let c = 0; c < 3; c++) {
+        s += Math.abs(grad[c * 1024 + p]);
+        gx += x[c * 1024 + p] * grad[c * 1024 + p];
+        ig += r.channels!.integrated[c * 1024 + p];
+        expect(r.channels!.saliency[c * 1024 + p]).toBeCloseTo(Math.abs(grad[c * 1024 + p]), 7);
+      }
+      expect(r.saliency[p]).toBeCloseTo(s, 6);
+      expect(r.gradInput[p]).toBeCloseTo(gx, 6);
+      expect(r.integrated[p]).toBeCloseTo(ig, 6);
+    }
+    // channel-major: R = [1, −2], G = [3, 4], B = [−5, 6]
+    expect(Array.from(sumChannels([1, -2, 3, 4, -5, 6], 3))).toEqual([-1, 8]);
+    expect(Array.from(sumChannels([1, -2, 3, 4, -5, 6], 3, true))).toEqual([9, 12]);
+  });
+
+  it('completeness holds over all three channels (Σ IG ≈ z(x) − z(black))', () => {
+    const net = new Network(colourArch(LENET), 6);
+    const x = photo(2);
+    const r = computeAttribution(net, { x, target: 5, igSteps: 64, occlusion: { size: 8, stride: 8 }, fill });
+    let sum = 0;
+    for (const v of r.integrated) sum += v;
+    expect(sum).toBeCloseTo(r.igSum, 4);
+    expect(r.baseLogit).toBeCloseTo(targetLogit(net, new Float32Array(3072), 5), 5);
+    expect(completenessGap(r.igSum, r.igExpected, r.igAbsSum).rel).toBeLessThan(0.01);
+    expect(completenessText(r, 'black').expected).toMatch(/^z\(x\) − z\(black\) = /);
+    expect(completenessText(r, 'black').title).toContain('from a black image to this one');
+  });
+
+  it('occlusion paints all three channels with the fill and matches a brute-force sweep', () => {
+    const net = new Network(colourArch(SMALL_CNN), 8);
+    const x = photo(3, fill);
+    const size = 6;
+    const stride = 4;
+    const t = 2;
+    const r = computeAttribution(net, { x, target: t, igSteps: 2, occlusion: { size, stride }, fill });
+    expect(r.fill).toEqual(fill);
+    const z0 = targetLogit(net, x, t);
+    const patches = patchGrid(32, size, stride);
+    const drops = patches.map((p) => {
+      const e = x.slice();
+      for (let c = 0; c < 3; c++) for (let y = p.y; y < Math.min(32, p.y + size); y++) for (let k = p.x; k < Math.min(32, p.x + size); k++) e[c * 1024 + y * 32 + k] = fill[c];
+      return z0 - targetLogit(net, e, t);
+    });
+    const want = occlusionMap(patches, drops, size, 32, 32);
+    for (let i = 0; i < 1024; i++) expect(r.occlusion[i]).toBeCloseTo(want[i], 4);
+    // Patches inside the block that already has the fill colour change nothing: no forward pass.
+    const filled = patches.filter((p) => patchIsFilled(x, p, size, COLOUR, fill)).length;
+    expect(filled).toBeGreaterThan(0);
+    expect(r.patchesEvaluated).toBe(patches.length - filled);
+    expect(patchIsFilled(x, { y: 22, x: 22 }, 6, COLOUR, fill)).toBe(true);
+    expect(patchIsFilled(x, { y: 22, x: 22 }, 6, COLOUR, [fill[0], fill[1], 0])).toBe(false);
+  });
+
+  it('the mean colour is the per-channel average over every stored image', () => {
+    const shape = { c: 3, h: 2, w: 2 };
+    // Two images, stored 0–255 as the dataset stores them.
+    const X = Uint8Array.from([0, 0, 0, 0, 255, 255, 255, 255, 10, 20, 30, 40, 255, 255, 255, 255, 0, 0, 0, 0, 50, 50, 50, 50]);
+    const m = meanColour(X, 2, shape, 1 / 255);
+    expect(m[0]).toBeCloseTo((0 + 255 * 4) / 8 / 255, 9);
+    expect(m[1]).toBeCloseTo((255 * 4 + 0) / 8 / 255, 9);
+    expect(m[2]).toBeCloseTo((100 + 200) / 8 / 255, 9);
+    expect(meanColour(X, 0, shape)).toEqual([0, 0, 0]);
+  });
+
+  it('the job paints occluded patches with the test set’s mean colour unless told otherwise', async () => {
+    const net = new Network(colourArch(SMALL_CNN), 2);
+    const n = 40;
+    const testX = new Uint8Array(n * 3072);
+    const rng = new Rng(5);
+    for (let i = 0; i < testX.length; i++) testX[i] = Math.floor(rng.next() * 256);
+    const testY = Uint8Array.from({ length: n }, (_, i) => i % 10);
+    const log: FromAnalyzer[] = [];
+    const a = new Analyzer((m) => log.push(m), jobs, 30);
+    a.handle({ type: 'data', testX, testY, inputSize: 3072, scale: 1 / 255, classes: 10 });
+    a.handle({ type: 'run', id: 1, channel: 'attribution', kind: 'attribution', params: { x: photo(4), target: 1, igSteps: 4 }, arch: colourArch(SMALL_CNN), weights: net.getWeights() });
+    const t0 = performance.now();
+    while (!log.some((m) => m.type === 'result' || m.type === 'error') && performance.now() - t0 < 20_000) await new Promise((r) => setTimeout(r, 2));
+    const msg = log.find((m) => m.type === 'result' || m.type === 'error')!;
+    expect(msg.type).toBe('result');
+    const r = (msg as { result: AttributionResult }).result;
+    const want = meanColour(testX, n, COLOUR, 1 / 255);
+    for (let c = 0; c < 3; c++) expect(r.fill[c]).toBeCloseTo(want[c], 6);
+    expect(r.occlusionSize).toBe(6);
+    expect(r.patches).toBe(14 * 14);
+  }, 30_000);
+
+  it('the kink note names the input', () => {
+    expect(kinkText({ relu: 4, pool: 0 }, 'image')).toBe('Where the input leaves ReLUs at exactly 0, brightening and darkening a pixel differ; the map shows the average slope.');
+    expect(kinkText({ relu: 4, pool: 0 }, 'features')).toBe('Where the input leaves ReLUs at exactly 0, raising and lowering a feature differ; the slopes shown are averages.');
+  });
+});
+
+// ── Point data: one value per input feature ────────────────────────────
+
+describe('point features', () => {
+  const ids2 = ['x1', 'x2', 'x1^2', 'x1*x2', 'sin x2'];
+  const pointArch = (F: number, layers: LayerSpec[], classes = 2): Arch => ({ input: { c: F, h: 1, w: 1 }, layers, classes });
+  const TANH: LayerSpec[] = [
+    { kind: 'dense', units: 8, act: 'tanh' },
+    { kind: 'dense', units: 8, act: 'tanh' },
+  ];
+  const logitAt = (net: Network, coords: number[], dims: 2 | 3, ids: string[], t: number) => targetLogit(net, featurize(Float32Array.from(coords), dims, ids), t);
+
+  it('gives one value per feature, the signed gradient, and no occlusion', () => {
+    const net = new Network(pointArch(5, TANH), 3);
+    const coords = [0.3, -0.6];
+    const x = featurize(Float32Array.from(coords), 2, ids2);
+    const r = computeAttribution(net, { x, target: 1, igSteps: 32, point: { coords, dims: 2, features: ids2 } });
+    expect(r.kind).toBe('features');
+    expect(r.shape).toEqual({ c: 5, h: 1, w: 1 });
+    for (const v of [r.saliency, r.gradInput, r.integrated, r.gradient]) expect(v).toHaveLength(5);
+    expect(r.occlusion).toHaveLength(0);
+    expect(r.patches).toBe(0);
+    expect(r.channels).toBeUndefined();
+    // the gradient matches central differences of the logit, feature by feature
+    const h = 1e-3;
+    for (let f = 0; f < 5; f++) {
+      const up = x.slice();
+      const down = x.slice();
+      up[f] += h;
+      down[f] -= h;
+      const fd = (targetLogit(net, up, 1) - targetLogit(net, down, 1)) / (2 * h);
+      expect(r.gradient[f]).toBeCloseTo(fd, 3);
+      expect(r.saliency[f]).toBeCloseTo(Math.abs(r.gradient[f]), 7);
+      expect(r.gradInput[f]).toBeCloseTo(x[f] * r.gradient[f], 7);
+    }
+    expect(() => computeAttribution(net, { x: new Float32Array(2), target: 0 })).toThrow('Attribution needs 5 feature values, got 2 values');
+  });
+
+  it('integrated gradients add up to z(x) − z(origin): every feature is 0 at the origin', () => {
+    for (const ids of [ids2, ['x1', 'x2'], featureCatalog(2).map((f) => f.id)]) {
+      const net = new Network(pointArch(ids.length, TANH), 7);
+      const coords = [-0.8, 0.45];
+      const x = featurize(Float32Array.from(coords), 2, ids);
+      const r = computeAttribution(net, { x, target: 0, igSteps: 32 });
+      expect(r.baseLogit).toBeCloseTo(logitAt(net, [0, 0], 2, ids, 0), 6);
+      expect(Math.abs(r.igSum - r.igExpected), ids.join()).toBeLessThan(0.002 * Math.max(1, r.igAbsSum));
+    }
+    const text = completenessText({ igSum: 0.5, igExpected: 0.5, igAbsSum: 0.9 }, 'origin').title;
+    expect(text).toContain('from the point at the origin, where every feature is 0, to this one');
+    expect(text).toContain('all the feature attributions');
+  });
+
+  it('the gradient with respect to the coordinates follows the chain rule through the features (2-D and 3-D)', () => {
+    const cases: [number[], 2 | 3, string[]][] = [
+      [[0.3, -0.6], 2, ids2],
+      [[-0.2, 0.7, 0.4], 3, featureCatalog(3).map((f) => f.id)],
+      [[0.5, 0.1, -0.9], 3, ['x1', 'x3', 'x2*x3', 'sin x1']],
+    ];
+    for (const [coords, dims, ids] of cases) {
+      const net = new Network(pointArch(ids.length, TANH, 3), 11);
+      const x = featurize(Float32Array.from(coords), dims, ids);
+      const r = computeAttribution(net, { x, target: 2, igSteps: 4, point: { coords, dims, features: ids } });
+      expect(r.coordGrad).toHaveLength(dims);
+      const h = 1e-3;
+      for (let i = 0; i < dims; i++) {
+        const up = coords.slice();
+        const down = coords.slice();
+        up[i] += h;
+        down[i] -= h;
+        const fd = (logitAt(net, up, dims, ids, 2) - logitAt(net, down, dims, ids, 2)) / (2 * h);
+        expect(r.coordGrad![i], `${ids.join()} coordinate ${i + 1}`).toBeCloseTo(fd, 3);
+      }
+    }
+    // With only the raw coordinates as features, it is the feature gradient itself.
+    const g = coordinateGradient([2, -3], { coords: [0.1, 0.2], dims: 2, features: ['x1', 'x2'] });
+    expect(g[0]).toBeCloseTo(2, 6);
+    expect(g[1]).toBeCloseTo(-3, 6);
+  });
+
+  it('says in words which feature pushes toward the class and which pushes away', () => {
+    const labels = ['x₁', 'x₂', 'x₁²'];
+    expect(featureSentence(labels, [0.1, -0.31, 0.82], 'Class 1')).toBe('x₁² pushes toward Class 1 the most (+0.82). x₂ pushes away from it (−0.31).');
+    expect(featureSentence(labels, [0.4, 0.0001, 0], 'Class 0')).toBe('x₁ pushes toward Class 0 the most (+0.4).');
+    expect(featureSentence(labels, [-0.2, -0.5, 0], 'Class 2')).toBe('Every feature that matters pushes away from Class 2 here; x₂ the most (−0.5).');
+    expect(featureSentence(labels, [0, 0, 0], 'Class 1')).toBe('No feature moves the score for Class 1 much at this point.');
+    // a feature with under 5% of the total does not count
+    expect(featureSentence(labels, [1, -0.04, 0], 'Class 1')).toBe('x₁ pushes toward Class 1 the most (+1).');
+    // Measured from the origin: a predicted class can still score lower here than there.
+    expect(featureSentence(labels, [-1.24, -3.3, 0], 'Class 0', -4.05)).toBe(
+      'From the origin to this point, the score for Class 0 falls by 4.05. Every feature that matters pushes away from Class 0 here; x₂ the most (−3.3).',
+    );
+    expect(featureSentence(labels, [0.5, 0, 0], 'Class 1', 0.5)).toBe('From the origin to this point, the score for Class 1 rises by 0.5. x₁ pushes toward Class 1 the most (+0.5).');
+    expect(featureSentence(labels, [0, 0, 0], 'Class 1', 0)).toBe('From the origin to this point, the score for Class 1 stays about the same. No feature moves the score for Class 1 much at this point.');
+  });
 });

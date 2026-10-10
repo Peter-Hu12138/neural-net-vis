@@ -1,0 +1,259 @@
+/* ── 10 Attribution: class names, colour photos and point data ─────────────
+   Loaded after attributionView.css. Named classes (Fashion-MNIST, CIFAR-10, points) get chips
+   that say the name; point data swaps the five maps for a map of the plane and one bar per
+   input feature. Colours come from the theme tokens only. */
+
+/* A class name in the prediction line stays on one line ("Class 0", "ankle boot"). */
+.attr-pred b {
+  white-space: nowrap;
+}
+
+/* Chips that carry a class name instead of a digit. */
+.attr-chips.is-named .attr-chip-col {
+  width: auto;
+}
+
+.chip.attr-chip-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: auto;
+  min-width: 28px;
+  padding: 0 9px;
+  font: 500 12px/1 var(--mono);
+  white-space: nowrap;
+}
+
+.attr-swatch {
+  display: inline-block;
+  flex: none;
+  width: 9px;
+  height: 9px;
+}
+
+.chip[aria-pressed='true'] .attr-swatch {
+  box-shadow: 0 0 0 1px var(--bg);
+}
+
+/* The occlusion fill colour of a colour dataset, beside the words that name it. */
+.attr-fill {
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  border: 1px solid var(--ink);
+  vertical-align: -1px;
+}
+
+/* ── Point data ── */
+
+.attr-panels.is-points {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+/* Out-of-date results fade like the image maps do, after the same 200 ms. */
+.attr-pts {
+  transition: opacity 120ms ease;
+}
+
+.attr-panels.is-stale .attr-pts {
+  opacity: 0.35;
+  transition: opacity 200ms ease 200ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .attr-pts,
+  .attr-panels.is-stale .attr-pts {
+    transition-duration: 0s;
+  }
+}
+
+.attr-pts {
+  display: grid;
+  grid-template-columns: minmax(220px, 300px) minmax(0, 1fr);
+  gap: 26px 32px;
+  align-items: start;
+  min-width: 0;
+}
+
+@media (max-width: 760px) {
+  .attr-pts {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.attr-pts-fig {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+  min-width: 0;
+  margin: 0;
+}
+
+.attr-plane-box {
+  min-width: 0;
+  max-width: 300px;
+}
+
+.attr-plane {
+  display: block;
+  cursor: crosshair;
+  touch-action: manipulation;
+}
+
+.attr-plane:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+
+.attr-plane-caption {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  font: 500 12px/1.5 var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-2);
+}
+
+.attr-nowrap {
+  white-space: nowrap;
+}
+
+.attr-sentence {
+  margin: 0;
+  max-width: 52ch;
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 1.35;
+}
+
+.attr-feat-wrap {
+  min-width: 0;
+}
+
+.attr-feat {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.attr-feat thead th {
+  padding: 0 8px 6px 0;
+  border-bottom: 1px solid var(--ink);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  line-height: 1.25;
+  text-align: left;
+  text-transform: uppercase;
+  color: var(--muted);
+  vertical-align: bottom;
+}
+
+.attr-feat tbody th,
+.attr-feat tbody td {
+  padding: 7px 8px 7px 0;
+  border-bottom: 1px solid var(--hair);
+  vertical-align: middle;
+}
+
+.attr-feat tbody th {
+  font-weight: 400;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.attr-feat-name {
+  display: block;
+  font: 600 14px/1.2 var(--mono);
+  color: var(--ink);
+}
+
+.attr-feat-value {
+  display: block;
+  font: 400 11px/1.3 var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.attr-feat tbody .attr-col-slope {
+  font: 400 12px/1 var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+
+.attr-bar-cell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.attr-bar-track {
+  position: relative;
+  flex: 0 1 180px;
+  min-width: 44px;
+  height: 12px;
+}
+
+/* The zero line every bar starts from. */
+.attr-bar-track::before {
+  content: '';
+  position: absolute;
+  top: -4px;
+  bottom: -4px;
+  left: 50%;
+  width: 1px;
+  background: var(--ink);
+}
+
+.attr-bar {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: var(--accent);
+}
+
+.attr-bar.is-neg {
+  background: var(--neg);
+}
+
+.attr-bar-num {
+  flex: none;
+  min-width: 6ch;
+  font: 500 12px/1 var(--mono);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  color: var(--ink);
+}
+
+.attr-feat-scale {
+  margin: 0;
+  font: 400 11px/1.4 var(--mono);
+  color: var(--muted);
+}
+
+.attr-feat-hints {
+  display: grid;
+  gap: 8px;
+}
+
+@media (max-width: 420px) {
+  .attr-feat tbody th,
+  .attr-feat tbody td,
+  .attr-feat thead th {
+    padding-right: 6px;
+  }
+
+  .attr-bar-cell {
+    gap: 5px;
+  }
+
+  .attr-bar-track {
+    min-width: 32px;
+  }
+
+  .attr-bar-num {
+    min-width: 5.5ch;
+  }
+}

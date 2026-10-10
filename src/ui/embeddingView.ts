@@ -1,39 +1,47 @@
 import './embeddingView.css';
+import './embedding.css';
 import { setProbe, testProbe } from '../actions';
 import { analysis, isSuperseded } from '../analysis/client';
 import {
   alignPca,
-  balancedIndices,
   DEFAULT_ITERATIONS,
   DEFAULT_N,
   DEFAULT_PERPLEXITY,
+  embedIndices,
+  isFrame,
   layerFeatures,
   niceTicks,
   PHASES,
   projectPca,
+  REDUCING,
   signedValue,
   tickLabel,
+  TSNE_PCA_DIM,
   type EmbedMethod,
   type EmbedResult,
   type PcaInfo,
   type TsnePartial,
 } from '../analysis/embed';
 import type { Progress } from '../analysis/protocol';
-import { sampleInput } from '../data/datasets';
+import { fixed } from '../analysis/stats';
+import { noun, sampleCaption, sampleInput, type Data } from '../data/datasets';
+import { pointDomain } from '../data/grid';
 import { Network } from '../nn/network';
-import { fmtShape } from '../nn/types';
+import { fmtShape, size } from '../nn/types';
 import { store } from '../store';
+import { axisName } from './boundaryMath';
 import { layerName } from './builder';
 import { $, append, clear, fmt, h, int, pct, segmented, selectField } from './dom';
-import { fitCanvas, paintThumb } from './draw';
+import { fitCanvas, paintSample } from './draw';
 import { isCurrent, syncedSection, type Stamp } from './snapshot';
-import { onThemeChange, palette } from './theme';
+import { onThemeChange, palette, type Palette } from './theme';
 import { hideTip, showTip } from './tip';
 
 /**
- * Section 11: how one layer arranges a balanced set of 1,000 test digits, flattened to 2-D with
- * PCA (recomputed automatically, cheap and linear) or t-SNE (on request, animated). Every point is
- * drawn as its digit numeral; colour only repeats what the numeral says.
+ * Section 11: how one layer arranges a balanced set of up to 1,000 test samples (every test point
+ * of a point dataset), flattened to 2-D with PCA (recomputed automatically, cheap and linear) or
+ * t-SNE (on request, animated). Every sample is drawn as its class's numeral; colour repeats what
+ * the numeral says, and the class chips double as the legend.
  */
 
 const MONO = '"IBM Plex Mono", ui-monospace, monospace';
@@ -42,8 +50,33 @@ const MAX_PLOT = 640;
 const FADE = 0.12;
 const HIT_RADIUS = 12;
 const CHANNEL = 'embedding';
-const DIGITS = Array.from({ length: 10 }, (_, d) => String(d));
-const FLAT_NOTE = 'Every digit gives the same values at this layer, so there is nothing to spread out. This happens when all of its units are switched off (dead ReLUs) or saturated.';
+const SVG = 'http://www.w3.org/2000/svg';
+
+/** The current-input cross as a small inline SVG for legends, drawn like drawInputCross. */
+export function crossIcon(cls = 'embed-cross-icon'): SVGSVGElement {
+  const svg = document.createElementNS(SVG, 'svg');
+  svg.setAttribute('viewBox', '-17 -17 34 34');
+  svg.setAttribute('class', cls);
+  svg.setAttribute('aria-hidden', 'true');
+  const arms = (extra: number) => {
+    const a = 5 - extra;
+    const b = 13 + extra;
+    return `M${-b} 0H${-a}M${a} 0H${b}M0 ${-b}V${-a}M0 ${a}V${b}`;
+  };
+  for (const [cls2, width, extra] of [
+    ['is-halo', 8, 3],
+    ['is-outline', 4, 1],
+    ['is-mark', 2, 0],
+  ] as const) {
+    const p = document.createElementNS(SVG, 'path');
+    p.setAttribute('d', arms(extra));
+    p.setAttribute('class', cls2);
+    p.setAttribute('stroke-width', String(width));
+    p.setAttribute('fill', 'none');
+    svg.append(p);
+  }
+  return svg;
+}
 
 /** A finished result plus what is needed to place new inputs on it. */
 interface Shown {
@@ -76,6 +109,8 @@ interface Running {
   frame: TsnePartial | null;
   /** Share of the job done, 0–1. */
   done: number;
+  /** t-SNE on a wide layer: reducing it to its main directions first. */
+  reducing: boolean;
 }
 
 /** Plot geometry from the last full draw, for hit-testing and for redrawing the marks alone. */
@@ -105,14 +140,45 @@ interface BaseKey {
   theme: number;
 }
 
+/**
+ * The current-input cross, shared by 10 and 11: four arms around (x, y), drawn as a 2 px surface
+ * halo, then a 1 px ink outline, then the 2 px accent stroke, so it reads by shape on any colour,
+ * including class colours close to the accent (UX-5). Arms run from `gap` to `arm` px out; the
+ * default gap leaves the numeral at the centre (the marked sample itself) readable.
+ */
+export function drawInputCross(ctx: CanvasRenderingContext2D, x: number, y: number, p: Palette, arm = 14, gap = 6): void {
+  const layer = (colour: string, width: number, extra: number) => {
+    ctx.strokeStyle = colour;
+    ctx.lineWidth = width;
+    ctx.beginPath();
+    for (const [dx, dy] of [
+      [-1, 0],
+      [1, 0],
+      [0, -1],
+      [0, 1],
+    ]) {
+      ctx.moveTo(x + dx * (gap - extra), y + dy * (gap - extra));
+      ctx.lineTo(x + dx * (arm + extra), y + dy * (arm + extra));
+    }
+    ctx.stroke();
+  };
+  ctx.save();
+  ctx.lineCap = 'butt';
+  layer(p.surface, 8, 3); // the ink outline plus 2 px on every side, ends included
+  layer(p.ink, 4, 1); // 1 px around the accent stroke
+  layer(p.accent, 2, 0);
+  ctx.restore();
+}
+
 let catCache: string[] | null = null;
-/** Digit colours (--cat-0 … --cat-9), read at draw time so they follow the theme. */
+/** Class colours (--cat-0 … --cat-9; class k uses k mod 10), read at draw time so they follow the theme. */
 function catColours(): string[] {
   if (catCache) return catCache;
   const cs = getComputedStyle(document.documentElement);
   catCache = Array.from({ length: 10 }, (_, d) => cs.getPropertyValue(`--cat-${d}`).trim() || palette().ink);
   return catCache;
 }
+const catColour = (k: number) => catColours()[k % 10];
 
 /** Keeps "t-SNE" on one line in the section note (it would otherwise break after "t-"). */
 function keepTermTogether(note: Element | null, term: string): void {
@@ -153,6 +219,35 @@ export function mountEmbedding(): void {
   const root = $('embed-root');
   root.classList.add('embed');
   keepTermTogether(document.querySelector('#embedding .sec-note'), 't-SNE');
+
+  // ── Words that depend on the dataset ──
+  const info = () => store.info;
+  const isMnist = () => info().id === 'mnist';
+  const pts = () => info().kind === 'points';
+  /** "digit" / "image" / "point", plural with n ≠ 1. */
+  const one = (n = 1) => noun(info(), n);
+  const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+  const className = (k: number) => info().classes[k] ?? `Class ${k}`;
+  /** The mark a sample is drawn with: its class's numeral. */
+  const glyph = (k: number) => info().glyphs[k] ?? String(k);
+  /** "7" for MNIST digits, "cat" or "Class 1" otherwise. */
+  const labelName = (k: number) => (isMnist() ? String(k) : className(k));
+  /** Test samples a map shows for the loaded data (all of them for small test sets). */
+  const sampleCount = () => (store.data ? Math.min(DEFAULT_N, store.data.testY.length) : DEFAULT_N);
+  /**
+   * The section note says how many test samples a map shows. main.ts writes it on a dataset switch
+   * with 1,000 for every dataset; once the data is in, this corrects it (a microtask, so it runs
+   * after main.ts's own listener).
+   */
+  const fixNote = () =>
+    queueMicrotask(() => {
+      const note = document.getElementById('note-embed');
+      if (!note) return;
+      const n = store.data && store.data.info.id === info().id ? sampleCount() : DEFAULT_N;
+      const many = pts() && !store.data ? 'the test points' : `${int(n)} test ${one(n)}`;
+      note.textContent = `How a layer arranges ${many}, flattened to two dimensions with PCA or t-SNE.`;
+      keepTermTogether(note, 't-SNE');
+    });
 
   // ── State ──
   const defaultLayer = () => (store.net.blocks.length >= 2 ? store.net.blocks.length - 2 : -1);
@@ -214,35 +309,64 @@ export function mountEmbedding(): void {
     draw();
   });
 
-  const canvas = h('canvas', { id: 'embed-canvas', role: 'img', tabindex: '0', 'aria-label': 'Embedding of test digits' }) as HTMLCanvasElement;
+  const canvas = h('canvas', { id: 'embed-canvas', role: 'img', tabindex: '0', 'aria-label': 'Embedding of test samples' }) as HTMLCanvasElement;
   /** Live caption over the map while t-SNE runs (iteration and KL); never moves the layout. */
   const runText = h('div', { class: 'embed-run-text', id: 'embed-run-text', hidden: true });
   const plotBox = h('div', { class: 'embed-plot' }, canvas, runText);
 
   const previewHead = h('p', { class: 'sub' }, 'Current input');
-  const previewCanvas = h('canvas', { class: 'embed-preview-img', role: 'img', 'aria-label': 'Preview of the digit' }) as HTMLCanvasElement;
+  const previewCanvas = h('canvas', { class: 'embed-preview-img', role: 'img', 'aria-label': 'Preview of the current input' }) as HTMLCanvasElement;
   const previewTitle = h('div', { class: 'panel-title embed-preview-title' });
   const previewMeta = h('div', { class: 'embed-preview-meta' });
   const preview = h('div', { class: 'embed-preview', id: 'embed-preview' }, previewCanvas, h('div', { class: 'embed-preview-text' }, previewTitle, previewMeta));
 
-  const chips = h('div', { class: 'chips embed-chips', role: 'group', 'aria-label': 'Highlight a digit' });
-  const chipButtons: HTMLButtonElement[] = [];
-  for (let d = 0; d < 10; d++) {
-    const b = h(
-      'button',
-      { type: 'button', class: 'chip embed-chip', id: `embed-digit-${d}`, 'aria-pressed': 'false', 'aria-label': `Highlight the ${d}s` },
-      h('span', { class: 'embed-swatch', style: { background: `var(--cat-${d})` } }),
-      String(d),
-    ) as HTMLButtonElement;
-    b.addEventListener('click', () => {
-      focusDigit = focusDigit === d ? null : d;
-      for (const [i, c] of chipButtons.entries()) c.setAttribute('aria-pressed', String(i === focusDigit));
-      draw();
-      followPointer();
+  // Class chips: highlight one class. With class names (Fashion-MNIST, CIFAR-10, points) they say
+  // the name beside the numeral and so are the legend of the map as well.
+  const chips = h('div', { class: 'chips embed-chips', role: 'group', 'aria-label': 'Highlight a class' });
+  const chipsHead = h('p', { class: 'sub' }, 'Digits');
+  const chipHint = h('p', { class: 'hint embed-chip-hint' }, 'Click a digit to highlight it; click again to show all.');
+  let chipButtons: HTMLButtonElement[] = [];
+  let chipKey = '';
+  const buildChips = () => {
+    const names = info().classes;
+    const key = `${info().id}|${names.join('|')}`;
+    if (key === chipKey) return;
+    chipKey = key;
+    if (focusDigit !== null && focusDigit >= names.length) focusDigit = null;
+    chips.replaceChildren();
+    const named = !isMnist();
+    chips.classList.toggle('is-named', named);
+    chipButtons = names.map((name, d) => {
+      const g = glyph(d);
+      // "0 airplane"; point classes are named "Class 0" already, so they show the name alone.
+      const label = !named ? g : name === `Class ${g}` ? name : null;
+      const b = h(
+        'button',
+        {
+          type: 'button',
+          class: `chip embed-chip${named ? ' embed-chip-named' : ''}`,
+          id: `embed-digit-${d}`,
+          'aria-pressed': String(focusDigit === d),
+          'aria-label': isMnist() ? `Highlight the ${d}s` : `Highlight ${name} (drawn as ${g})`,
+        },
+        h('span', { class: 'embed-swatch', style: { background: `var(--cat-${d % 10})` } }),
+        label ?? h('span', { class: 'embed-chip-glyph' }, g),
+        // A space for the text ("0 airplane"); the flex gap does the spacing on screen.
+        label ? null : ' ',
+        label ? null : h('span', { class: 'embed-chip-name' }, name),
+      ) as HTMLButtonElement;
+      b.addEventListener('click', () => {
+        focusDigit = focusDigit === d ? null : d;
+        for (const [i, c] of chipButtons.entries()) c.setAttribute('aria-pressed', String(i === focusDigit));
+        draw();
+        followPointer();
+      });
+      chips.append(b);
+      return b;
     });
-    chipButtons.push(b);
-    chips.append(b);
-  }
+    chipsHead.textContent = isMnist() ? 'Digits' : 'Classes';
+    chipHint.textContent = isMnist() ? 'Click a digit to highlight it; click again to show all.' : 'Each class is drawn as its numeral. Click a class to highlight it; click again to show all.';
+  };
   const keys = h('div', { class: 'embed-keys' });
   const stats = h('div', { class: 'embed-stats', id: 'embed-stats' });
   const methodHint = h('div', { class: 'embed-hints' });
@@ -289,7 +413,7 @@ export function mountEmbedding(): void {
         'div',
         { class: 'embed-aside' },
         h('div', null, previewHead, preview),
-        h('div', null, h('p', { class: 'sub' }, 'Digits'), chips, h('p', { class: 'hint embed-chip-hint' }, 'Click a digit to highlight it; click again to show all.'), keys),
+        h('div', null, chipsHead, chips, chipHint, keys),
         stats,
         methodHint,
       ),
@@ -303,7 +427,7 @@ export function mountEmbedding(): void {
     const s = cache[method];
     return fresh(s, method) ? s : null;
   };
-  const layerTitle = (l: number) => (l < 0 ? 'the input pixels' : layerName(l < store.net.spec.length ? store.net.spec[l] : null, l));
+  const layerTitle = (l: number) => (l < 0 ? (pts() ? 'the input features' : 'the input pixels') : layerName(l < store.net.spec.length ? store.net.spec[l] : null, l));
 
   /** The points on screen: the live t-SNE frame while it runs, else the finished result. */
   const view = (): View | null => {
@@ -327,7 +451,8 @@ export function mountEmbedding(): void {
     probePt = null;
     const s = cache.pca;
     const p = store.probe;
-    if (!s || !s.res.pca || s.res.flat || !p || s.stamp.version !== store.version) return;
+    // The input must fit the network (a dataset switch replaces the network before the input).
+    if (!s || !s.res.pca || s.res.flat || !p || s.stamp.version !== store.version || p.x.length !== s.net.inputSize) return;
     s.net.forward(p.x);
     const [a, b] = projectPca(layerFeatures(s.net, s.res.layer), s.res.pca);
     probePt = { key: p.key, coords: s.res.coords, a, b };
@@ -346,19 +471,22 @@ export function mountEmbedding(): void {
     const m = method;
     const l = layer;
     const id = ++runId;
-    const indices = balancedIndices(store.data!.testY, DEFAULT_N);
+    // The same samples the job picks (every test point of a small point dataset).
+    const indices = embedIndices(store.data!.testY, DEFAULT_N, store.classes);
     const labels = Uint8Array.from(indices, (i) => store.data!.testY[i]);
     // The worker gets these same weights: analysis.run copies them synchronously below.
     const net = snapshotNet();
     const stamp = sync.begin();
-    running = { id, method: m, layer: l, stamp, indices, labels, frame: null, done: 0 };
+    running = { id, method: m, layer: l, stamp, indices, labels, frame: null, done: 0, reducing: false };
     error = null;
     showProgress({ done: 0, total: 1 });
     render();
     analysis
       .run<EmbedResult>(CHANNEL, 'embed', { layer: l, method: m, n: DEFAULT_N, perplexity: DEFAULT_PERPLEXITY, iterations: DEFAULT_ITERATIONS }, (p) => {
         if (running?.id !== id) return;
-        const frame = p.partial as TsnePartial | undefined;
+        const frame = isFrame(p.partial) ? p.partial : undefined;
+        // The marker arrives as a copy from the worker: compare its phase, not its identity.
+        running.reducing = !!p.partial && typeof p.partial === 'object' && (p.partial as { phase?: string }).phase === REDUCING.phase;
         const firstFrame = !!frame && !running.frame;
         const fresher = frame && (!running.frame || frame.iteration !== running.frame.iteration);
         if (frame) running.frame = frame;
@@ -403,9 +531,10 @@ export function mountEmbedding(): void {
   /** The run's phase in words, for the canvas (nothing shown yet) or the caption over an older map. */
   const phaseText = (r: Running): string => {
     if (r.method === 'tsne' && r.frame) return `Iteration ${r.frame.iteration} / ${DEFAULT_ITERATIONS} · KL ${r.frame.kl.toFixed(2)}`;
-    if (r.done < (r.method === 'pca' ? PHASES.pca.collect : PHASES.tsne.collect)) return `Reading ${int(r.indices.length)} test digits…`;
+    if (r.reducing) return `Finding the ${TSNE_PCA_DIM} main directions of this layer…`;
+    if (r.done < (r.method === 'pca' ? PHASES.pca.collect : PHASES.tsne.collect)) return `Reading ${int(r.indices.length)} test ${one(r.indices.length)}…`;
     if (r.method === 'pca') return 'Finding the two main directions…';
-    return `Measuring each digit’s ${DEFAULT_PERPLEXITY} nearest neighbours…`;
+    return `Measuring each ${one()}’s ${Math.round(Math.min(DEFAULT_PERPLEXITY, (r.indices.length - 1) / 3))} nearest neighbours…`;
   };
 
   let lastPhase = '';
@@ -441,10 +570,12 @@ export function mountEmbedding(): void {
   const buildLayerSelect = () => {
     clear(layerSlot);
     const blocks = store.net.blocks;
-    const options = [{ value: -1, label: 'Input pixels · 784' }];
+    const inputSize = size(store.net.arch.input);
+    const options = [{ value: -1, label: `${pts() ? 'Input features' : 'Input pixels'} · ${int(inputSize)}` }];
     blocks.forEach((b, i) => {
       const spec = i < store.net.spec.length ? store.net.spec[i] : null;
-      options.push({ value: i, label: `${layerName(spec, i)} · ${spec ? fmtShape(b.outShape) : '10 logits'}` });
+      // One name for the output layer across 08–11: "Output · 10 logits".
+      options.push({ value: i, label: `${layerName(spec, i)} · ${spec ? fmtShape(b.outShape) : `${b.out.length} logits`}` });
     });
     layerSlot.append(selectField('embed-layer', 'Layer', options, layer, (v) => setLayer(v)));
   };
@@ -514,10 +645,19 @@ export function mountEmbedding(): void {
   const pointText = (s: number): string => {
     const v = view()!;
     const i = v.indices[s];
-    let t = `Test digit #${i} · label ${v.labels[s]}`;
-    if (v.preds) t += ` · predicted ${v.preds[s]}`;
+    // "Test digit #12 · label 7 · predicted 7", "Test image #3 · cat · predicted dog".
+    let t = sampleCaption(info(), 'test', i, v.labels[s]);
+    if (v.preds) t += ` · predicted ${labelName(v.preds[s])}`;
     if (v.method === 'pca') t += `\nPC1 ${signedValue(v.coords[2 * s])} · PC2 ${signedValue(v.coords[2 * s + 1])}`;
+    if (pts()) t += `\nAt ${coordsText(i)} in the input`;
     return t;
+  };
+
+  /** A test point's position in the input space: "x₁ 0.42 · x₂ −0.13". */
+  const coordsText = (i: number): string => {
+    const p = store.data?.points;
+    if (!p) return '';
+    return Array.from(p.testCoords.subarray(i * p.dims, (i + 1) * p.dims), (v, k) => `${axisName(k)} ${fixed(v, 2)}`).join(' · ');
   };
 
   const probeText = () => {
@@ -670,23 +810,75 @@ export function mountEmbedding(): void {
     drawMarks();
   });
 
+  const PREVIEW = 104;
+
+  /**
+   * Point data has no picture: the preview shows where the point lies in the input (x₁ across, x₂
+   * up; 3-D data seen from above), among the test points. `mark` is a hovered test point (a ring)
+   * or the current input (the cross).
+   */
+  const paintPlanePreview = (d: Data, coords: ArrayLike<number> | null, cls: number | null, mark: 'hover' | 'input') => {
+    const pal = palette();
+    const ctx = fitCanvas(previewCanvas, PREVIEW, PREVIEW);
+    const p = d.points!;
+    const r = pointDomain(d);
+    const pad = 6;
+    const w = PREVIEW - 2 * pad;
+    const sx = (u: number) => pad + ((u + r) / (2 * r)) * w;
+    const sy = (v: number) => pad + ((r - v) / (2 * r)) * w;
+    ctx.fillStyle = pal.surface;
+    ctx.fillRect(0, 0, PREVIEW, PREVIEW);
+    ctx.fillStyle = pal.hair;
+    ctx.fillRect(Math.round(sx(0)), pad, 1, w);
+    ctx.fillRect(pad, Math.round(sy(0)), w, 1);
+    ctx.globalAlpha = 0.45;
+    const tc = p.testCoords;
+    for (let i = 0; i < d.testY.length; i++) {
+      ctx.fillStyle = catColour(d.testY[i]);
+      ctx.fillRect(sx(tc[i * p.dims]) - 1, sy(tc[i * p.dims + 1]) - 1, 2, 2);
+    }
+    ctx.globalAlpha = 1;
+    if (coords) {
+      const x = sx(coords[0]);
+      const y = sy(coords[1]);
+      if (mark === 'input') drawInputCross(ctx, x, y, pal, 9, 3);
+      else {
+        ctx.beginPath();
+        ctx.arc(x, y, 5, 0, Math.PI * 2);
+        ctx.fillStyle = cls !== null ? catColour(cls) : pal.ink;
+        ctx.fill();
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = pal.ink;
+        ctx.stroke();
+      }
+    }
+    const where = coords ? Array.from(coords, (v, k) => `${axisName(k)} ${fixed(v, 2)}`).join(', ') : 'unknown';
+    previewCanvas.setAttribute('aria-label', `Where the ${mark === 'input' ? 'current input' : 'hovered point'} lies in the input${p.dims === 3 ? ', seen from above (x₁ across, x₂ up)' : ''}: ${where}`);
+  };
+
   const renderPreview = () => {
     const v = view();
     const d = store.data;
-    const size = 104;
+    const shape = store.net.arch.input;
     if (hover !== null && v && d && hover < v.labels.length) {
       const i = v.indices[hover];
-      previewHead.textContent = 'Hovered digit';
-      paintThumb(previewCanvas, sampleInput(d, 'test', i), 28, 28, size);
-      previewCanvas.hidden = false;
-      previewTitle.textContent = `Test digit #${i}`;
-      clear(previewMeta);
+      previewHead.textContent = `Hovered ${one()}`;
       const label = v.labels[hover];
+      if (d.points) paintPlanePreview(d, d.points.testCoords.subarray(i * d.points.dims, (i + 1) * d.points.dims), label, 'hover');
+      else {
+        paintSample(previewCanvas, sampleInput(d, 'test', i), shape, PREVIEW);
+        previewCanvas.setAttribute('aria-label', `Test ${one()} #${i}`);
+      }
+      previewCanvas.hidden = false;
+      previewTitle.textContent = `Test ${one()} #${i}`;
+      clear(previewMeta);
       const pred = v.preds ? v.preds[hover] : null;
+      const sep = isMnist() ? ' ' : ': ';
       append(previewMeta, [
-        h('div', null, `Label ${label}`),
-        pred !== null ? h('div', null, `Predicted ${pred} `, pred !== label ? h('span', { class: 'tag is-on' }, 'Mistake') : null) : null,
+        h('div', null, `Label${sep}${labelName(label)}`),
+        pred !== null ? h('div', null, `Predicted${sep}${labelName(pred)} `, pred !== label ? h('span', { class: 'tag is-on' }, 'Mistake') : null) : null,
         v.method === 'pca' ? h('div', null, `PC1 ${signedValue(v.coords[2 * hover])} · PC2 ${signedValue(v.coords[2 * hover + 1])}`) : null,
+        d.points ? h('div', null, coordsText(i)) : null,
         h('div', { class: 'embed-preview-act' }, 'Click to use it as the input'),
       ]);
       return;
@@ -694,22 +886,30 @@ export function mountEmbedding(): void {
     const p = store.probe;
     previewHead.textContent = 'Current input';
     clear(previewMeta);
-    if (!p) {
+    // Before the data of a new dataset is in, the probe still belongs to the old one.
+    if (!p || !d || p.x.length !== size(shape)) {
       previewCanvas.hidden = true;
       previewTitle.textContent = '';
-      previewMeta.append(h('div', null, 'Hover a digit on the map to see it here.'));
+      previewMeta.append(h('div', null, d ? `Hover a ${one()} on the map to see it here.` : `Waiting for ${info().name} to load…`));
       return;
     }
     previewCanvas.hidden = false;
-    paintThumb(previewCanvas, p.x, 28, 28, size);
+    if (d.points) paintPlanePreview(d, p.coords ?? null, p.label, 'input');
+    else {
+      paintSample(previewCanvas, p.x, shape, PREVIEW);
+      previewCanvas.setAttribute('aria-label', `The current input: ${p.caption}`);
+    }
     const parts = p.caption.split(' · ');
     previewTitle.textContent = parts[0];
-    const rest = parts.slice(1).join(' · ').replace(/^label /, 'Label ');
+    let rest = parts.slice(1).join(' · ');
+    if (/^label /.test(rest)) rest = rest.replace(/^label /, 'Label ');
+    else if (rest && p.label !== null) rest = `Label: ${rest}`;
     if (rest) previewMeta.append(h('div', null, rest));
+    if (d.points && p.coords) previewMeta.append(h('div', null, Array.from(p.coords, (c, k) => `${axisName(k)} ${fixed(c, 2)}`).join(' · ')));
     const pcaShown = !!v && v.method === 'pca' && !v.flat && !!probePt && probePt.key === p.key && probePt.coords === v.coords;
     if (pcaShown) previewMeta.append(h('div', null, `PC1 ${signedValue(probePt!.a)} · PC2 ${signedValue(probePt!.b)}`));
     const marked = pcaShown || (!!v && v.method === 'tsne' && !v.flat && probeIndex(v) !== null);
-    const act = marked ? 'Marked on the map with a red cross' : v?.flat ? 'Every digit lands on the same point at this layer' : 'Hover a digit on the map to see it here';
+    const act = marked ? 'Marked on the map with a red cross' : v?.flat ? `Every ${one()} lands on the same point at this layer` : `Hover a ${one()} on the map to see it here`;
     previewMeta.append(h('div', { class: 'embed-preview-act' }, act));
   };
 
@@ -738,8 +938,17 @@ export function mountEmbedding(): void {
     const ring = () => h('i', { class: 'embed-ring', 'aria-hidden': 'true' });
     if (mistakes && wrong !== null) keys.append(h('span', { class: 'embed-key' }, ring(), `Misclassified · ${int(wrong)} of ${int(n)}`));
     else if (mistakes && running) keys.append(h('span', { class: 'embed-key' }, ring(), 'Misclassified · shown when the run ends'));
-    if (geo?.probe) keys.append(h('span', { class: 'embed-key' }, h('i', { class: 'embed-cross', 'aria-hidden': 'true' }), 'Current input'));
+    if (geo?.probe) keys.append(h('span', { class: 'embed-key' }, crossIcon(), 'Current input'));
     keys.hidden = !keys.firstChild;
+  };
+
+  /** "100 of each" when the classes are balanced, else "every test point" (or the counts). */
+  const perClass = (labels: Uint8Array): string => {
+    const counts = new Array<number>(store.classes).fill(0);
+    for (const y of labels) counts[y]++;
+    if (counts.every((c) => c === counts[0])) return `${int(counts[0])} of each`;
+    if (store.data && labels.length === store.data.testY.length) return `every test ${one()}`;
+    return counts.map((c, k) => `${int(c)} ${glyph(k)}`).join(', ');
   };
 
   const renderSide = () => {
@@ -752,10 +961,10 @@ export function mountEmbedding(): void {
     const stat = (label: string, value: string) => h('div', null, `${label} `, h('b', null, value));
     if (s) {
       const r = s.res;
-      stats.append(stat('Digits', `${int(r.indices.length)} · ${int(r.indices.length / 10)} of each`));
-      stats.append(stat('Values per digit', `${int(r.dim)} at ${layerTitle(r.layer)}`));
+      stats.append(stat(cap(one(2)), `${int(r.indices.length)} · ${perClass(r.labels)}`));
+      stats.append(stat(`Values per ${one()}`, `${int(r.dim)} at ${layerTitle(r.layer)}`));
       if (r.flat) {
-        stats.append(stat('Variance', '0 · every digit gives the same values'));
+        stats.append(stat('Variance', `0 · every ${one()} gives the same values`));
       } else if (r.method === 'pca' && r.pca) {
         stats.append(stat('Variance shown', `${pct(r.pca.explained[0] + r.pca.explained[1])} (PC1 ${pct(r.pca.explained[0])}, PC2 ${pct(r.pca.explained[1])})`));
       } else if (r.kl !== undefined) {
@@ -771,7 +980,7 @@ export function mountEmbedding(): void {
         h(
           'p',
           { class: 'hint' },
-          'PCA finds the two directions in which this layer’s values vary most and projects every digit onto them. It is a linear map, so distances along the axes are real and any new input can be placed on it: the red cross marks the current input.',
+          `PCA finds the two directions in which this layer’s values vary most and projects every ${one()} onto them. It is a linear map, so distances along the axes are real and any new input can be placed on it: the red cross marks the current input.`,
         ),
       );
     } else {
@@ -779,29 +988,34 @@ export function mountEmbedding(): void {
         h(
           'p',
           { class: 'hint' },
-          't-SNE moves the digits around until the ones that are neighbours at this layer sit next to each other. It preserves neighbours, not distances: the size of a cluster and the gaps between clusters mean little, so the axes carry no values. It starts from the PCA map, shrunk to a speck.',
+          `t-SNE moves the ${one(2)} around until the ones that are neighbours at this layer sit next to each other. It preserves neighbours, not distances: the size of a cluster and the gaps between clusters mean little, so the axes carry no values. It starts from the PCA map, shrunk to a speck.`,
         ),
       );
       const r = s?.res;
       if (r && !r.flat && r.inputDim !== undefined && r.inputDim < r.dim) {
+        // One power iteration keeps the 50 directions close to exact PCA, which itself keeps most
+        // (not all) of each sample's 30 nearest neighbours: 0.84–0.94 on the Small CNN's layers.
         methodHint.append(
           h(
             'p',
             { class: 'hint' },
             r.reduced === 'projection'
-              ? `This layer has ${int(r.dim)} values per digit. They are first mixed down to ${r.inputDim} random directions, which keeps the distances between digits roughly intact and makes t-SNE many times faster.`
-              : `This layer has ${int(r.dim)} values per digit. t-SNE works on their ${r.inputDim} main directions (PCA), which keep the distances between neighbouring digits nearly intact and make it many times faster.`,
+              ? `This layer has ${int(r.dim)} values per ${one()}. They are first mixed down to ${r.inputDim} random directions, which keeps the distances between ${one(2)} roughly intact and makes t-SNE many times faster.`
+              : `This layer has ${int(r.dim)} values per ${one()}. t-SNE works on their ${r.inputDim} main directions (PCA), which keep most of each ${one()}’s nearest neighbours and make it many times faster.`,
           ),
         );
       }
     }
-    methodHint.append(h('p', { class: 'hint' }, 'Hover a numeral to see the digit; click it to make it the network’s input.'));
+    methodHint.append(h('p', { class: 'hint' }, `Hover a numeral to see the ${one()}; click it to make it the network’s input.`));
   };
 
   // ── Drawing ──
+  const flatNote = () =>
+    `Every ${one()} gives the same values at this layer, so there is nothing to spread out. This happens when all of its units are switched off (dead ReLUs) or saturated.`;
+
   const message = (): string => {
-    if (!store.valid) return 'Fix the architecture above to see its embedding.';
-    if (!store.data) return 'Waiting for MNIST to load…';
+    if (!store.valid) return 'Fix the architecture in 01 to see its embedding.';
+    if (!store.data) return `Waiting for ${info().name} to load…`;
     if (error) return `The embedding failed: ${error}`;
     if (running && running.method === method && running.layer === layer) return phaseText(running);
     if (method === 'tsne') return 't-SNE runs only when you ask. Press Recompute.';
@@ -825,7 +1039,6 @@ export function mountEmbedding(): void {
    */
   function draw(): void {
     const p = palette();
-    const cats = catColours();
     const S = Math.max(240, Math.min(MAX_PLOT, plotBox.clientWidth || MAX_PLOT));
     const ctx = fitCanvas(canvas, S, S);
     const v = view();
@@ -848,9 +1061,9 @@ export function mountEmbedding(): void {
 
     if (!v || v.flat) {
       geo = null;
-      const text = v ? FLAT_NOTE : message();
+      const text = v ? flatNote() : message();
       paintNote(ctx, text, L, T, pw, ph, v ? p.ink2 : p.muted);
-      canvas.setAttribute('aria-label', v ? `${v.method === 'pca' ? 'PCA' : 't-SNE'} of ${int(v.labels.length)} test digits at ${layerTitle(v.layer)}: ${text}` : text);
+      canvas.setAttribute('aria-label', v ? `${v.method === 'pca' ? 'PCA' : 't-SNE'} of ${int(v.labels.length)} test ${one(v.labels.length)} at ${layerTitle(v.layer)}: ${text}` : text);
       updateRunText();
       return;
     }
@@ -925,6 +1138,8 @@ export function mountEmbedding(): void {
       xy[2 * s + 1] = sy(c[2 * s + 1]);
     }
     const fs = S < 420 ? 10 : 11;
+    const cats = Array.from({ length: store.classes }, (_, k) => catColour(k));
+    const glyphs = Array.from({ length: store.classes }, (_, k) => glyph(k));
     ctx.save();
     ctx.beginPath();
     ctx.rect(L, T, pw, ph);
@@ -938,7 +1153,7 @@ export function mountEmbedding(): void {
         const d = v.labels[s];
         if (focusDigit !== null && (d !== focusDigit) !== faded) continue;
         ctx.fillStyle = cats[d];
-        ctx.fillText(DIGITS[d], xy[2 * s], xy[2 * s + 1] + 0.5);
+        ctx.fillText(glyphs[d], xy[2 * s], xy[2 * s + 1] + 0.5);
       }
       if (mistakes && v.preds) {
         ctx.strokeStyle = p.accent;
@@ -968,10 +1183,12 @@ export function mountEmbedding(): void {
 
     geo = { L, T, pw, ph, cx, cy, scale, fs, xy, probe: null };
     paintMarks(ctx, v, geo);
-    const what = `${v.method === 'pca' ? 'PCA' : 't-SNE'} map of ${int(n)} test digits at ${layerTitle(v.layer)}, each drawn as its numeral`;
+    const what = `${v.method === 'pca' ? 'PCA' : 't-SNE'} map of ${int(n)} test ${one(n)} at ${layerTitle(v.layer)}, each drawn as ${isMnist() ? 'its numeral' : 'the numeral of its class'}`;
     canvas.setAttribute(
       'aria-label',
-      v.pca ? `${what}. PC1 explains ${pct(v.pca.explained[0])} and PC2 ${pct(v.pca.explained[1])} of the variance.` : `${what}. Use the arrow keys to move between digits and Enter to use one as the input.`,
+      v.pca
+        ? `${what}. PC1 explains ${pct(v.pca.explained[0])} and PC2 ${pct(v.pca.explained[1])} of the variance.`
+        : `${what}. Use the arrow keys to move between ${one(2)} and Enter to use one as the input.`,
     );
     updateRunText();
   }
@@ -1019,24 +1236,8 @@ export function mountEmbedding(): void {
     g.probe = probe;
     if (probe) {
       const { x, y } = probe;
-      ctx.strokeStyle = p.surface;
-      ctx.lineWidth = 4;
-      const arms = () => {
-        ctx.beginPath();
-        ctx.moveTo(x - 12, y);
-        ctx.lineTo(x - 4, y);
-        ctx.moveTo(x + 4, y);
-        ctx.lineTo(x + 12, y);
-        ctx.moveTo(x, y - 12);
-        ctx.lineTo(x, y - 4);
-        ctx.moveTo(x, y + 4);
-        ctx.lineTo(x, y + 12);
-        ctx.stroke();
-      };
-      arms();
-      ctx.strokeStyle = p.accent;
-      ctx.lineWidth = 2;
-      arms();
+      // Halo, ink outline, then the accent: the cross reads by its shape on any class colour (UX-5).
+      drawInputCross(ctx, x, y, p);
       const text = probe.off ? 'input, off the chart' : 'input';
       ctx.font = `600 10px ${MONO}`;
       const right = x + 14 + ctx.measureText(text).width < L + pw - 2;
@@ -1065,8 +1266,8 @@ export function mountEmbedding(): void {
       ctx.font = `700 ${fs + 1}px ${MONO}`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillStyle = catColours()[v.labels[hover]];
-      ctx.fillText(String(v.labels[hover]), x, y + 0.5);
+      ctx.fillStyle = catColour(v.labels[hover]);
+      ctx.fillText(glyph(v.labels[hover]), x, y + 0.5);
     }
     ctx.restore();
   }
@@ -1080,7 +1281,22 @@ export function mountEmbedding(): void {
   }
 
   // ── Events ──
+  let shownDataset = store.dataset;
+  /** A new dataset: other classes (chips, highlight) and other samples (no orientation to keep). */
+  const datasetChanged = () => {
+    buildChips();
+    fixNote();
+    if (store.dataset === shownDataset) return;
+    shownDataset = store.dataset;
+    orientation.clear();
+    if (focusDigit !== null) {
+      focusDigit = null;
+      for (const c of chipButtons) c.setAttribute('aria-pressed', 'false');
+    }
+  };
+  store.on('dataset', datasetChanged);
   store.on('model', () => {
+    datasetChanged();
     if (store.version !== layerVersion) {
       layerVersion = store.version;
       const spec = structuredClone(store.spec);
@@ -1132,7 +1348,10 @@ export function mountEmbedding(): void {
     },
     { rootMargin: '200px 0px' },
   ).observe(root);
-  store.on('data', render);
+  store.on('data', () => {
+    fixNote();
+    render();
+  });
   onThemeChange(() => {
     catCache = null;
     theme++;
@@ -1149,6 +1368,7 @@ export function mountEmbedding(): void {
     });
   }).observe(plotBox);
 
+  buildChips();
   buildLayerSelect();
   render();
 }

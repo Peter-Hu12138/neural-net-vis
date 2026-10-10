@@ -22,7 +22,7 @@ export interface EmbedParams {
    * directions; 'projection' uses the random sketch alone (faster, blurs neighbours more).
    */
   reduce?: 'pca' | 'projection';
-  /** Number of test digits, split evenly over the ten classes. */
+  /** Number of test samples, split evenly over the classes; every one when the test set is no larger (see embedIndices). */
   n?: number;
   perplexity?: number;
   iterations?: number;
@@ -90,12 +90,23 @@ export const MOMENTUM_SWITCH = 250;
 export const PCA_MAX_ITER = 300;
 export const PARTIAL_EVERY = 10;
 
-/** How the job's progress (done / total) splits into phases, so the page can name the phase. */
+/**
+ * How the job's progress (done / total) splits into phases, so the page can name the phase. For
+ * t-SNE on the Small CNN (1,000 digits, Node): reading the digits ~0.9 s, reducing a wide layer to
+ * its main directions ~0.7 s more, distances and neighbour probabilities ~0.7 s, the 500 steps
+ * ~2.4 s.
+ */
 export const PHASES = {
   pca: { collect: 0.6 },
-  tsne: { collect: 0.06, prepare: 0.16 },
+  tsne: { collect: 0.2, prepare: 0.15 },
 } as const;
 const TOTAL = 1000;
+
+/** The `partial` a t-SNE job reports while it reduces a wide layer to its main directions. */
+export const REDUCING = { phase: 'reduce' } as const;
+
+/** True when a progress report's `partial` is a t-SNE frame (not the REDUCING marker). */
+export const isFrame = (p: unknown): p is TsnePartial => !!p && typeof p === 'object' && 'coords' in p;
 
 /** Work per yield, in milliseconds. The analyzer slices at ~30 ms, so this keeps it responsive. */
 const SLICE_MS = 3;
@@ -104,8 +115,17 @@ const now = () => performance.now();
 // ── Point selection and features ───────────────────────────────────────
 
 /**
- * The first ⌊n/10⌋ test digits of each class, in ascending index order. Deterministic, balanced,
- * and the order interleaves classes, so no digit is always drawn on top of another.
+ * The test samples a map shows: all of them when there are at most n (the point datasets have a
+ * few hundred), otherwise balancedIndices. Ascending either way.
+ */
+export function embedIndices(labels: ArrayLike<number>, n: number, classes = 10): Int32Array {
+  if (labels.length <= n) return Int32Array.from({ length: labels.length }, (_, i) => i);
+  return balancedIndices(labels, n, classes);
+}
+
+/**
+ * The first ⌊n/classes⌋ test samples of each class, in ascending index order. Deterministic,
+ * balanced, and the order interleaves classes, so no class is always drawn on top of another.
  */
 export function balancedIndices(labels: ArrayLike<number>, n: number, classes = 10): Int32Array {
   const per = Math.max(1, Math.floor(n / classes));
@@ -439,71 +459,139 @@ export function* jacobiEigen(A0: Float64Array, l: number): Generator<void, { val
   return { values, vectors };
 }
 
+/** Default number of subspace (power) iterations in randomizedPca. */
+export const PCA_POWER_ITERATIONS = 1;
+
 /**
- * Randomized PCA (Halko, Martinsson & Tropp, 2011; one sketch, no power iterations) of n rows of
- * width d, from their sketch Y = X·R (n × l, as collected with projectRow):
- *   Q = orth(Y − column means)   (n × l; its columns are centred, so QᵀX = QᵀXc)
- *   B = QᵀX                      (l × d, one more pass over the rows, which `row(s)` supplies)
+ * How randomizedPca's work splits, as shares of its progress: per pass over the rows (each pass
+ * calls `row(s)` for every row) and for the rest (orthonormalising, the small eigenproblem, the
+ * output). With q power iterations it makes 2q + 1 passes.
+ */
+export function rpcaSplit(q: number): { pass: number; rest: number } {
+  const rest = 0.1;
+  return { pass: (1 - rest) / (2 * q + 1), rest };
+}
+
+/**
+ * Randomized PCA (Halko, Martinsson & Tropp, 2011) of n rows of width d, from their sketch
+ * Y = X·R (n × l, as collected with projectRow):
+ *   Q = orth(Y − column means)        (n × l; its columns are centred, so QᵀX = QᵀXc)
+ *   q times (subspace iteration):
+ *     Bᵀ = XᵀQ                        (d × l, one pass over the rows, which `row(s)` supplies)
+ *     Q = orth(X·Bᵀ − column means)   (another pass; centring the columns makes it Xc·Xcᵀ·Q)
+ *   B = QᵀX                           (one more pass)
  *   B·Bᵀ = Û·S²·Ûᵀ
  * and the result is the n × m matrix Q·Û[:, :m]·S[:m]: each row's coordinates along (an estimate
  * of) the top m principal directions. Unlike the sketch itself, this keeps the directions with
- * the most variance and drops the rest, so nearest neighbours survive much better: on 1,000 raw
- * pixel digits 5-NN label purity is 0.862 in 784-d, 0.795 after the 64-d sketch and 0.840 after
- * this (Conv 1 of a trained Small CNN: 0.900, 0.856, 0.874).
+ * the most variance and drops the rest, so nearest neighbours survive much better.
  *
- * `row(s)` is called once per row, in order. Yields progress 0–1.
+ * Why one power iteration (q = 1, the default): ReLU features have a slowly decaying spectrum, and
+ * a single sketch of 64 columns then mixes the 50 main directions with the many that follow. One
+ * iteration multiplies by Xc·Xcᵀ, squaring the spectrum, which separates them. Measured on 1,000
+ * MNIST digits, 30-NN recall of the full-space neighbours (q = 0 / q = 1 / exact PCA-50): Conv 1 of
+ * a trained Small CNN 0.741 / 0.903 / 0.909, unpooled Conv 1 0.629 / 0.829 / 0.839, raw pixels
+ * 0.702 / 0.865 / 0.873. It costs two more passes over the rows.
+ *
+ * `row(s)` is called once per row per pass, rows in order. Yields progress 0–1 (see rpcaSplit).
  */
-export function* randomizedPca(Y: ArrayLike<number>, n: number, l: number, d: number, m: number, row: (s: number) => ArrayLike<number>): Generator<number, Float32Array<ArrayBuffer>, void> {
+export function* randomizedPca(
+  Y: ArrayLike<number>,
+  n: number,
+  l: number,
+  d: number,
+  m: number,
+  row: (s: number) => ArrayLike<number>,
+  q = PCA_POWER_ITERATIONS,
+): Generator<number, Float32Array<ArrayBuffer>, void> {
   let t0 = now();
+  const split = rpcaSplit(q);
+  const orthShare = (0.6 * split.rest) / (q + 1);
+  let at = 0;
   const Q = Float64Array.from({ length: n * l }, (_, i) => Y[i]);
-  for (let c = 0; c < l; c++) {
-    let mean = 0;
-    for (let i = 0; i < n; i++) mean += Q[i * l + c];
-    mean /= n;
-    for (let i = 0; i < n; i++) Q[i * l + c] -= mean;
-  }
-  // Modified Gram–Schmidt, twice for orthogonality; columns with nothing left become 0.
-  let first = 0;
-  for (let c = 0; c < l; c++) {
-    let s = 0;
-    for (let i = 0; i < n; i++) s += Q[i * l + c] ** 2;
-    first = Math.max(first, Math.sqrt(s));
-  }
-  for (let c = 0; c < l; c++) {
-    for (let pass = 0; pass < 2; pass++) {
-      for (let p = 0; p < c; p++) {
-        let dot = 0;
-        for (let i = 0; i < n; i++) dot += Q[i * l + c] * Q[i * l + p];
-        for (let i = 0; i < n; i++) Q[i * l + c] -= dot * Q[i * l + p];
+
+  /** Centres Q's columns, then orthonormalises them (modified Gram–Schmidt, twice). */
+  function* orth(): Generator<number, void, void> {
+    for (let c = 0; c < l; c++) {
+      let mean = 0;
+      for (let i = 0; i < n; i++) mean += Q[i * l + c];
+      mean /= n;
+      for (let i = 0; i < n; i++) Q[i * l + c] -= mean;
+    }
+    // Columns with (next to) nothing left become 0.
+    let first = 0;
+    for (let c = 0; c < l; c++) {
+      let s = 0;
+      for (let i = 0; i < n; i++) s += Q[i * l + c] ** 2;
+      first = Math.max(first, Math.sqrt(s));
+    }
+    for (let c = 0; c < l; c++) {
+      for (let pass = 0; pass < 2; pass++) {
+        for (let p = 0; p < c; p++) {
+          let dot = 0;
+          for (let i = 0; i < n; i++) dot += Q[i * l + c] * Q[i * l + p];
+          for (let i = 0; i < n; i++) Q[i * l + c] -= dot * Q[i * l + p];
+        }
+      }
+      let s = 0;
+      for (let i = 0; i < n; i++) s += Q[i * l + c] ** 2;
+      const norm = Math.sqrt(s);
+      const inv = norm > 1e-9 * first ? 1 / norm : 0;
+      for (let i = 0; i < n; i++) Q[i * l + c] *= inv;
+      if (now() - t0 > SLICE_MS) {
+        yield at + (orthShare * (c + 1)) / l;
+        t0 = now();
       }
     }
-    let s = 0;
-    for (let i = 0; i < n; i++) s += Q[i * l + c] ** 2;
-    const norm = Math.sqrt(s);
-    const inv = norm > 1e-9 * first ? 1 / norm : 0;
-    for (let i = 0; i < n; i++) Q[i * l + c] *= inv;
-    if (now() - t0 > SLICE_MS) {
-      yield (0.1 * (c + 1)) / l;
-      t0 = now();
-    }
+    at += orthShare;
   }
-  // Bᵀ (d × l), accumulated row by row: Bᵀ[j] += x_s[j] · Q[s].
+
+  /** Bᵀ (d × l) = XᵀQ, accumulated row by row: Bᵀ[j] += x_s[j] · Q[s]. One pass over the rows. */
   const Bt = new Float64Array(d * l);
-  for (let s = 0; s < n; s++) {
-    const f = row(s);
-    const o = s * l;
-    for (let j = 0; j < d; j++) {
-      const v = f[j];
-      if (v === 0) continue;
-      const r = j * l;
-      for (let c = 0; c < l; c++) Bt[r + c] += v * Q[o + c];
+  function* projectRows(): Generator<number, void, void> {
+    Bt.fill(0);
+    for (let s = 0; s < n; s++) {
+      const f = row(s);
+      const o = s * l;
+      for (let j = 0; j < d; j++) {
+        const v = f[j];
+        if (v === 0) continue;
+        const r = j * l;
+        for (let c = 0; c < l; c++) Bt[r + c] += v * Q[o + c];
+      }
+      if (now() - t0 > SLICE_MS) {
+        yield at + (split.pass * (s + 1)) / n;
+        t0 = now();
+      }
     }
-    if (now() - t0 > SLICE_MS) {
-      yield 0.1 + (0.75 * (s + 1)) / n;
-      t0 = now();
-    }
+    at += split.pass;
   }
+
+  yield* orth();
+  for (let it = 0; it < q; it++) {
+    yield* projectRows();
+    // Q ← X·Bᵀ (n × l), one more pass; orth() centres it, giving Xc·Xcᵀ·Q.
+    const acc = new Float64Array(l);
+    for (let s = 0; s < n; s++) {
+      const f = row(s);
+      acc.fill(0);
+      for (let j = 0; j < d; j++) {
+        const v = f[j];
+        if (v === 0) continue;
+        const r = j * l;
+        for (let c = 0; c < l; c++) acc[c] += v * Bt[r + c];
+      }
+      Q.set(acc, s * l);
+      if (now() - t0 > SLICE_MS) {
+        yield at + (split.pass * (s + 1)) / n;
+        t0 = now();
+      }
+    }
+    at += split.pass;
+    yield* orth();
+  }
+  yield* projectRows();
   // G = B·Bᵀ (l × l).
+  const gShare = 0.3 * split.rest;
   const G = new Float64Array(l * l);
   for (let j = 0; j < d; j++) {
     const r = j * l;
@@ -513,16 +601,17 @@ export function* randomizedPca(Y: ArrayLike<number>, n: number, l: number, d: nu
       for (let b = a; b < l; b++) G[a * l + b] += ba * Bt[r + b];
     }
     if (now() - t0 > SLICE_MS) {
-      yield 0.85 + (0.1 * (j + 1)) / d;
+      yield at + (gShare * (j + 1)) / d;
       t0 = now();
     }
   }
+  at += gShare;
   for (let a = 0; a < l; a++) for (let b = 0; b < a; b++) G[a * l + b] = G[b * l + a];
   const ge = jacobiEigen(G, l);
   let e = ge.next();
   while (!e.done) {
     if (now() - t0 > SLICE_MS) {
-      yield 0.95;
+      yield at;
       t0 = now();
     }
     e = ge.next();
@@ -538,7 +627,7 @@ export function* randomizedPca(Y: ArrayLike<number>, n: number, l: number, d: nu
       out[i * keep + c] = s * sv;
     }
     if (now() - t0 > SLICE_MS) {
-      yield 0.95 + (0.05 * (c + 1)) / keep;
+      yield at + ((1 - at) * (c + 1)) / keep;
       t0 = now();
     }
   }
@@ -954,8 +1043,7 @@ const embed: Job<EmbedParams, EmbedResult> = function* (ctx, params): Generator<
   const net = ctx.net;
   const layer = Math.max(-1, Math.min(net.blocks.length - 1, Math.round(params.layer ?? -1)));
   const method: EmbedMethod = params.method === 'tsne' ? 'tsne' : 'pca';
-  const want = Math.max(10, Math.min(ctx.testY.length, Math.round(params.n ?? DEFAULT_N)));
-  const indices = balancedIndices(ctx.testY, want, ctx.classes);
+  const indices = embedIndices(ctx.testY, Math.max(10, Math.round(params.n ?? DEFAULT_N)), ctx.classes);
   const n = indices.length;
   const d = layerDim(net, layer);
   const wide = method === 'tsne' && d > TSNE_MAX_DIM;
@@ -963,9 +1051,12 @@ const embed: Job<EmbedParams, EmbedResult> = function* (ctx, params): Generator<
   const reduce = !wide ? null : params.reduce === 'projection' ? 'projection' : 'pca';
   const keep = reduce === 'pca' && n * d <= KEEP_LIMIT ? new Float32Array(n * d) : null;
   const share = method === 'pca' ? PHASES.pca.collect : PHASES.tsne.collect;
-  // A wide t-SNE layer spends part of its share on the PCA step: little when the rows are kept,
-  // half when they are read a second time.
-  const collectShare = reduce !== 'pca' ? share : keep ? 0.85 * share : 0.5 * share;
+  // A wide t-SNE layer spends part of its share on the PCA step, which makes 2q + 1 passes over the
+  // rows. Kept rows make each pass a matrix product: all of them together take about as long as
+  // collecting did (0.7 s against 0.9 s on the Small CNN's Conv 1). Rows read again cost a forward
+  // pass each, so collecting is then one sweep in 2q + 2.
+  const sweeps = 2 * PCA_POWER_ITERATIONS + 1;
+  const collectShare = reduce !== 'pca' ? share : keep ? 0.55 * share : share / (sweeps + 1);
   const report = (f: number, partial?: unknown): Progress => ({ done: Math.round(Math.min(1, f) * TOTAL), total: TOTAL, partial });
   let R: Float32Array | null = null;
   if (wide) {
@@ -1031,7 +1122,7 @@ const embed: Job<EmbedParams, EmbedResult> = function* (ctx, params): Generator<
     const gr = randomizedPca(X, n, sketch, d, TSNE_PCA_DIM, row);
     let rr = gr.next();
     while (!rr.done) {
-      yield report(collectShare + (share - collectShare) * rr.value);
+      yield report(collectShare + (share - collectShare) * rr.value, REDUCING);
       rr = gr.next();
     }
     X = rr.value;
