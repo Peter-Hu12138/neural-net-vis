@@ -1,0 +1,73 @@
+/* 06 Backpropagation: per-dataset additions. */
+
+.bp-body {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+/* A point dataset's example is a small map of the plane, not pixels: draw it smoothly and larger. */
+.bp-sample.is-points canvas {
+  width: 96px;
+  height: 96px;
+  image-rendering: auto;
+}
+
+.bp-pixelated {
+  image-rendering: pixelated;
+}
+
+.bp-target-name {
+  margin-top: 6px;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+/* Frozen layers, and layers no gradient reaches: an ink rule, like the marker in 04 (a setting or
+   a fact about this example, not an alarm). */
+.bp-frozen,
+.bp-dead {
+  margin: 0;
+  padding: 8px 10px;
+  max-width: 72ch;
+  border-left: 3px solid var(--ink);
+  background: var(--surface);
+  font-size: 13.5px;
+  color: var(--ink-2);
+}
+
+.bp-frozen b,
+.bp-dead b {
+  color: var(--ink);
+  font-weight: 700;
+}
+
+/* Worked examples are tables: keep their columns aligned (they scroll sideways on a phone). */
+.bp-body .work {
+  white-space: pre;
+}
+
+/* A sentence set in the worked-example type: it may wrap. */
+.bp-body .work.bp-wrap {
+  white-space: pre-wrap;
+}
+
+/* A colour photo's centre pixels: one small table per channel, side by side when there is room. */
+.bp-channels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 32px;
+  margin-top: -10px;
+}
+
+/* "frozen" beside a frozen layer's gradient step in the list. */
+.bp-step-tag {
+  margin-left: 8px;
+  padding: 1px 4px;
+  border: 1px solid currentColor;
+  font: 600 9.5px/1.3 var(--mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  vertical-align: 1px;
+}
