@@ -7,7 +7,10 @@ import {
   balancedIndices,
   calibrateRow,
   DEFAULT_N,
+  embedIndices,
   gaussianProjection,
+  isFrame,
+  REDUCING,
   isFlat,
   jobs,
   layerDim,
@@ -482,7 +485,9 @@ suite('embed job on real digits', () => {
     expect(r.perplexity).toBe(30);
     expect(r.coords.every(Number.isFinite)).toBe(true);
     expect(r.kl).toBeGreaterThan(0);
-    const frames = run.reports.map((p) => p.partial as TsnePartial | undefined).filter((p): p is TsnePartial => !!p);
+    const frames = run.reports.map((p) => p.partial).filter(isFrame);
+    // Before the frames, the reduction to 50 directions says what it is doing.
+    expect(run.reports.some((p) => p.partial === REDUCING)).toBe(true);
     const iters = [...new Set(frames.map((f) => f.iteration))];
     expect(iters.length).toBe(40);
     expect(iters[iters.length - 1]).toBe(390);
@@ -812,4 +817,136 @@ suite('randomized PCA (t-SNE reduction)', () => {
     }
     expect(err / scale).toBeLessThan(1e-5);
   }, 60_000);
+
+  it('one power iteration keeps nearest neighbours almost as well as exact PCA on a slowly decaying spectrum (MATH-1)', () => {
+    // 600 rows of width 240 with a ReLU-like spectrum: the k-th direction has standard deviation
+    // k^(−1/2), so the 50 kept directions hold under half of the variance and the 64-wide sketch
+    // cannot tell them from the next ones without a power iteration.
+    const n = 600;
+    const d = 240;
+    const m = TSNE_PCA_DIM;
+    const rng = new Rng(77);
+    const basis = Array.from({ length: d }, () => {
+      const v = Float64Array.from({ length: d }, () => rng.normal());
+      const s = Math.hypot(...v);
+      return v.map((x) => x / s);
+    });
+    const X = new Float32Array(n * d);
+    for (let i = 0; i < n; i++) {
+      for (let k = 0; k < d; k++) {
+        const z = rng.normal() / Math.sqrt(k + 1);
+        const v = basis[k];
+        for (let j = 0; j < d; j++) X[i * d + j] += z * v[j];
+      }
+      for (let j = 0; j < d; j++) X[i * d + j] += 0.3; // an offset, so centring matters
+    }
+    const rowOf = (s: number) => X.subarray(s * d, (s + 1) * d);
+
+    /** For every row, its k nearest neighbours (squared Euclidean) among the n rows of width w. */
+    const neighbours = (A: ArrayLike<number>, w: number, k = 30) => {
+      const D = new Float64Array(n * n);
+      sqDistances(A, n, w, D);
+      return Array.from({ length: n }, (_, i) => {
+        const order = Array.from({ length: n }, (__, j) => j).filter((j) => j !== i);
+        order.sort((a, b) => D[i * n + a] - D[i * n + b]);
+        return new Set(order.slice(0, k));
+      });
+    };
+    const truth = neighbours(X, d);
+    const recall = (A: ArrayLike<number>, w: number) => {
+      const nb = neighbours(A, w);
+      let hit = 0;
+      nb.forEach((set, i) => set.forEach((j) => (hit += truth[i].has(j) ? 1 : 0)));
+      return hit / (30 * n);
+    };
+
+    // Exact PCA-m: eigenvectors of the covariance, then the centred rows' coordinates along them.
+    const mean = new Float64Array(d);
+    for (let i = 0; i < n; i++) for (let j = 0; j < d; j++) mean[j] += X[i * d + j] / n;
+    const C = new Float64Array(d * d);
+    for (let i = 0; i < n; i++) {
+      for (let a = 0; a < d; a++) {
+        const va = X[i * d + a] - mean[a];
+        for (let b = a; b < d; b++) C[a * d + b] += (va * (X[i * d + b] - mean[b])) / n;
+      }
+    }
+    for (let a = 0; a < d; a++) for (let b = 0; b < a; b++) C[a * d + b] = C[b * d + a];
+    const { vectors } = drain(eigenSmall(C, d)).result;
+    const exact = new Float32Array(n * m);
+    for (let i = 0; i < n; i++) {
+      for (let c = 0; c < m; c++) {
+        let s = 0;
+        for (let j = 0; j < d; j++) s += (X[i * d + j] - mean[j]) * vectors[j * d + c];
+        exact[i * m + c] = s;
+      }
+    }
+
+    const R = gaussianProjection(d, 64);
+    const Y = new Float32Array(n * 64);
+    for (let s = 0; s < n; s++) projectRow(rowOf(s), R, d, 64, Y, s * 64);
+    let calls = 0;
+    const counted = (s: number) => {
+      calls++;
+      return rowOf(s);
+    };
+    const q0 = drain(randomizedPca(Y, n, 64, d, m, counted, 0));
+    expect(calls).toBe(n);
+    calls = 0;
+    const q1 = drain(randomizedPca(Y, n, 64, d, m, counted));
+    expect(calls).toBe(3 * n);
+    // Progress only moves forward and ends at 1 or just under it.
+    for (let k = 1; k < q1.reports.length; k++) expect(q1.reports[k]).toBeGreaterThanOrEqual(q1.reports[k - 1]);
+
+    const rExact = recall(exact, m);
+    const r0 = recall(q0.result, m);
+    const r1 = recall(q1.result, m);
+    console.log(`30-NN recall, slowly decaying spectrum: sketch only ${r0.toFixed(3)}, one power iteration ${r1.toFixed(3)}, exact PCA-${m} ${rExact.toFixed(3)}`);
+    expect(r1).toBeGreaterThan(rExact - 0.03);
+    expect(r1).toBeGreaterThan(r0 + 0.03);
+  }, 60_000);
+});
+
+suite('which test samples a map shows (embedIndices)', () => {
+  it('takes every test sample when there are no more than n, else a balanced set', () => {
+    const small = Uint8Array.from({ length: 300 }, (_, i) => (i * 7) % 3);
+    expect(Array.from(embedIndices(small, DEFAULT_N, 3))).toEqual(Array.from({ length: 300 }, (_, i) => i));
+    // 301 samples of 3 unequal classes: balancedIndices alone would drop some.
+    const uneven = Uint8Array.from({ length: 301 }, (_, i) => (i < 101 ? 0 : i < 201 ? 1 : 2));
+    expect(embedIndices(uneven, DEFAULT_N, 3)).toHaveLength(301);
+    expect(balancedIndices(uneven, 301, 3)).toHaveLength(300);
+    expect(Array.from(embedIndices(data.testY, DEFAULT_N))).toEqual(Array.from(balancedIndices(data.testY, DEFAULT_N)));
+  });
+
+  it('the job maps all 300 test points of a two-class point dataset', () => {
+    const arch = { input: { c: 2, h: 1, w: 1 }, layers: [{ kind: 'dense' as const, units: 8, act: 'tanh' as const }], classes: 2 };
+    const net = new Network(arch, 4);
+    const rng = new Rng(9);
+    const testX = Float32Array.from({ length: 600 }, () => rng.next() * 2 - 1);
+    const testY = Uint8Array.from({ length: 300 }, (_, i) => i % 2);
+    const ctx: JobContext = {
+      net,
+      arch,
+      spec: arch.layers,
+      inputSize: 2,
+      scale: 1,
+      classes: 2,
+      testX,
+      testY,
+      image(i, out = new Float32Array(2)) {
+        out[0] = testX[2 * i];
+        out[1] = testX[2 * i + 1];
+        return out;
+      },
+    };
+    for (const layer of [-1, 0, 1]) {
+      const r = drain(jobs.embed(ctx, { layer, method: 'pca', n: DEFAULT_N }) as Generator<Progress, EmbedResult, void>).result;
+      expect(r.indices).toHaveLength(300);
+      expect(r.dim).toBe(layer < 0 ? 2 : layer === 0 ? 8 : 2);
+      expect(r.flat).toBe(false);
+    }
+    const t = drain(jobs.embed(ctx, { layer: 0, method: 'tsne', n: DEFAULT_N, iterations: 20 }) as Generator<Progress, EmbedResult, void>).result;
+    expect(t.indices).toHaveLength(300);
+    expect(t.coords).toHaveLength(600);
+    expect(t.inputDim).toBe(8);
+  });
 });
