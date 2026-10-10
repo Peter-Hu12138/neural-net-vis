@@ -447,8 +447,11 @@ test('CIFAR-10: colour conv layers in every quantity, worded for images', async 
   await expect(panels.nth(3).locator('.dist-detail')).toHaveText('10 logits');
   // 256 images × 8 filters × 32×32 positions, sampled down to 20,000.
   await expect(panels.first().locator('.dist-stats')).toContainText('n 20,000 of 2.1M');
-  await expect(panels.nth(2).locator('.dist-stats')).toContainText(/dead units \d+ of 32/);
-  expect(await panels.nth(2).locator('.dist-stats > span', { hasText: 'dead units' }).getAttribute('title')).toMatch(/test images?($|:)/);
+  // CIFAR-10's default dense layer is Leaky ReLU (a ReLU one loses most of its units on photos), so
+  // only the ReLU conv layers report dead units.
+  await expect(panels.nth(2).locator('.dist-detail')).toContainText('Leaky ReLU');
+  await expect(panels.nth(2).locator('.dist-stats')).not.toContainText('dead units');
+  expect(await panels.first().locator('.dist-stats > span', { hasText: 'dead units' }).getAttribute('title')).toMatch(/test images?($|:)/);
   await expectSig3(panels);
   expect(await painted(panels.first().locator('canvas').first())).toBeGreaterThan(2000);
   await shotSection(page, '10-distributions-cifar.png');

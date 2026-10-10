@@ -1,3 +1,4 @@
+import { defaultsFor } from '../src/store';
 import { describe as suite, expect, it } from 'vitest';
 import { datasetInfo, limitTraining, pointsData, sampleCaption, sampleInput, DATASETS } from '../src/data/datasets';
 import { decodeModel, encodeModel } from '../src/models/format';
@@ -219,6 +220,19 @@ suite('datasets', () => {
     const evals = log.flatMap((m) => (m.type === 'metrics' ? m.evals : []));
     expect(evals.at(-1)!.confusion).toHaveLength(9);
     expect(evals.at(-1)!.acc).toBeGreaterThan(0.95);
+  });
+
+  it('defaults per kind of data: Leaky ReLU dense layer for colour photos, ReLU for grey, the point preset for points', () => {
+    const cifar = defaultsFor(datasetInfo('cifar10'));
+    const mnist = defaultsFor(datasetInfo('mnist'));
+    const circle = defaultsFor(datasetInfo('circle'));
+    expect(cifar.spec.at(-1)).toEqual({ kind: 'dense', units: 32, act: 'leaky' });
+    expect(cifar.spec.slice(0, 2)).toEqual(mnist.spec.slice(0, 2));
+    expect(mnist.spec.at(-1)).toEqual({ kind: 'dense', units: 32, act: 'relu' });
+    expect(circle.spec.every((l) => l.kind === 'dense')).toBe(true);
+    expect([cifar.speed, mnist.speed, circle.speed]).toEqual(['max', 'max', 'normal']);
+    // The presets themselves are untouched.
+    expect(defaultsFor(datasetInfo('cifar10')).spec).not.toBe(cifar.spec);
   });
 
   it('a speed cap limits samples per second; lifting it trains at full speed again', async () => {

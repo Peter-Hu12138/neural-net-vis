@@ -104,7 +104,12 @@ export const presetsFor = (info: DatasetInfo): Preset[] => (info.kind === 'image
 export function defaultsFor(info: DatasetInfo): { spec: LayerSpec[]; hyper: Hyper; speed: Speed } {
   // Point datasets train an epoch in a millisecond or two; cap the speed so the boundary can be watched forming.
   if (info.kind === 'points') return { spec: structuredClone(POINT_PRESETS[2].spec), hyper: { lr: 0.03, batchSize: 10, optimizer: 'adam' }, speed: 'normal' };
-  return { spec: structuredClone(IMAGE_PRESETS[2].spec), hyper: { lr: DEFAULT_LR.adam, batchSize: 32, optimizer: 'adam' }, speed: 'max' };
+  const spec = structuredClone(IMAGE_PRESETS[2].spec);
+  // Colour photos: the same Small CNN with a Leaky ReLU dense layer. With ReLU, 18–28 of its 32
+  // dense units died within two epochs of CIFAR-10 and test accuracy swung between 33% and 48%
+  // with the seed; Leaky ReLU kept them alive (1–2 dead) at 48.5–49.2% (docs/TESTING.md, section 7).
+  if (info.image!.shape.c === 3) spec[spec.length - 1] = { kind: 'dense', units: 32, act: 'leaky' };
+  return { spec, hyper: { lr: DEFAULT_LR.adam, batchSize: 32, optimizer: 'adam' }, speed: 'max' };
 }
 
 export class Store {

@@ -165,9 +165,9 @@ export function testProbe(d: Data, i: number): Probe {
 }
 
 /**
- * Switches dataset. When the kind of data changes (images ↔ points) the architecture and training
- * settings go back to that kind's defaults; otherwise the current architecture is kept if it still
- * fits (for example MNIST → Fashion-MNIST), with its weights only when "keep weights" is on.
+ * Switches dataset. When the input changes shape (images ↔ points, grey ↔ colour) the architecture
+ * and training settings go back to that data's defaults; otherwise the current architecture is kept
+ * if it still fits (for example MNIST → Fashion-MNIST), with its weights only when "keep weights" is on.
  */
 export async function setDataset(id: DatasetId): Promise<void> {
   const token = ++datasetToken;
@@ -179,7 +179,9 @@ export async function setDataset(id: DatasetId): Promise<void> {
   fullData = null;
   store.custom = [];
   if (info.kind === 'points' && (prev.kind !== 'points' || prev.dims !== info.dims)) store.features = defaultFeatures(info.dims!);
-  if (prev.kind !== info.kind || !store.valid) {
+  // A new input shape (images ↔ points, grey ↔ colour) gets that data's default network.
+  const sameInput = prev.kind === info.kind && (info.kind === 'points' || JSON.stringify(prev.image!.shape) === JSON.stringify(info.image!.shape));
+  if (!sameInput || !store.valid) {
     const d = defaultsFor(info);
     store.spec = d.spec;
     setHyper(d.hyper);

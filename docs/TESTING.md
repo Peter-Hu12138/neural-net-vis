@@ -558,3 +558,37 @@ Analysis jobs run in their own worker. Times are for the default Small CNN in th
 | Attribution (32 IG steps, 6×6 occlusion) | ~0.1 s |
 | PCA of a layer (1,000 digits) | 0.3–1.3 s |
 | t-SNE (1,000 digits, 500 iterations) | ~5 s in Chromium |
+
+## 7. The datasets release
+
+**How it was built.** The foundation was written first and merged on its own: architectures with any input shape and class count, the dataset registry, the synthetic generators and features, the grid evaluator, the model file format, layer freezing in the engine and trainer, and the training speed cap. Six engineer agents then each took one area, worked in their own git worktree on their own files, and passed the full unit and browser suites before their branch was merged. The six areas were:
+- the dataset strip and section 07;
+- decision boundaries and section 02;
+- the model zoo, transfer and freezing;
+- sections 04–06;
+- sections 08–09;
+- sections 10–11.
+
+Usage limits interrupted several of them. Each saved checkpoint commits, and a fresh agent resumed from the branch.
+
+**Merge seams found by the full suite after merging** (each merge was followed by the full suites):
+
+| Problem | Fix |
+| --- | --- |
+| With both the dataset strip and the boundary view on the page, three boundary tests clicked buttons that now existed twice ("x₁", "Random test image"). | Locators scoped to their section. |
+| Section 06 traced the current example through a network that already expected the next dataset's input while that dataset loaded, and threw. | The lab waits until the example and the network agree. |
+| The phone-width check in the dataset spec failed once under full-suite load. It could not be reproduced, even replaying its exact sequence. | The check waits for the layout to settle (polls for up to 5 s). A brief overflow right after a resize may remain and was passed to the review round. |
+| The batch-size menu had no 10, the point datasets' default, so it showed 1 while training used 10. | 10 added. |
+
+**The default network for CIFAR-10.** Two engineers reported independently that on CIFAR-10 most of the default Small CNN's 32 dense ReLU units died within the first few dozen steps. `scripts/cifar-defaults.ts` measures this with the page's engine on the page's own subset (the first 10,000 training images, 2,000 test images). It uses batch 32, Adam, two epochs (20,000 images), and counts a unit as dead when it never fires on the 2,000 test images:
+
+| Network | Learning rate | Seed 1: test acc. · dead dense units | Seed 2 |
+| --- | ---: | --- | --- |
+| Small CNN, ReLU dense layer (old default) | 0.003 | 32.8% · 28 of 32 | 48.3% · 18 of 32 |
+| Small CNN, ReLU | 0.001 | 40.7% · 21 of 32 | |
+| **Small CNN, Leaky ReLU dense layer (new default)** | 0.003 | **48.5% · 1 of 32** | **49.2% · 2 of 32** |
+| Small CNN, Leaky ReLU everywhere | 0.003 | | 47.9% · 0 of 32 |
+| 16-32-64 filters and units, ReLU (4× the parameters, 3× slower) | 0.001 | 46.9% · 40 of 64 | |
+| 16-32-64, ReLU | 0.003 | 49.4% · 46 of 64 | |
+
+With ReLU, the result depended on how many units happened to die. The Leaky ReLU dense layer costs the same and kept nearly every unit alive at about 49% after two epochs, as good as a network four times larger. Colour datasets now default to it. Switching to a dataset with a different input shape (images and points, or grey and colour) also resets the network to that data's default, because a network built for 28×28 grey input is rarely right for colour photos.
