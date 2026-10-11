@@ -96,18 +96,22 @@ export function transferFinding(r: TransferRow, fromName: string, toName: string
   return s;
 }
 
-/** The random-filter control in words: did the copied conv layers carry anything useful? */
+/**
+ * The control in words: did the copied layers carry anything useful? The control copies nothing:
+ * its frozen conv filters keep their random starting weights, and its dense layer learns from
+ * random weights too (in the conv-frozen run it starts from the copied ones).
+ */
 export function controlFinding(r: TransferRow, fromShort: string, toShort: string): string | null {
   const c = r.randomConv;
   if (!c) return null;
   const d = (r.convFrozen.mean - c.mean) * 100;
   const verdict =
     d >= 2
-      ? `so the ${fromShort} filters are worth ${fixed(d, 1)} points here.`
+      ? `so what was copied from ${fromShort} is worth ${fixed(d, 1)} points here.`
       : d > -2
-        ? `so the ${fromShort} filters add little here: a dense layer that learns can do a lot with random features.`
-        : `so random filters did ${fixed(-d, 1)} points better than the ${fromShort} ones.`;
-  let s = `Control: with random, untrained conv filters frozen instead, ${pct(c.mean)} (copied from ${fromShort}: ${pct(r.convFrozen.mean)}), ${verdict}`;
+        ? `so what was copied from ${fromShort} adds little here: a dense layer that learns can do a lot with random features.`
+        : `so starting from random weights did ${fixed(-d, 1)} points better than starting from the ${fromShort} ones.`;
+  let s = `Control: with nothing copied (random, untrained conv filters, frozen, and a dense layer that learns from random weights), ${pct(c.mean)} (with the ${fromShort} layers copied: ${pct(r.convFrozen.mean)}), ${verdict}`;
   // No gain over scratch and none over random filters: say what transfer is for.
   if (d < 2 && r.convFrozen.mean - r.scratch.mean < 0.02) {
     s += ` From ${fromShort} to ${toShort}, transfer mostly saves training time. It pays off in accuracy when the source network has learned far more than the new examples can teach, as large networks trained on millions of photos have.`;
