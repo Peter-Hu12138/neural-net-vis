@@ -33,6 +33,11 @@ export interface EvalPoint {
   acc: number;
   /** classes × classes counts, row = true label, column = prediction. */
   confusion: number[];
+  /**
+   * Which weights were evaluated: the `weightsId` of the 'weights' message that carries them.
+   * Unlike `step`, it also changes when weights are replaced without training (the backprop view).
+   */
+  weightsId: number;
 }
 
 export interface Status {
@@ -63,7 +68,8 @@ export type FromTrainer =
   | { type: 'ready' }
   | { type: 'status'; status: Status }
   | { type: 'metrics'; version: number; points: TrainPoint[]; evals: EvalPoint[] }
-  | { type: 'weights'; version: number; step: number; weights: Float32Array[] };
+  /** `weightsId` changes with every change to the trainer's weights (see EvalPoint.weightsId). */
+  | { type: 'weights'; version: number; step: number; weightsId: number; weights: Float32Array[] };
 
 /** Each custom image is shown this many times per epoch so a handful of them still matter. */
 export const CUSTOM_REPEAT = 10;

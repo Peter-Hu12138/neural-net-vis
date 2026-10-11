@@ -21,6 +21,7 @@ interface EvalJob {
   confusion: number[];
   epoch: number;
   step: number;
+  weightsId: number;
 }
 
 /**
@@ -45,6 +46,10 @@ export class Trainer {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private x = new Float32Array(0);
   private frozen: boolean[] = [];
+  /** Bumped on every change to the weights: a training step, a new model, weights from the page. */
+  private weightsId = 0;
+  /** weightsId of the last finished evaluation on the current data (−1: none yet). */
+  private evaluatedId = -1;
 
   private winLoss = 0;
   private winAcc = 0;
@@ -84,6 +89,7 @@ export class Trainer {
         this.data = msg.data;
         this.x = new Float32Array(msg.data.inputSize);
         this.rebuildOrder();
+        this.evaluatedId = -1;
         this.startEval();
         this.schedule();
         break;
@@ -91,6 +97,8 @@ export class Trainer {
         this.version = msg.version;
         this.net = new Network(msg.arch, 0);
         this.net.setWeights(msg.weights);
+        this.weightsId++;
+        this.evaluatedId = -1;
         this.frozen = msg.frozen.slice();
         this.hyper = msg.hyper;
         this.opt = new Optimizer(this.net, msg.hyper.optimizer, msg.hyper.lr);
@@ -116,12 +124,19 @@ export class Trainer {
       }
       case 'weights':
         this.net?.setWeights(msg.weights);
+        this.weightsId++;
         this.startEval();
         this.schedule();
         break;
-      case 'frozen':
+      case 'frozen': {
+        const was = this.frozen;
         this.frozen = msg.frozen.slice();
+        // A block that starts learning again gets a fresh optimiser state. Its Adam moments are
+        // zero (never trained) or describe the weights before the freeze, and Momentum's velocity
+        // would keep pushing in the old direction; see Optimizer.step and Optimizer.reset.
+        if (this.opt) this.frozen.forEach((f, i) => !f && was[i] && this.opt!.reset(i));
         break;
+      }
       case 'speed':
         this.maxRate = msg.samplesPerSec;
         this.allowance = 0;
@@ -145,12 +160,16 @@ export class Trainer {
       case 'pause':
         this.running = false;
         this.stopAtEpochEnd = false;
+        this.closeRun();
         this.flush();
+        this.schedule();
         break;
       case 'step':
         if (!this.ready()) return;
         this.running = false;
+        this.stopAtEpochEnd = false;
         this.trainBatch();
+        this.closeRun();
         this.flush();
         this.schedule();
         break;
@@ -211,37 +230,65 @@ export class Trainer {
     return y;
   }
 
+  /** Wall-clock time for the pace floors (0 when there are none, as in the unit tests). */
+  private clock(): number {
+    return this.pace.pointMs || this.pace.evalMs ? performance.now() : 0;
+  }
+
+  /**
+   * Trains one batch. The last batch of an epoch takes only the samples that are left and is
+   * averaged over them (the size of stepsPerEpoch's partial batch), so every epoch ends exactly at
+   * its boundary and +1 Epoch stops there.
+   */
   private trainBatch(): void {
     const net = this.net!;
-    const B = this.hyper.batchSize;
+    const n = Math.min(this.hyper.batchSize, this.order.length - this.cursor);
+    if (n <= 0) {
+      this.running = false; // nothing to train on
+      return;
+    }
     net.zeroGrad();
     let loss = 0;
     let correct = 0;
-    for (let k = 0; k < B; k++) {
-      if (this.cursor >= this.order.length) this.endEpoch();
+    for (let k = 0; k < n; k++) {
       const y = this.load(this.order[this.cursor++]);
       const p = net.forward(this.x);
       if (argmax(p) === y) correct++;
       loss += net.backward(y, false, this.frozen);
     }
-    this.opt!.step(1 / B, this.frozen);
-    if (this.cursor >= this.order.length) this.endEpoch();
+    this.opt!.step(1 / n, this.frozen);
+    this.weightsId++;
     this.step++;
-    this.seen += B;
+    this.seen += n;
     this.winLoss += loss;
     this.winAcc += correct;
-    this.winN += B;
-    const now = this.pace.pointMs || this.pace.evalMs ? performance.now() : 0;
-    if (this.step >= this.nextPointStep && now - this.lastPointAt >= this.pace.pointMs) {
-      this.lastPointAt = now;
-      this.points.push({ epoch: this.epochFraction(), step: this.step, loss: this.winLoss / this.winN, acc: this.winAcc / this.winN });
-      this.winLoss = this.winAcc = this.winN = 0;
-      this.nextPointStep = this.step + Math.max(1, Math.round(this.stepsPerEpoch() / POINTS_PER_EPOCH));
-    }
-    if (this.epochFraction() >= this.nextEvalEpoch && !this.evalJob && now - this.lastEvalAt >= this.pace.evalMs) {
-      this.lastEvalAt = now;
-      this.startEval();
-    }
+    this.winN += n;
+    if (this.cursor >= this.order.length) this.endEpoch();
+    const now = this.clock();
+    if (this.step >= this.nextPointStep && now - this.lastPointAt >= this.pace.pointMs) this.pushPoint(now);
+    if (this.epochFraction() >= this.nextEvalEpoch && !this.evalJob && now - this.lastEvalAt >= this.pace.evalMs) this.startEval(now);
+  }
+
+  /** Records the training loss and accuracy since the last curve point as a new point. */
+  private pushPoint(now: number): void {
+    this.lastPointAt = now;
+    this.points.push({ epoch: this.epochFraction(), step: this.step, loss: this.winLoss / this.winN, acc: this.winAcc / this.winN });
+    this.winLoss = this.winAcc = this.winN = 0;
+    this.nextPointStep = this.step + Math.max(1, Math.round(this.stepsPerEpoch() / POINTS_PER_EPOCH));
+  }
+
+  /**
+   * Training stopped (Pause, Step, the end of +1 Epoch). The pace floors may have held back the
+   * last curve point and test evaluation, which would leave the curves, the test accuracy and the
+   * confusion matrix describing older weights than every other section. So: record the samples
+   * since the last point, and evaluate the weights training stopped at unless that is done or under
+   * way. The evaluation runs in later slices (the caller schedules them), so pausing stays instant.
+   */
+  private closeRun(): void {
+    const now = this.clock();
+    if (this.winN > 0) this.pushPoint(now);
+    const evaluated = this.evalJob ? this.evalJob.weightsId : this.evaluatedId;
+    if (evaluated !== this.weightsId) this.startEval(now);
   }
 
   private endEpoch(): void {
@@ -258,10 +305,13 @@ export class Trainer {
     return this.epoch + this.cursor / Math.max(1, this.order.length);
   }
 
-  private startEval(): void {
+  /** Starts evaluating the current weights on the test set (replacing any unfinished evaluation). */
+  private startEval(now?: number): void {
     if (!this.ready()) return;
+    if (now !== undefined) this.lastEvalAt = now;
     const ef = this.epochFraction();
-    this.evalJob = { i: 0, loss: 0, correct: 0, confusion: new Array(this.data!.classes * this.data!.classes).fill(0), epoch: ef, step: this.step };
+    const K = this.data!.classes;
+    this.evalJob = { i: 0, loss: 0, correct: 0, confusion: new Array(K * K).fill(0), epoch: ef, step: this.step, weightsId: this.weightsId };
     this.nextEvalEpoch = (Math.floor(ef * EVALS_PER_EPOCH + 1e-9) + 1) / EVALS_PER_EPOCH;
   }
 
@@ -283,7 +333,8 @@ export class Trainer {
       job.confusion[y * d.classes + pred]++;
     }
     if (job.i >= n) {
-      this.evals.push({ epoch: job.epoch, step: job.step, loss: job.loss / n, acc: job.correct / n, confusion: job.confusion });
+      this.evals.push({ epoch: job.epoch, step: job.step, loss: job.loss / n, acc: job.correct / n, confusion: job.confusion, weightsId: job.weightsId });
+      this.evaluatedId = job.weightsId;
       this.evalJob = null;
     }
   }
@@ -318,6 +369,7 @@ export class Trainer {
         const before = this.seen;
         this.trainBatch();
         if (this.maxRate !== null) this.allowance -= this.seen - before;
+        if (!this.running) this.closeRun(); // +1 Epoch reached the end of its epoch
       } else break;
     }
     const dt = performance.now() - t0;
@@ -379,6 +431,6 @@ export class Trainer {
     if (!this.net) return;
     this.lastWeights = performance.now();
     const weights = this.net.getWeights();
-    this.emit({ type: 'weights', version: this.version, step: this.step, weights }, weights.map((w) => w.buffer));
+    this.emit({ type: 'weights', version: this.version, step: this.step, weightsId: this.weightsId, weights }, weights.map((w) => w.buffer));
   }
 }

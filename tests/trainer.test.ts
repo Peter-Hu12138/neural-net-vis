@@ -34,7 +34,7 @@ function harness(spec: LayerSpec[] = [], hyper: Hyper = { lr: 0.01, batchSize: 1
   const evals = () => metrics().flatMap((m) => m.evals);
   const points = () => metrics().flatMap((m) => m.points);
   const last = () => statuses().at(-1)!;
-  const weights = () => log.filter((m): m is { type: 'weights'; version: number; step: number; weights: Float32Array[] } => m.type === 'weights');
+  const weights = () => log.filter((m): m is { type: 'weights'; version: number; step: number; weightsId: number; weights: Float32Array[] } => m.type === 'weights');
   return { t, log, net, statuses, evals, points, last, weights };
 }
 
