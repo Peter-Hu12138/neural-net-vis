@@ -1,14 +1,14 @@
 /**
  * Input features for point datasets, as in the TensorFlow Playground: the network can be fed the
- * raw coordinates and, optionally, squares, products and sines of them. Coordinates live in
- * [−1, 1], so every feature stays within [−1, 1] too.
+ * raw coordinates and, optionally, squares, products and sines of them (sin πx, one full period
+ * over the plot). Coordinates live in [−1, 1], so every feature stays within [−1, 1] too.
  */
 
 export type FeatureId = string; // 'x1', 'x2', 'x3', 'x1^2', 'x1*x2', 'sin x1', …
 
 export interface FeatureDef {
   id: FeatureId;
-  /** Display label with sub/superscripts, e.g. "x₁²". */
+  /** Display label with sub/superscripts, e.g. "x₁²" or "sin πx₁"; every view shows this one. */
   label: string;
   /** Plain-language description for tooltips. */
   title: string;
@@ -32,7 +32,8 @@ export function featureCatalog(dims: 2 | 3): FeatureDef[] {
     }
   }
   for (let i = 0; i < dims; i++) {
-    out.push({ id: `sin x${i + 1}`, label: `sin x${SUB[i]}`, title: `sin(π · coordinate ${i + 1})`, fn: (p, o) => Math.sin(Math.PI * p[o + i]) });
+    // The label is what the network gets: sin(π·x), one full period over [−1, 1], not sin x.
+    out.push({ id: `sin x${i + 1}`, label: `sin πx${SUB[i]}`, title: `sin(π · coordinate ${i + 1})`, fn: (p, o) => Math.sin(Math.PI * p[o + i]) });
   }
   return out;
 }

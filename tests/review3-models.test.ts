@@ -163,7 +163,7 @@ suite('DATA-3: feature labels say what they compute', () => {
     expect(sines.map((f) => f.label)).toEqual(['sin πx₁', 'sin πx₂', 'sin πx₃']);
     const x = featurize(Float32Array.from([0.19, -0.5, 1]), 3, sines.map((f) => f.id));
     expect(x[0]).toBeCloseTo(Math.sin(Math.PI * 0.19), 6);
-    expect(x[0]).toBeCloseTo(0.565, 3);
+    expect(x[0]).toBeCloseTo(0.562, 3); // not sin(0.19) = 0.189
     expect(x[1]).toBeCloseTo(-1, 6);
   });
 });
