@@ -18,7 +18,7 @@ import { classColor, onThemeChange, palette } from './theme';
 const PREVIEW = 32;
 /** Matches .dsp-index's scroll-padding: where a snapped item's left edge sits. */
 const SNAP_PAD = 6;
-const GROUPS: DatasetInfo['group'][] = ['Images', 'Points in 2D', 'Points in 3D'];
+const GROUPS: DatasetInfo['group'][] = ['Images', 'Points in 2-D', 'Points in 3-D'];
 const IMAGE_LIMITS = [null, 5_000, 1_000, 200];
 const POINT_LIMITS = [null, 100, 50, 20];
 const POINT_COUNTS = [200, 400, 600, 1_000, 2_000];

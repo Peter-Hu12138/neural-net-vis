@@ -84,7 +84,7 @@ export function mountControls(): void {
   const lrMenu = () => selectField('lr', 'Learning rate', LRS.map((v) => ({ value: v, label: String(v) })), store.hyper.lr, (lr) => setHyper({ lr }));
   let lrField = lrMenu();
   const batchField = selectField('batch', 'Batch size', BATCHES.map((v) => ({ value: v, label: String(v) })), store.hyper.batchSize, (batchSize) => setHyper({ batchSize }));
-  const optField = selectField('optimizer', 'Optimizer', OPTIMIZERS, store.hyper.optimizer, (optimizer) => setHyper({ optimizer }));
+  const optField = selectField('optimizer', 'Optimiser', OPTIMIZERS, store.hyper.optimizer, (optimizer) => setHyper({ optimizer }));
   const hyper = h('div', { class: 'bar-hyper' }, lrField, batchField, optField);
 
   /** Reflects store.hyper and store.speed (setDataset changes both per kind of data). */

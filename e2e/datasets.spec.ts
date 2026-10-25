@@ -113,7 +113,7 @@ test('the picker switches between image and point datasets, and 07 follows', asy
   await expect(item(page, 'MNIST digits')).toHaveAttribute('aria-pressed', 'true');
   await onlySelected(page, 'MNIST digits');
   await expect(page.locator('#datasets .dsp-item')).toHaveCount(14);
-  for (const group of ['Images', 'Points in 2D', 'Points in 3D']) await expect(page.locator('#datasets .dsp-group-label', { hasText: group })).toBeVisible();
+  for (const group of ['Images', 'Points in 2-D', 'Points in 3-D']) await expect(page.locator('#datasets .dsp-group-label', { hasText: group })).toBeVisible();
   // The strip stays compact: index plus the line under it.
   const strip = await page.locator('#datasets .dsp-index').boundingBox();
   const row = await page.locator('#datasets .dsp-row').boundingBox();

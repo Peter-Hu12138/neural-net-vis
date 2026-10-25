@@ -23,7 +23,7 @@ export interface ImageSource {
 export interface DatasetInfo {
   id: DatasetId;
   name: string;
-  group: 'Images' | 'Points in 2D' | 'Points in 3D';
+  group: 'Images' | 'Points in 2-D' | 'Points in 3-D';
   kind: 'image' | 'points';
   /** Class names, in label order. */
   classes: string[];
@@ -76,7 +76,7 @@ export const DATASETS: DatasetInfo[] = [
     return {
       id: s.id,
       name: s.name,
-      group: s.dims === 2 ? 'Points in 2D' : 'Points in 3D',
+      group: s.dims === 2 ? 'Points in 2-D' : 'Points in 3-D',
       kind: 'points',
       classes: names,
       glyphs: names.map((_, k) => String(k)),
