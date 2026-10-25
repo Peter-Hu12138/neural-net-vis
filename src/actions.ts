@@ -38,7 +38,9 @@ function onMessage(m: FromTrainer): void {
     case 'metrics':
       if (m.version !== store.version) return;
       store.points.push(...m.points);
-      store.evals.push(...m.evals);
+      // An evaluation finished just before the data changed measured the data that is gone: it
+      // must not stand as the current data's test accuracy, even for a moment.
+      store.evals.push(...m.evals.filter((e) => e.dataRev === store.dataRev));
       store.emit('metrics');
       break;
     case 'weights':
@@ -171,12 +173,22 @@ function applyData(data: Data, change: DataChange = 'dataset'): void {
   fullData = data;
   const d = limitTraining(data, store.trainLimit);
   store.data = d;
-  client.post({ type: 'data', data: payload(d) });
+  client.post({ type: 'data', data: payload(d), rev: ++store.dataRev });
   analysis.setData(payload(d));
   const kept = change === 'dataset' ? null : carriedProbe(store.probe, d, change);
   if (kept) setProbe(kept);
   else if (d.testY.length) setProbe(testProbe(d, 0));
   store.emit('data');
+}
+
+/**
+ * Takes the data away from the trainer before a change that also brings a new network (another
+ * dataset, other features, a restart). Without this, the trainer measured the new network on the
+ * old data while the new data was still loading or on its way, and the page recorded that figure
+ * as the new data's first test accuracy.
+ */
+function dropTrainerData(): void {
+  client.post({ type: 'data', data: null, rev: ++store.dataRev });
 }
 
 /**
@@ -231,6 +243,7 @@ export async function setDataset(id: DatasetId): Promise<void> {
   const info = datasetInfo(id);
   store.data = null;
   fullData = null;
+  dropTrainerData();
   // The current input belongs to the old dataset: its caption, its label (02 would mark that class
   // index among the new classes) and maybe its shape. Until the new data is in (test sample #0
   // then), there is no current input, as when the page first loads.
@@ -269,14 +282,25 @@ export async function setDataset(id: DatasetId): Promise<void> {
 }
 
 /**
- * Point datasets: regenerate with new settings (noise, size, split, seed). Weights are kept, and
- * so are your points: they live in the same coordinate space as the generated ones.
+ * Point datasets: regenerate with new settings (noise, size, split, seed). Your points stay: they
+ * live in the same coordinate space as the generated ones.
+ *
+ * The network's weights and their history go together. New points for a training set of the same
+ * size (noise, Regenerate) continue the run: the same network, step, epochs and curves, first
+ * evaluated on the new points. A training set of another size (count, share) is another
+ * experiment, as with "Train on": it restarts from the weights it started from, with a fresh
+ * history on an epoch axis of one unit. Before, every change kept the trained weights but erased
+ * their history, so the page called a trained network a random start, before any training.
  */
 export function setPointsConfig(patch: Partial<Omit<SyntheticConfig, 'id'>>): void {
   store.pointsConfig = { ...store.pointsConfig, ...patch };
   if (store.info.kind !== 'points') return;
-  rebuild(false, { from: store.net });
-  applyData(pointsData({ id: store.dataset, ...store.pointsConfig } as SyntheticConfig, store.features), 'points');
+  const data = pointsData({ id: store.dataset, ...store.pointsConfig } as SyntheticConfig, store.features);
+  if (!store.data || limitTraining(data, store.trainLimit).trainY.length !== store.data.trainY.length) {
+    dropTrainerData();
+    rebuild(false, { restart: true });
+  }
+  applyData(data, 'points');
 }
 
 /**
@@ -288,6 +312,7 @@ export function setFeatures(features: FeatureId[]): void {
   if (store.info.kind !== 'points' || !dims || !features.length) return;
   store.features = features;
   store.custom = store.custom.map((c) => (c.coords ? { ...c, x: featurize(c.coords, dims, features) } : c));
+  dropTrainerData(); // with as many features as before, the new network would fit the old inputs
   rebuild(false, { from: store.keepWeights ? store.net : null });
   applyData(pointsData({ id: store.dataset, ...store.pointsConfig } as SyntheticConfig, features), 'features');
   // After the new model and data: the trainer must never pair inputs of two different sizes.
@@ -303,6 +328,7 @@ export function setFeatures(features: FeatureId[]): void {
 export function setTrainLimit(limit: number | null): void {
   store.trainLimit = limit;
   if (!fullData) return store.emit('data');
+  dropTrainerData();
   rebuild(false, { restart: true });
   applyData(fullData, 'subset');
 }
@@ -367,12 +393,13 @@ export function transferModel(json: unknown): void {
 
 /**
  * The current model as a file. Its test accuracy is included only when the last evaluation was of
- * exactly these weights; an older one (training ran on, or the weights were edited since) would be
- * saved as a figure for weights it never saw.
+ * exactly these weights on the current data; an older one (training ran on, the weights were
+ * edited, or the points were redrawn since) would be saved as a figure for weights or data it
+ * never saw.
  */
 export function exportModel(name: string): ModelFile {
   const last = store.evals[store.evals.length - 1];
-  const measured = !!last && heldWeightsId !== null && last.weightsId === heldWeightsId;
+  const measured = !!last && heldWeightsId !== null && last.weightsId === heldWeightsId && last.dataRev === store.dataRev;
   return encodeModel(store.net, {
     name,
     dataset: store.dataset,

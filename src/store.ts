@@ -137,6 +137,11 @@ export class Store {
   weightsRev = 0;
   /** The loaded dataset (null while loading). */
   data: Data | null = null;
+  /**
+   * Bumped whenever the data changes or goes away; every evaluation carries the number of the
+   * data it was measured on (EvalPoint.dataRev), so an older one is never taken for this data's.
+   */
+  dataRev = 0;
   status: Status | null = null;
   points: TrainPoint[] = [];
   evals: EvalPoint[] = [];

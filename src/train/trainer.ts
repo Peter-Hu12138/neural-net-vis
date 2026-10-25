@@ -22,6 +22,7 @@ interface EvalJob {
   epoch: number;
   step: number;
   weightsId: number;
+  dataRev: number;
 }
 
 /**
@@ -50,6 +51,8 @@ export class Trainer {
   private weightsId = 0;
   /** weightsId of the last finished evaluation on the current data (−1: none yet). */
   private evaluatedId = -1;
+  /** The page's number for the current data (see the 'data' message). */
+  private dataRev = 0;
 
   private winLoss = 0;
   private winAcc = 0;
@@ -85,14 +88,30 @@ export class Trainer {
 
   handle(msg: ToTrainer): void {
     switch (msg.type) {
-      case 'data':
+      case 'data': {
+        if (!msg.data) {
+          // Other data is on its way: drop this one and anything still being measured on it.
+          this.data = null;
+          this.evalJob = null;
+          this.running = this.stopAtEpochEnd = false;
+          break;
+        }
+        // The same network carries on with new data (new points for the same task): the curve
+        // point so far was trained on the old data, so it closes here, and the epoch in progress
+        // goes on from the same fraction instead of jumping back to its start.
+        if (this.winN > 0) this.pushPoint(this.clock());
+        const frac = this.order.length ? this.cursor / this.order.length : 0;
         this.data = msg.data;
+        this.dataRev = msg.rev ?? 0;
         this.x = new Float32Array(msg.data.inputSize);
         this.rebuildOrder();
+        this.cursor = Math.max(0, Math.min(this.order.length - 1, Math.ceil(frac * this.order.length)));
+        // Whatever was measured before was measured on other data.
         this.evaluatedId = -1;
         this.startEval();
         this.schedule();
         break;
+      }
       case 'model':
         this.version = msg.version;
         this.net = new Network(msg.arch, 0);
@@ -311,7 +330,7 @@ export class Trainer {
     if (now !== undefined) this.lastEvalAt = now;
     const ef = this.epochFraction();
     const K = this.data!.classes;
-    this.evalJob = { i: 0, loss: 0, correct: 0, confusion: new Array(K * K).fill(0), epoch: ef, step: this.step, weightsId: this.weightsId };
+    this.evalJob = { i: 0, loss: 0, correct: 0, confusion: new Array(K * K).fill(0), epoch: ef, step: this.step, weightsId: this.weightsId, dataRev: this.dataRev };
     this.nextEvalEpoch = (Math.floor(ef * EVALS_PER_EPOCH + 1e-9) + 1) / EVALS_PER_EPOCH;
   }
 
@@ -333,7 +352,7 @@ export class Trainer {
       job.confusion[y * d.classes + pred]++;
     }
     if (job.i >= n) {
-      this.evals.push({ epoch: job.epoch, step: job.step, loss: job.loss / n, acc: job.correct / n, confusion: job.confusion, weightsId: job.weightsId });
+      this.evals.push({ epoch: job.epoch, step: job.step, loss: job.loss / n, acc: job.correct / n, confusion: job.confusion, weightsId: job.weightsId, dataRev: job.dataRev });
       this.evaluatedId = job.weightsId;
       this.evalJob = null;
     }

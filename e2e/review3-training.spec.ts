@@ -273,13 +273,16 @@ test('DATA-4: your points survive feature toggles, noise, count, share and regen
     expect(probe.x).toHaveLength(features.length);
     await expect(page.getByRole('button', { name: 'Remove my 3 points' })).toBeVisible();
     // The trainer has them: one epoch is the generated points plus 10 repeats of each of yours.
+    // (Noise and Regenerate continue the run, so count from where it stands.)
+    await page.waitForFunction(() => !(window as unknown as { raster: Raster }).raster.store.status?.running);
+    const from = await store<{ epoch: number; seen: number }>(page, '({ epoch: s.status?.epoch ?? 0, seen: s.status?.seen ?? 0 })');
     await page.click('#epoch');
-    await page.waitForFunction(() => {
+    await page.waitForFunction((e) => {
       const s = (window as unknown as { raster: Raster }).raster.store.status;
-      return !!s && s.epoch >= 1 && !s.running;
-    });
+      return !!s && s.epoch === e + 1 && !s.running;
+    }, from.epoch);
     const n = await store<number>(page, 's.data.trainY.length');
-    expect(await store<number>(page, 's.status.seen')).toBe(n + 30);
+    expect((await store<number>(page, 's.status.seen')) - from.seen).toBe(n + 30);
   };
 
   await page.locator('button.ds-feat[data-feature="x1^2"]').click();

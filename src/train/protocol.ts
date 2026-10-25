@@ -38,6 +38,8 @@ export interface EvalPoint {
    * Unlike `step`, it also changes when weights are replaced without training (the backprop view).
    */
   weightsId: number;
+  /** The `rev` of the data it was measured on (see the 'data' message). */
+  dataRev: number;
 }
 
 export interface Status {
@@ -51,7 +53,13 @@ export interface Status {
 }
 
 export type ToTrainer =
-  | { type: 'data'; data: DataPayload }
+  /**
+   * New training and test data, numbered by the page (`rev`, 0 when left out) so every evaluation
+   * says which data it measured. `data: null` takes the data away while the page switches to
+   * other data: until new data arrives the trainer neither trains nor evaluates, so the next
+   * network is never measured on the data it replaces.
+   */
+  | { type: 'data'; data: DataPayload | null; rev?: number }
   | { type: 'model'; version: number; arch: Arch; weights: Float32Array[]; hyper: Hyper; frozen: boolean[] }
   | { type: 'frozen'; frozen: boolean[] }
   | { type: 'hyper'; hyper: Hyper }
