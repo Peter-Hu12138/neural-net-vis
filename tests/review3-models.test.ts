@@ -161,7 +161,9 @@ suite('DATA-3: feature labels say what they compute', () => {
   it('the sine features are labelled sin πxᵢ, and compute exactly that', () => {
     const cat = featureCatalog(3);
     const sines = cat.filter((f) => f.id.startsWith('sin'));
-    expect(sines.map((f) => f.label)).toEqual(['sin πx₁', 'sin πx₂', 'sin πx₃']);
+    // A no-break space: "sin" never ends one line with "πx₁" starting the next (10's sentence).
+    expect(sines.map((f) => f.label)).toEqual(['sin\u00a0πx₁', 'sin\u00a0πx₂', 'sin\u00a0πx₃']);
+    expect(cat.every((f) => !/\s/.test(f.label.replace(/\u00a0/g, '')))).toBe(true);
     const x = featurize(Float32Array.from([0.19, -0.5, 1]), 3, sines.map((f) => f.id));
     expect(x[0]).toBeCloseTo(Math.sin(Math.PI * 0.19), 6);
     expect(x[0]).toBeCloseTo(0.562, 3); // not sin(0.19) = 0.189

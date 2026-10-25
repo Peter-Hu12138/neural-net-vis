@@ -8,7 +8,7 @@ export type FeatureId = string; // 'x1', 'x2', 'x3', 'x1^2', 'x1*x2', 'sin x1', 
 
 export interface FeatureDef {
   id: FeatureId;
-  /** Display label with sub/superscripts, e.g. "x₁²" or "sin πx₁"; every view shows this one. */
+  /** Display label with sub/superscripts, e.g. "x₁²" or "sin πx₁" (no-break space); every view shows this one. */
   label: string;
   /** Plain-language description for tooltips. */
   title: string;
@@ -32,8 +32,9 @@ export function featureCatalog(dims: 2 | 3): FeatureDef[] {
     }
   }
   for (let i = 0; i < dims; i++) {
-    // The label is what the network gets: sin(π·x), one full period over [−1, 1], not sin x.
-    out.push({ id: `sin x${i + 1}`, label: `sin πx${SUB[i]}`, title: `sin(π · coordinate ${i + 1})`, fn: (p, o) => Math.sin(Math.PI * p[o + i]) });
+    // The label is what the network gets: sin(π·x), one full period over [−1, 1], not sin x. A
+    // no-break space keeps "sin" and its argument on one line wherever the label sits in prose.
+    out.push({ id: `sin x${i + 1}`, label: `sin\u00a0πx${SUB[i]}`, title: `sin(π · coordinate ${i + 1})`, fn: (p, o) => Math.sin(Math.PI * p[o + i]) });
   }
   return out;
 }

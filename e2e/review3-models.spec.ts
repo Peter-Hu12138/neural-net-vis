@@ -251,7 +251,7 @@ test('the sine feature is labelled sin πx₁ wherever it is shown', async ({ pa
   await open(page);
   await switchTo(page, 'circle');
   const chip = page.locator('#datasets .ds-feat[data-feature="sin x1"]');
-  await expect(chip).toHaveAttribute('aria-label', 'sin πx₁');
+  await expect(chip).toHaveAttribute('aria-label', 'sin\u00a0πx₁'); // a no-break space
   await expect(chip).toHaveText('sin πx1'); // the index is a <sub>
   await chip.click();
   await page.waitForFunction(() => (window as unknown as { raster: Raster }).raster.store.net.getWeights()[0].length === 8 * 3);
