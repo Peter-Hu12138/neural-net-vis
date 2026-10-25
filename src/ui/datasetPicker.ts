@@ -90,12 +90,46 @@ interface Item {
   progress: HTMLElement;
 }
 
+/**
+ * The four samples of an image dataset's preview mosaic (see DatasetInfo.preview), in the layout
+ * the network reads: channel-major, values 0–1.
+ */
+async function decodePreview(info: DatasetInfo): Promise<Float32Array[]> {
+  const { c, h: H, w: W } = info.image!.shape;
+  const img = new Image();
+  img.src = info.preview!;
+  await img.decode();
+  const canvas = document.createElement('canvas');
+  canvas.width = 2 * W;
+  canvas.height = 2 * H;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
+  ctx.drawImage(img, 0, 0);
+  const { data } = ctx.getImageData(0, 0, 2 * W, 2 * H);
+  const HW = H * W;
+  return [0, 1, 2, 3].map((k) => {
+    const x = new Float32Array(c * HW);
+    const ox = (k % 2) * W;
+    const oy = Math.floor(k / 2) * H;
+    for (let r = 0; r < H; r++) {
+      for (let q = 0; q < W; q++) {
+        const p = ((oy + r) * 2 * W + ox + q) * 4;
+        for (let ch = 0; ch < c; ch++) x[ch * HW + r * W + q] = data[p + ch] / 255;
+      }
+    }
+    return x;
+  });
+}
+
 export function mountDatasetPicker(): void {
   const root = $('datasets');
   const index = h('div', { class: 'dsp-index', role: 'group', 'aria-label': 'Dataset' });
   const items: Item[] = [];
-  /** A few real samples of each image dataset that has been loaded, for its preview. */
+  /**
+   * Four real samples of each image dataset for its preview: decoded from the mosaic it ships with,
+   * so the tile is true before the dataset loads, then taken from the loaded data itself.
+   */
   const samples = new Map<DatasetId, Float32Array[]>();
+  const fromData = new Set<DatasetId>();
   /** Point previews are generated once (default settings) and redrawn on theme changes. */
   const pointCache = new Map<DatasetId, { coords: Float32Array; labels: Uint8Array; dims: 2 | 3 }>();
 
@@ -317,20 +351,12 @@ export function mountDatasetPicker(): void {
     if (info.kind === 'image') {
       const half = PREVIEW / 2;
       const real = samples.get(info.id);
-      for (let k = 0; k < 4; k++) {
-        const x = (k % 2) * half;
-        const y = Math.floor(k / 2) * half;
-        if (real?.[k]) drawSample(ctx, real[k], info.image!.shape, x, y, half, half);
-        else {
-          // Until the dataset is loaded: its first four classes as glyph tiles.
-          ctx.fillStyle = classColor(k);
-          ctx.font = `600 12px "IBM Plex Mono", ui-monospace, monospace`;
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'middle';
-          ctx.fillText(info.glyphs[k], x + half / 2, y + half / 2 + 0.5);
-        }
-      }
-      if (!real) {
+      it.canvas.dataset.preview = real ? 'samples' : 'placeholder';
+      if (real) {
+        for (let k = 0; k < real.length; k++) drawSample(ctx, real[k], info.image!.shape, (k % 2) * half, Math.floor(k / 2) * half, half, half);
+      } else {
+        // For the moment it takes to decode the samples: an empty 2 × 2 grid, nothing that could be
+        // mistaken for the data.
         ctx.strokeStyle = p.hair;
         ctx.lineWidth = 1;
         ctx.beginPath();
@@ -342,6 +368,7 @@ export function mountDatasetPicker(): void {
       }
       return;
     }
+    it.canvas.dataset.preview = 'points';
     let pts = pointCache.get(info.id);
     if (!pts) {
       const syn = generate({ id: info.id as SyntheticId, ...DEFAULT_SYNTHETIC, count: 240 });
@@ -369,16 +396,29 @@ export function mountDatasetPicker(): void {
 
   const keepSamples = () => {
     const d = store.data;
-    if (!d || d.info.kind !== 'image' || samples.has(d.info.id)) return;
+    if (!d || d.info.kind !== 'image' || fromData.has(d.info.id)) return;
     const out: Float32Array[] = [];
     for (let k = 0; k < 4; k++) {
       const i = d.testY.indexOf(k);
       if (i >= 0) out.push(sampleInput(d, 'test', i));
     }
     samples.set(d.info.id, out);
+    fromData.add(d.info.id);
     const it = items.find((x) => x.info.id === d.info.id);
     if (it) paintPreview(it);
   };
+  // The same four images, shipped with the app, for the datasets not loaded yet.
+  for (const it of items) {
+    const info = it.info;
+    if (!info.preview) continue;
+    decodePreview(info)
+      .then((out) => {
+        if (fromData.has(info.id)) return;
+        samples.set(info.id, out);
+        paintPreview(it);
+      })
+      .catch(() => {}); // the empty frames stay
+  }
 
   // ── Sync with the store ──
   let lastId: DatasetId | null = null;
