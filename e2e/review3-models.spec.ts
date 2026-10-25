@@ -156,7 +156,9 @@ test('keep trained weights: removing a hidden layer drops its weights, and the o
     return { first: same(now[0], w.before[0]), output: same(now[4], w.before[2]), frozen: w.raster.store.frozen };
   });
   expect(added).toEqual({ first: true, output: true, frozen: [false, false, true] });
-  await expect(page.locator('.builder-keep .hint')).toContainText('as long as its size and the size of its input stay the same');
+  await expect(page.locator('.builder-keep .hint')).toContainText(
+    'as long as its size and the size of its input stay the same, even with a new activation. A layer whose size or input size changes starts from random weights.',
+  );
 });
 
 test('the Weights line follows a transferred network through a keep-weights edit', async ({ page }) => {

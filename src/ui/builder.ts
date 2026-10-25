@@ -277,7 +277,7 @@ export function mountBuilder(): void {
           'p',
           { class: 'hint' },
           store.keepWeights
-            ? 'On: when you edit the layers or switch to a dataset with the same input, each layer keeps its weights (and its freeze setting) as long as its size and the size of its input stay the same. A layer you change, or whose input changes, starts from random weights.'
+            ? 'On: when you edit the layers or switch to a dataset with the same input, each layer keeps its weights (and its freeze setting) as long as its size and the size of its input stay the same, even with a new activation. A layer whose size or input size changes starts from random weights.'
             : 'Off: every edit starts the whole network from random weights. Turn this on to keep the layers you did not change.',
         ),
       ),

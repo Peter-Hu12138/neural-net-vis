@@ -201,11 +201,11 @@ conditions lower still.
   engine skips the gradients of frozen weights, and stops backpropagating below the lowest layer that
   still learns, which is why training a new head is fast.
 - **Keep trained weights when editing**: with it on, an edit to the architecture keeps the weights
-  (and freeze setting) of every layer whose size and input size did not change. Layers are followed
-  through the edit, not matched by position: removing a hidden layer drops that layer's weights;
-  the layer above it starts fresh when its input size changes; the output layer keeps its weights
-  as long as its own shape is unchanged. A layer you change starts fresh. With the option off,
-  every edit restarts from random weights.
+  (and freeze setting) of every layer whose size and input size did not change, even when its
+  activation function did. Layers are followed through the edit, not matched by position: removing
+  a hidden layer drops that layer's weights; the layer above it starts fresh when its input size
+  changes; the output layer keeps its weights as long as its own shape is unchanged. A layer whose
+  size changes starts fresh. With the option off, every edit restarts from random weights.
 - The line under **Weights** says where the current weights came from, for example "Random start
   (seed 1)", "MNIST LeNet, pretrained (98.9% test)", "MNIST LeNet, pretrained on MNIST digits (98.9%
   test there)" after a switch to another dataset, "Conv and dense layers transferred from MNIST
