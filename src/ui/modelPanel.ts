@@ -479,7 +479,7 @@ export function mountModelPanel(): void {
     // Fine-tuning unlocks the copied layers only after half the images, so early on it is the very
     // same run as Frozen: leave its column out of the early table rather than repeat those numbers.
     const early = (c: TransferCell) => c.early?.[0]?.mean;
-    const fineIsFrozen = rows.every((x) => early(x.fineTune) === early(x.frozen));
+    const fineIsFrozen = rows.every((x) => early(x.fineTune) !== undefined && early(x.fineTune) === early(x.frozen));
     const earlyCols = fineIsFrozen ? cols.filter((c) => c.key !== 'fineTune') : cols;
     const details = h(
       'details',

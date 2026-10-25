@@ -77,9 +77,12 @@ const isLayer = (l: unknown): l is LayerSpec => {
   return false;
 };
 
+/** Text from a file, shortened for a message. */
+const clip = (s: string) => (s.length > 40 ? `${s.slice(0, 40)}…` : s);
+
 const isObject = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 
-/** "28×28 grey", "32×32 colour" or "2 input features", for messages. */
+/** "28×28 grey inputs", "32×32 colour inputs" or "2 input features", for messages. */
 function inputWords(s: Shape): string {
   if (!isImage(s)) return `${s.c} input feature${s.c === 1 ? '' : 's'}`;
   return `${s.h}×${s.w} ${s.c === 1 ? 'grey' : s.c === 3 ? 'colour' : `${s.c}-channel`} inputs`;
@@ -121,10 +124,10 @@ function checkFeatures(f: ModelFile, info: DatasetInfo): void {
   if (!Array.isArray(list) || !list.length || !list.every((id) => typeof id === 'string')) throw new Error('The model file’s list of input features is damaged.');
   const ids = list as string[];
   const dup = ids.find((id, i) => ids.indexOf(id) !== i);
-  if (dup !== undefined) throw new Error(`The model file lists the feature ${dup} twice.`);
+  if (dup !== undefined) throw new Error(`The model file lists the feature ${clip(dup)} twice.`);
   const catalog = featureCatalog(info.dims!);
   const unknown = ids.filter((id) => !catalog.some((c) => c.id === id));
-  if (unknown.length) throw new Error(`The model file asks for input features this page does not have for ${info.dims}-D points: ${unknown.join(', ')}.`);
+  if (unknown.length) throw new Error(`The model file asks for input features this page does not have for ${info.dims}-D points: ${unknown.slice(0, 5).map(clip).join(', ')}${unknown.length > 5 ? ', …' : ''}.`);
   const input = f.arch.input;
   if (!isImage(input) && input.c !== ids.length) {
     const labels = ids.map((id) => catalog.find((c) => c.id === id)!.label).join(', ');
@@ -148,7 +151,7 @@ export function decodeModel(json: unknown): { file: ModelFile; net: Network } {
   if (!info) {
     const images = DATASETS.filter((d) => d.kind === 'image').map((d) => d.name);
     const points = DATASETS.length - images.length;
-    throw new Error(`The model file names a dataset "${f.dataset}" that this page does not have. This page has ${images.join(', ')} and ${points} point datasets.`);
+    throw new Error(`The model file names a dataset "${clip(f.dataset)}" that this page does not have. This page has ${images.join(', ')} and ${points} point datasets.`);
   }
   checkMeta(f.meta);
   const a = f.arch;
