@@ -2,7 +2,7 @@
 
 Section 01 of the page has three views, chosen with the tabs under the **Weights** line:
 
-- **Layers**: the architecture builder, with a lock button on every layer to freeze it.
+- **Layers**: the architecture builder, with a **Freeze** button on every layer.
 - **Pretrained**: a small model zoo of four networks trained in advance with the app's own engine
   on the full original datasets. **Load** puts one on the page exactly as it was trained.
   **Transfer** copies its hidden layers into a network for the current dataset, freezes them, and
@@ -114,7 +114,7 @@ The five conditions, each as it can be done on the page:
 3. **Transfer, conv frozen:** copy every hidden layer, freeze only the two convolution layers; the
    dense layer and the new output layer learn. On the page: Transfer, then **Unfreeze Dense 3**.
 4. **Transfer, then fine-tune:** condition 2 for the first 10,000 images, then every layer unfrozen
-   for the other 10,000 at learning rate 0.001. On the page: Transfer, train, unlock every layer,
+   for the other 10,000 at learning rate 0.001. On the page: Transfer, train, unfreeze every layer,
    lower the learning rate, train on.
 5. **Control, nothing copied:** trained like condition 3 (the convolution layers frozen, the dense
    layer and the new output layer learning), but nothing is copied: the frozen convolution layers
@@ -195,8 +195,9 @@ conditions lower still.
   the button is disabled and the row says what input the model needs. The copied layers are frozen,
   the output layer is new, and the **Layers** tab says how many layers are frozen. When the copied
   layers include a dense layer, the page offers to unfreeze it, because of the measurements above.
-- **Freeze** (the lock button on each layer under **Layers**, the output layer included) holds a
-  layer's weights fixed while the rest trains. A frozen layer is hatched and its lock is closed. The
+- **Freeze** (the button on each layer under **Layers**, the output layer included) holds a layer's
+  weights fixed while the rest trains. A frozen layer is hatched and its button reads **Frozen**;
+  click it again to unfreeze the layer. The
   engine skips the gradients of frozen weights, and stops backpropagating below the lowest layer that
   still learns, which is why training a new head is fast.
 - **Keep trained weights when editing**: with it on, an edit to the architecture keeps the weights

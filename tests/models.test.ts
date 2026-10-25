@@ -132,7 +132,7 @@ suite('pretrained model zoo', () => {
     const r = t.rows[0];
     const text = transferFinding(r, 'MNIST small CNN', 'Fashion-MNIST', t.checkpoints![0]);
     expect(text).toContain(`with every copied layer frozen, ${(r.frozen.mean * 100).toFixed(1)}%`);
-    expect(text).toContain(`with the dense layer unlocked as well, ${(r.convFrozen.mean * 100).toFixed(1)}%`);
+    expect(text).toContain(`with the dense layer unfrozen as well, ${(r.convFrozen.mean * 100).toFixed(1)}%`);
     expect(text).toContain(`training from scratch (${(r.scratch.mean * 100).toFixed(1)}%)`);
     expect(text).not.toMatch(/-\d/); // true minus signs only
     expect(controlFinding(r, 'MNIST', 'Fashion')).toContain(`with nothing copied (random, untrained conv filters, frozen, and a dense layer that learns from random weights), ${(r.randomConv!.mean * 100).toFixed(1)}%`);

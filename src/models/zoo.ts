@@ -83,7 +83,7 @@ function versus(a: number, b: number): string {
  * conv-frozen results against training from scratch, the time saved, and the head start.
  */
 export function transferFinding(r: TransferRow, fromName: string, toName: string, checkpoint?: number): string {
-  let s = `Measured on ${toName} with ${int(r.train)} training images, starting from ${fromName}: with every copied layer frozen, ${pct(r.frozen.mean)}; with the dense layer unlocked as well, ${pct(r.convFrozen.mean)}, ${versus(r.convFrozen.mean, r.scratch.mean)} training from scratch (${pct(r.scratch.mean)})`;
+  let s = `Measured on ${toName} with ${int(r.train)} training images, starting from ${fromName}: with every copied layer frozen, ${pct(r.frozen.mean)}; with the dense layer unfrozen as well, ${pct(r.convFrozen.mean)}, ${versus(r.convFrozen.mean, r.scratch.mean)} training from scratch (${pct(r.scratch.mean)})`;
   const ratio = r.convFrozen.seconds && r.scratch.seconds ? r.convFrozen.seconds / r.scratch.seconds : 1;
   if (ratio <= 0.75) s += `, in ${ratio >= 0.4 && ratio <= 0.6 ? 'about half' : `${Math.round(ratio * 100)}% of`} the training time`;
   s += '.';
@@ -117,6 +117,29 @@ export function controlFinding(r: TransferRow, fromShort: string, toShort: strin
     s += ` From ${fromShort} to ${toShort}, transfer mostly saves training time. It pays off in accuracy when the source network has learned far more than the new examples can teach, as large networks trained on millions of photos have.`;
   }
   return s;
+}
+
+/**
+ * What the Pretrained tab says on a dataset no transfer was measured on, in place of a headline
+ * that would not apply: whether any pretrained network fits this dataset's input at all, and where
+ * transfer was measured instead. `pairs` holds the measured source and target dataset names.
+ */
+export function notMeasuredHere(hereName: string, hereInput: Shape, zoo: { arch: Arch }[] | null, pairs: [string, string][]): string {
+  let lead = '';
+  if (zoo?.length) {
+    if (!isImage(hereInput) && zoo.every((z) => isImage(z.arch.input))) {
+      lead = `The pretrained networks are all image networks, so none of them can be transferred to ${hereName}; Load switches to the dataset a network was trained on. `;
+    } else if (!zoo.some((z) => sameShape(z.arch.input, hereInput))) {
+      lead = `None of the pretrained networks takes ${shapeWords(hereInput)} input, so none of them can be transferred to ${hereName}. `;
+    }
+  }
+  const sets = [...new Set(pairs.flat())];
+  const both = pairs.some(([a, b]) => pairs.some(([c, d]) => c === b && d === a));
+  const where =
+    sets.length === 2
+      ? `between ${sets[0]} and ${sets[1]}${both ? ', in both directions' : ''}`
+      : pairs.map(([a, b]) => `from ${a} to ${b}`).join(' and ');
+  return lead ? `${lead}Transfer was measured ${where}: see All measurements.` : `Transfer was measured only ${where}, not on ${hereName}: see All measurements.`;
 }
 
 const actLabel = (id: string) => {

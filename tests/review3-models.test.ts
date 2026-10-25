@@ -3,6 +3,7 @@ import { beforeAll, describe as suite, expect, it, vi } from 'vitest';
 import { featureCatalog, featurize } from '../src/data/features';
 import { inkFromRGBA, rgbaToMnist, toFashion } from '../src/data/preprocess';
 import { decodeModel, encodeModel, type ModelFile } from '../src/models/format';
+import { notMeasuredHere, transferFinding } from '../src/models/zoo';
 import { Network } from '../src/nn/network';
 import type { Arch, LayerSpec } from '../src/nn/types';
 
@@ -239,5 +240,43 @@ suite('MOD-9 / DATA-8 / ANA-7: the documentation says what the code does', () =>
     expect(pretrain).toMatch(/randomConv: \{ label: 'random conv frozen', copy: \(\) => null/);
     expect(doc).not.toContain('keep their random starting weights instead of the copied ones');
     expect(doc).toMatch(/nothing is copied/);
+  });
+});
+
+suite('design-4: one word for freezing, in the measured sentences too', () => {
+  it('the measured sentence says unfrozen, never unlocked', () => {
+    const cell = (mean: number) => ({ runs: [mean], mean, seconds: 10 });
+    const text = transferFinding({ from: 'mnist-cnn', to: 'fashion', train: 1000, epochs: 20, scratch: cell(0.8), frozen: cell(0.6), convFrozen: cell(0.8), fineTune: cell(0.79) }, 'A', 'B');
+    expect(text).toContain('with the dense layer unfrozen as well, 80.0%');
+    expect(text).not.toMatch(/lock/i);
+  });
+
+  it('the panel, the builder, the zoo text and docs/models.md never speak of locks', () => {
+    for (const f of ['src/ui/modelPanel.ts', 'src/ui/builder.ts', 'src/models/zoo.ts', 'docs/models.md']) {
+      const text = readFileSync(f, 'utf8').replace(/LOCK_(OPEN|CLOSED)/g, '');
+      expect(text, f).not.toMatch(/\b(un)?lock(s|ed|ing)?\b/i);
+    }
+  });
+});
+
+suite('design-12: no headline from another dataset where transfer was not measured', () => {
+  const grey = { arch: mnistArch([]) };
+  const colour = { arch: { input: { c: 3, h: 32, w: 32 }, layers: [], classes: 10 } as Arch };
+  const pairs: [string, string][] = [
+    ['MNIST digits', 'Fashion-MNIST'],
+    ['Fashion-MNIST', 'MNIST digits'],
+  ];
+  it('on point data it says plainly that the zoo holds image networks only', () => {
+    expect(notMeasuredHere('Circle', { c: 2, h: 1, w: 1 }, [grey, colour], pairs)).toBe(
+      'The pretrained networks are all image networks, so none of them can be transferred to Circle; Load switches to the dataset a network was trained on. Transfer was measured between MNIST digits and Fashion-MNIST, in both directions: see All measurements.',
+    );
+  });
+  it('on CIFAR-10 it says where transfer was measured, and not on CIFAR-10', () => {
+    expect(notMeasuredHere('CIFAR-10', { c: 3, h: 32, w: 32 }, [grey, colour], pairs)).toBe(
+      'Transfer was measured only between MNIST digits and Fashion-MNIST, in both directions, not on CIFAR-10: see All measurements.',
+    );
+    expect(notMeasuredHere('CIFAR-10', { c: 3, h: 32, w: 32 }, [grey], [pairs[0]])).toBe(
+      'None of the pretrained networks takes 32×32 colour input, so none of them can be transferred to CIFAR-10. Transfer was measured between MNIST digits and Fashion-MNIST: see All measurements.',
+    );
   });
 });

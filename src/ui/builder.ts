@@ -91,7 +91,7 @@ export function mountBuilder(): void {
       class: 'btn btn-sm freeze',
       'aria-pressed': String(on),
       'aria-label': `Freeze ${name}`,
-      title: on ? 'Frozen: training leaves these weights alone. Click to let them learn again.' : 'Freeze: hold these weights fixed while the rest of the network trains.',
+      title: on ? 'Frozen: training leaves these weights alone. Click to unfreeze them, so they learn again.' : 'Freeze: hold these weights fixed while the rest of the network trains.',
       onclick: () => setFrozen(block, !store.isFrozen(block)),
     });
     b.innerHTML = on ? LOCK_CLOSED : LOCK_OPEN;

@@ -2,7 +2,7 @@ import './modelPanel.css';
 import { exportModel, loadModel, readModel, setFrozen, transferModel } from '../actions';
 import { datasetInfo, noun, type DatasetId } from '../data/datasets';
 import type { ModelFile } from '../models/format';
-import { controlFinding, fetchIndex, fetchModel, fetchTransfer, fmtBytes, layersSummary, sameShape, shapeWords, transferFinding, type TransferCell, type TransferReport, type ZooEntry } from '../models/zoo';
+import { controlFinding, fetchIndex, fetchModel, fetchTransfer, fmtBytes, layersSummary, notMeasuredHere, sameShape, shapeWords, transferFinding, type TransferCell, type TransferReport, type ZooEntry } from '../models/zoo';
 import { blockSignature, matchBlocks, type Network } from '../nn/network';
 import type { Shape } from '../nn/types';
 import { store } from '../store';
@@ -430,23 +430,29 @@ export function mountModelPanel(): void {
         null,
         'A ',
         h('b', null, 'frozen'),
-        ' layer keeps its weights while the rest of the network trains, which is quick: no gradients have to flow into it. Transferred layers start frozen, so at first only the new output layer learns. Unlock a layer with its lock button under Layers to ',
+        ' layer keeps its weights while the rest of the network trains, which is quick: no gradients have to flow into it. Transferred layers start frozen, so at first only the new output layer learns. To ',
         h('b', null, 'fine-tune'),
-        ' it too.',
+        ' a layer as well, unfreeze it: click its Frozen button under Layers.',
       ),
     );
     const rows = transfer?.rows ?? [];
     if (!transfer || !rows.length) return;
-    // Headline: the measurement closest to what the reader is looking at.
-    const r = rows.find((x) => x.to === store.dataset) ?? rows[0];
-    const control = controlFinding(r, short(zooSet(r.from)), short(r.to));
-    explain.append(h('div', { class: 'model-measured' }, h('p', null, transferFinding(r, zooName(r.from), datasetName(r.to), transfer.checkpoints?.[0])), control ? h('p', null, control) : null));
+    // Headline: the measurement on the dataset the reader is on. Where none was made (CIFAR-10,
+    // point data), say so and where transfer was measured, rather than quote another dataset's row.
+    const r = rows.find((x) => x.to === store.dataset) ?? null;
+    if (r) {
+      const control = controlFinding(r, short(zooSet(r.from)), short(r.to));
+      explain.append(h('div', { class: 'model-measured' }, h('p', null, transferFinding(r, zooName(r.from), datasetName(r.to), transfer.checkpoints?.[0])), control ? h('p', null, control) : null));
+    } else {
+      const pairs = [...new Map(rows.map((x) => [`${x.from}>${x.to}`, [datasetName(zooSet(x.from) as DatasetId), datasetName(x.to)] as [string, string]])).values()];
+      explain.append(h('div', { class: 'model-measured', id: 'transfer-not-here' }, h('p', null, notMeasuredHere(store.info.name, store.input, zoo, pairs))));
+    }
 
     const cols: { key: 'scratch' | 'frozen' | 'convFrozen' | 'fineTune'; label: string; title: string }[] = [
       { key: 'scratch', label: 'Scratch', title: 'Random starting weights; every layer learns' },
       { key: 'frozen', label: 'Frozen', title: 'What Transfer does: every copied layer frozen; only the new output layer learns' },
-      { key: 'convFrozen', label: 'Conv frozen', title: 'Transfer, then unlock the dense layer: only the conv layers stay frozen' },
-      { key: 'fineTune', label: 'Fine-tuned', title: 'Transfer and train the new output layer, then unlock everything and train on at a lower rate' },
+      { key: 'convFrozen', label: 'Conv frozen', title: 'Transfer, then unfreeze the dense layer: only the conv layers stay frozen' },
+      { key: 'fineTune', label: 'Fine-tuned', title: 'Transfer and train the new output layer, then unfreeze everything and train on at a lower rate' },
     ];
     // One group of rows per pair of datasets ("MNIST → Fashion"), one row per training-set size.
     const pairs = [...new Set(rows.map((x) => `${x.from}>${x.to}`))].map((key) => rows.filter((x) => `${x.from}>${x.to}` === key));
@@ -476,7 +482,7 @@ export function mountModelPanel(): void {
       );
     const seen = rows[0].train * rows[0].epochs;
     const cp = transfer.checkpoints?.[0];
-    // Fine-tuning unlocks the copied layers only after half the images, so early on it is the very
+    // Fine-tuning unfreezes the copied layers only after half the images, so early on it is the very
     // same run as Frozen: leave its column out of the early table rather than repeat those numbers.
     const early = (c: TransferCell) => c.early?.[0]?.mean;
     const fineIsFrozen = rows.every((x) => early(x.fineTune) !== undefined && early(x.fineTune) === early(x.frozen));
@@ -494,13 +500,13 @@ export function mountModelPanel(): void {
               'div',
               { class: 'transfer-wrap' },
               table(`After only the first ${int(cp)} training images`, early, earlyCols),
-              fineIsFrozen ? h('p', { class: 'hint transfer-note', id: 'transfer-early-note' }, `No Fine-tuned column here: fine-tuning unlocks the copied layers only after ${int(seen / 2)} images, so until then it is the same run as Frozen.`) : null,
+              fineIsFrozen ? h('p', { class: 'hint transfer-note', id: 'transfer-early-note' }, `No Fine-tuned column here: fine-tuning unfreezes the copied layers only after ${int(seen / 2)} images, so until then it is the same run as Frozen.`) : null,
             )
           : null,
         h(
           'p',
           { class: 'hint' },
-          'Frozen: what Transfer does. Conv frozen: Transfer, then unlock the dense layer. Fine-tuned: Transfer, train, then unlock everything at a lower learning rate. ',
+          'Frozen: what Transfer does. Conv frozen: Transfer, then unfreeze the dense layer. Fine-tuned: Transfer, train, then unfreeze everything at a lower learning rate. ',
           `Images: the first N of the training set, shown again and again until ${int(seen)} have gone by. Means of ${transfer.seeds} runs, each tested on the ${int(10000)} official test images, with Adam at this page's default settings. Both source networks are the small CNN preset, trained on all 60,000 images of their own dataset.`,
         ),
       ),

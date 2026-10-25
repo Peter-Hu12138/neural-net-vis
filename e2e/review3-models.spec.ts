@@ -110,12 +110,12 @@ test('damaged model files are refused at Open, in words, and the page keeps work
   await trainUntil(page, '(window.raster.store.status?.step ?? 0) >= 3');
 });
 
-test('keep trained weights: removing a hidden layer drops its weights, and the output layer keeps its own and its lock', async ({ page }) => {
+test('keep trained weights: removing a hidden layer drops its weights, and the output layer keeps its own and stays frozen', async ({ page }) => {
   await open(page);
   await switchTo(page, 'circle');
   await page.locator('#keep-weights').check();
   await trainUntil(page, '(window.raster.store.status?.step ?? 0) >= 30');
-  // Lock the first hidden layer and the output layer; Dense 2 keeps learning.
+  // Freeze the first hidden layer and the output layer; Dense 2 keeps learning.
   await page.click('#freeze-0');
   await page.click('#freeze-2');
   expect(await raster(page, (r) => r.store.frozen)).toEqual([true, false, true]);
@@ -125,7 +125,7 @@ test('keep trained weights: removing a hidden layer drops its weights, and the o
   });
 
   // Remove Dense 1. Dense 2 now reads the two coordinates instead of eight units, so it starts
-  // fresh; the output layer still reads eight units and keeps its weights and its lock.
+  // fresh; the output layer still reads eight units and keeps its weights and stays frozen.
   await page.click('#remove-0');
   const after = await page.evaluate(() => {
     const w = window as unknown as { raster: Raster; before: Float32Array[] };
@@ -189,9 +189,62 @@ test('the early transfer table leaves out the Fine-tuned column, which would rep
   await expect(tables.nth(0).locator('thead th')).toHaveText(['Images', 'Scratch', 'Frozen', 'Conv frozen', 'Fine-tuned']);
   await expect(tables.nth(1).locator('thead th')).toHaveText(['Images', 'Scratch', 'Frozen', 'Conv frozen']);
   await expect(tables.nth(1).locator('tr.transfer-group th').first()).toHaveAttribute('colspan', '4');
-  await expect(page.locator('#transfer-early-note')).toHaveText('No Fine-tuned column here: fine-tuning unlocks the copied layers only after 10,000 images, so until then it is the same run as Frozen.');
+  await expect(page.locator('#transfer-early-note')).toHaveText('No Fine-tuned column here: fine-tuning unfreezes the copied layers only after 10,000 images, so until then it is the same run as Frozen.');
   // The control is described as it was run: nothing copied.
   await expect(page.locator('.model-measured')).toContainText('Control: with nothing copied (random, untrained conv filters, frozen, and a dense layer that learns from random weights)');
+});
+
+/** Every word section 01 shows or puts in a tooltip, for vocabulary checks. */
+const sectionWords = (page: Page) =>
+  page.evaluate(() => {
+    const sec = document.getElementById('architecture')!;
+    const titles = [...sec.querySelectorAll('[title], [aria-label]')].map((e) => `${e.getAttribute('title') ?? ''} ${e.getAttribute('aria-label') ?? ''}`);
+    return [sec.innerText, sec.querySelector<HTMLElement>('#models-pretrained')!.textContent, ...titles].join('\n');
+  });
+
+test('freezing is called freeze and unfreeze everywhere, never lock and unlock', async ({ page }) => {
+  await open(page);
+  await switchTo(page, 'fashion');
+  await tab(page, 'Pretrained');
+  await page.locator('.transfer-details summary').click();
+  await expect(page.locator('#models-pretrained .model-explain')).toContainText('To fine-tune a layer as well, unfreeze it: click its Frozen button under Layers.');
+  await expect(page.locator('.model-measured')).toContainText('with the dense layer unfrozen as well');
+  await page.click('#zoo-transfer-mnist-cnn');
+  await expect(page.locator('#model-status-action')).toHaveText('Unfreeze Dense 3');
+  // The control the explanation names is there, and reads Frozen on a transferred layer.
+  await tab(page, 'Layers');
+  await expect(page.locator('#freeze-0')).toHaveText('Frozen');
+  await expect(page.locator('#freeze-0')).toHaveAttribute('title', /Click to unfreeze them/);
+  await expect(page.locator('#freeze-3')).toHaveText('Freeze');
+  const words = await sectionWords(page);
+  expect(words).toMatch(/unfreeze/i);
+  expect(words).not.toMatch(/\b(un)?lock(s|ed|ing)?\b/i);
+});
+
+test('the Pretrained tab leads with a measurement only on a dataset it was measured on', async ({ page }) => {
+  await open(page);
+  await tab(page, 'Pretrained');
+  const headline = page.locator('#models-pretrained .model-measured p').first();
+  await expect(headline).toHaveText(/^Measured on MNIST digits with 1,000 training images, starting from Fashion-MNIST small CNN:/);
+
+  await switchTo(page, 'circle');
+  await expect(page.locator('#zoo-transfer-mnist-cnn')).toBeDisabled();
+  await expect(headline).toHaveText(
+    'The pretrained networks are all image networks, so none of them can be transferred to Circle; Load switches to the dataset a network was trained on. Transfer was measured between MNIST digits and Fashion-MNIST, in both directions: see All measurements.',
+  );
+  await expect(page.locator('#models-pretrained .model-measured')).not.toContainText('Measured on');
+  await expect(page.locator('#models-pretrained .model-measured')).not.toContainText('Control');
+  // The numbers are still there, with no row marked as the current one.
+  await page.locator('.transfer-details summary').click();
+  await expect(page.locator('.transfer-table')).toHaveCount(2);
+  await expect(page.locator('.transfer-table tr.is-current')).toHaveCount(0);
+
+  await switchTo(page, 'cifar10');
+  await expect(headline).toHaveText('Transfer was measured only between MNIST digits and Fashion-MNIST, in both directions, not on CIFAR-10: see All measurements.');
+
+  await switchTo(page, 'fashion');
+  await expect(headline).toHaveText(/^Measured on Fashion-MNIST with 1,000 training images, starting from MNIST small CNN:/);
+  await expect(page.locator('.transfer-table tr.is-current')).toHaveCount(2);
 });
 
 test('the sine feature is labelled sin πx₁ wherever it is shown', async ({ page }) => {
