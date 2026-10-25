@@ -255,3 +255,102 @@ describe('MOD-1: a layer unfrozen mid-training starts with a fresh optimiser sta
     expect(max / lr).toBeLessThanOrEqual(1.001); // was 1.61 with one global Adam step count
   });
 });
+
+/** The trainer's pending evaluation (private), to act while one is half done. */
+const pendingEval = (t: Trainer) => (t as unknown as { evalJob: { i: number } | null }).evalJob;
+
+describe('FLOW-6: Step while a test evaluation is half done', () => {
+  it('every recorded evaluation is of the weights at its own step, and the last step gets one', async () => {
+    const d = pointsData({ id: 'circle', count: 8000, noise: 0.1, trainRatio: 0.5, seed: 1 });
+    const data: DataPayload = { inputSize: d.inputSize, scale: 1, classes: 2, trainX: d.trainX, trainY: d.trainY, testX: d.testX, testY: d.testY };
+    expect(data.testY.length).toBe(4000);
+    const arch: Arch = { input: d.input, layers: [{ kind: 'dense', units: 8, act: 'tanh' }], classes: 2 };
+    const log: FromTrainer[] = [];
+    // Very short slices: the 4,000-point evaluation takes many of them, as MNIST's does on the page.
+    const t = new Trainer((m) => log.push(m), 0.01, { pointMs: 0, evalMs: 0 });
+    const w0 = new Network(arch, 1).getWeights();
+    t.handle({ type: 'model', version: 1, arch, weights: w0, hyper: { lr: 0.1, batchSize: 10, optimizer: 'sgd' }, frozen: [] });
+    t.handle({ type: 'data', data });
+    await until(() => (pendingEval(t)?.i ?? 0) >= 400);
+    expect(pendingEval(t)!.i).toBeLessThan(4000); // still under way
+    for (let i = 0; i < 10; i++) t.handle({ type: 'step' });
+    await until(() => !pendingEval(t), 20_000);
+    const evals = log.flatMap((m) => (m.type === 'metrics' ? m.evals : []));
+    const at = new Map<number, Float32Array[]>([[0, w0]]);
+    for (const m of log) if (m.type === 'weights') at.set(m.step, m.weights);
+    expect(evals.length).toBeGreaterThan(0);
+    for (const e of evals) expect(e.acc, `evaluation labelled step ${e.step}`).toBe(evaluate(arch, at.get(e.step)!, data).acc);
+    expect(evals.at(-1)!.step).toBe(10);
+  });
+});
+
+describe('FLOW-2: data taken away before a new network arrives', () => {
+  it('the new network is measured only on the new data, once, however long that data takes', async () => {
+    const a = payload('circle', 600, 1);
+    const b = payload('blobs', 600, 2); // same input size and classes: nothing else tells them apart
+    const hyper: Hyper = { lr: 0.03, batchSize: 10, optimizer: 'adam' };
+    const h = harness(a.arch, a.data, hyper);
+    await until(() => h.evals().length === 1);
+    h.t.handle({ type: 'play' });
+    await sleep(60);
+    // What the page does on a dataset switch: data away, the new network, then (later) the new data.
+    h.t.handle({ type: 'data', data: null, rev: 1 });
+    const w = new Network(b.arch, 7).getWeights();
+    h.t.handle({ type: 'model', version: 2, arch: b.arch, weights: w, hyper, frozen: [] });
+    await sleep(120); // the new data is still loading: no training, no evaluation
+    const v2 = () => h.log.flatMap((m) => (m.type === 'metrics' && m.version === 2 ? m.evals : []));
+    expect(v2()).toEqual([]);
+    expect(h.last().running).toBe(false);
+    h.t.handle({ type: 'data', data: b.data, rev: 2 });
+    await until(() => v2().length === 1);
+    await sleep(60);
+    expect(v2()).toHaveLength(1);
+    expect(v2()[0]).toMatchObject({ step: 0, dataRev: 2, acc: evaluate(b.arch, w, b.data).acc });
+  });
+});
+
+describe('FLOW-3: new points for the same network continue its run', () => {
+  it('step, samples, epoch and curves carry on, and the next evaluation is on the new points', async () => {
+    const a = payload('circle', 600, 1);
+    const b = payload('circle', 600, 2); // Regenerate: a new draw of the same size
+    const h = harness(a.arch, a.data, { lr: 0.03, batchSize: 10, optimizer: 'adam' }, { pointMs: 0, evalMs: 0 });
+    for (let i = 0; i < 45; i++) h.t.handle({ type: 'step' }); // 1.5 epochs of 300 points
+    await until(() => !pendingEval(h.t));
+    const before = h.last();
+    expect(before.epochFraction).toBeCloseTo(1.5, 9);
+    const nPoints = h.points().length;
+    h.t.handle({ type: 'data', data: b.data, rev: 1 });
+    await until(() => !pendingEval(h.t));
+    await sleep(5);
+    const ev = h.evals().at(-1)!;
+    expect(ev.step).toBe(45);
+    expect(ev.epoch).toBeCloseTo(1.5, 9); // not back to 1.0
+    expect(ev.dataRev).toBe(1);
+    expect(ev.acc).toBe(evaluate(a.arch, h.weights().at(-1)!.weights, b.data).acc);
+    expect(h.evals().map((e) => [e.step, e.dataRev])).toEqual([[45, 0], [45, 1]]); // the history stays
+    expect(h.points().length).toBe(nPoints);
+    // Training goes on from the same step and the same point in the epoch, on the new points.
+    h.t.handle({ type: 'epoch' });
+    await until(() => h.last().epoch === 2 && !h.last().running);
+    expect(h.last().step).toBe(60);
+    expect(h.last().seen).toBe(before.seen + 150);
+    expect(h.last().epochFraction).toBe(2);
+  });
+
+  it('a curve point is never a mix of old and new points: the one in progress closes at the change', async () => {
+    const a = payload('circle', 6000, 1); // 300 steps an epoch: a curve point every 5 steps
+    const b = payload('circle', 6000, 2);
+    const h = harness(a.arch, a.data, { lr: 0.03, batchSize: 10, optimizer: 'adam' }, { pointMs: 0, evalMs: 0 });
+    // Two batches as Play trains them (Step and Pause close the curve point themselves).
+    const train = () => (h.t as unknown as { trainBatch(): void }).trainBatch();
+    train(); // a point at step 1
+    train(); // step 2: the next point is due at step 6
+    h.t.handle({ type: 'pause' });
+    const k = h.points().length;
+    train();
+    h.t.handle({ type: 'data', data: b.data, rev: 1 });
+    h.t.handle({ type: 'pause' });
+    expect(h.points().length).toBe(k + 1);
+    expect(h.points().at(-1)!.step).toBe(3);
+  });
+});
