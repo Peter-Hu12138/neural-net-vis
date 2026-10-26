@@ -8,7 +8,10 @@ import {
   ACTMAX_STEPS,
   TOP_LABELS,
   allOff,
+  article,
   coveragePhrase,
+  deadPhrase,
+  deadSummary,
   isDead,
   labelSummary,
   mapScale,
@@ -211,7 +214,6 @@ const nounOf = (kind: UnitKind) => (kind === 'conv' ? 'filter' : kind === 'outpu
 
 const cap = (t: string) => t.charAt(0).toUpperCase() + t.slice(1);
 const lowerFirst = (t: string) => (/^[A-Z][A-Z]/.test(t) ? t : t.charAt(0).toLowerCase() + t.slice(1));
-const article = (w: string) => (/^[aeiou]/i.test(w) ? 'an' : 'a');
 
 /**
  * `d` decimals with a true minus sign. Values too small for `d` decimals keep two significant
@@ -525,7 +527,14 @@ export function mountUnits(): void {
   };
 
   /** "fires on 37% of points", or "never fires (dead)" for a unit with one response for every sample. */
-  const coverText = (kind: UnitKind, s: UnitSummary) => (isDead(kind, s) ? 'never fires (dead)' : coveragePhrase(kind, s.coverage, 0, one()));
+  const coverText = (kind: UnitKind, s: UnitSummary) => (isDead(kind, s) ? deadPhrase(pts()) : coveragePhrase(kind, s.coverage, 0, one()));
+  /** Point data: whether unit u's response map fires anywhere (a dead unit's can, off the data). */
+  const firesOnMap = (u: number): boolean => {
+    const m = mapsNow();
+    const sc = m?.scales[u];
+    if (!m || !sc) return false;
+    return sc.hi > (m.scan.net.blocks[m.scan.result.block].spec.act === 'sigmoid' ? 0.5 : 0);
+  };
 
   const card = (u: number): HTMLElement => {
     const kind = kindOf(layer);
@@ -600,8 +609,9 @@ export function mountUnits(): void {
       t = `Each card: ${patch}the 9 test ${many()} that excite the ${what} most (left), and an input synthesised from ${blankWords()} to excite it (right).`;
     }
     const res = scan && scan.result.block === layer ? scan.result : null;
-    const dead = res ? res.units.filter((s) => isDead(kind, s)).length : 0;
-    if (dead) t += ` ${dead === 1 ? `One ${what} never fires` : `${dead} ${what}s never fire`} (dead); ${dead === 1 ? 'its card shows' : 'their cards show'} the ${many()} closest to firing.`;
+    const deadUnits = res ? res.units.map((s, u) => (isDead(kind, s) ? u : -1)).filter((u) => u >= 0) : [];
+    const firing = pts() ? deadUnits.filter(firesOnMap).length : 0;
+    if (deadUnits.length) t += ` ${deadSummary(deadUnits.length, what, many(), pts(), firing)}`;
     return t;
   };
 
@@ -1104,14 +1114,14 @@ export function mountUnits(): void {
           { class: 'units-stats' },
           kv('mean', num(s.mean, 3)),
           kv('max', num(s.top[0]?.value ?? NaN, 3)),
-          dead ? h('span', null, h('b', null, 'never fires')) : kv(coverLead, sharePct(s.coverage, 1), coverTail),
+          dead ? h('span', null, h('b', null, pts() ? 'never fires on a test point' : 'never fires')) : kv(coverLead, sharePct(s.coverage, 1), coverTail),
           pts() ? null : kv('sees', f && !f.whole ? `${f.size}×${f.size} px` : 'whole image'),
         ),
         h(
           'p',
           { class: 'hint' },
           dead
-            ? `Never fires on the ${int(count)} test ${many()}; ${many()} are ranked by pre-activation instead, so the first ones are the closest to firing. Click any ${one()} to make it the network’s input.`
+            ? `Never fires on the ${int(count)} test ${many()}; ${many()} are ranked by pre-activation instead, so the first ones are the closest to firing.${pts() && firesOnMap(u) ? ' Its map shows where it would fire: a region no test point reaches.' : ''} Click any ${one()} to make it the network’s input.`
             : `Response is ${responseIs}. Click any ${one()} to make it the network’s input.`,
         ),
       );
