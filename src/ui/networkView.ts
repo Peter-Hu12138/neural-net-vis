@@ -3,17 +3,18 @@ import { select, setProbe, testProbe } from '../actions';
 import { fixed } from '../analysis/stats';
 import { noun, type Data, type DatasetInfo } from '../data/datasets';
 import { featureDefs, featurize } from '../data/features';
-import { gridCoords, pointDomain, PointEvaluator } from '../data/grid';
-import type { Block } from '../nn/network';
+import { gridCoords, pointDomain } from '../data/grid';
+import type { Block, Network } from '../nn/network';
 import { store } from '../store';
 import { layerName } from './builder';
 import { ACTIVATIONS, type LayerSpec } from '../nn/types';
-import { axisName, robustScale } from './boundaryMath';
-import { Live, netFits } from './boundary2d';
-import { onSlice, slice, sliceAxes } from './boundary3d';
+import { axisName, featureScale, robustScale } from './boundaryMath';
+import { Cost, Evaluator, GridJob, Live, netFits, probeCrosses, sliceMs, type Budget } from './boundary2d';
+import { onCurrentSlice, onSlice, slice, sliceAxes } from './boundary3d';
 import { $, clear, h } from './dom';
 import { drawMap, drawSample, fitCanvas, hasNegative, maxAbs, paintSample } from './draw';
-import { css, diverging, onThemeChange, palette, sequential } from './theme';
+import { drawMark } from './marks';
+import { css, diverging, onThemeChange, palette, sequential, type RGB } from './theme';
 import { hideTip, showTip } from './tip';
 
 /**
@@ -40,12 +41,13 @@ interface Hit {
   text: string;
 }
 
-/** Two short caption lines for a column header. */
-function headerLines(spec: LayerSpec | null, info: DatasetInfo): [string, string] {
-  if (!spec) return [info.id === 'mnist' ? '10 digits' : `${info.classes.length} classes`, 'softmax'];
+/** Two short caption lines for a column header; a frozen layer says so on the second. */
+function headerLines(spec: LayerSpec | null, info: DatasetInfo, frozen = false): [string, string] {
+  const tag = frozen ? ' · frozen' : '';
+  if (!spec) return [info.id === 'mnist' ? '10 digits' : `${info.classes.length} classes`, `softmax${tag}`];
   const act = ACTIVATIONS.find((a) => a.id === spec.act)!.label;
-  if (spec.kind === 'conv') return [`${spec.filters} × ${spec.kernel}×${spec.kernel}`, `${act}${spec.pool ? ' · pool' : ''}`];
-  return [`${spec.units} units`, act];
+  if (spec.kind === 'conv') return [`${spec.filters} × ${spec.kernel}×${spec.kernel}`, `${act}${spec.pool ? ' · pool' : ''}${tag}`];
+  return [`${spec.units} units`, `${act}${tag}`];
 }
 
 /** Fits n square items into a box, trying 1–6 sub-columns, and returns their positions. */
@@ -131,29 +133,86 @@ function drawHeader(ctx: CanvasRenderingContext2D, cx: number, name: string, lin
   ctx.fillStyle = p.muted;
   fitFont(ctx, lines[0], 400, 10.5, 8.5, MONO, maxW);
   ctx.fillText(lines[0], cx, 31);
-  fitFont(ctx, lines[1], 400, 10.5, 8.5, MONO, maxW);
-  ctx.fillText(lines[1], cx, 44);
+  let second = lines[1];
+  fitFont(ctx, second, 400, 10.5, 8.5, MONO, maxW);
+  // In a narrow column the hatching alone marks a frozen layer (the legend explains it).
+  if (ctx.measureText(second).width > maxW && second.endsWith(' · frozen')) {
+    second = second.slice(0, -' · frozen'.length);
+    fitFont(ctx, second, 400, 10.5, 8.5, MONO, maxW);
+  }
+  ctx.fillText(second, cx, 44);
   if (selected) {
     ctx.fillStyle = p.accent;
     ctx.fillRect(cx - 18, 51, 36, 3);
   }
 }
 
-/** Pixel resolution of each unit's map over the input plane (point datasets); half for heavy networks while training. */
-const TILE_RES = 32;
-const TILE_RES_FAST = 16;
+/** Hatches a frozen layer's column, as 01 hatches its card: its weights stay as they are. */
+function hatch(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, hgt: number): void {
+  const p = palette();
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(x, y, w, hgt);
+  ctx.clip();
+  ctx.beginPath();
+  for (let t = -hgt; t < w; t += 9) {
+    ctx.moveTo(x + t, y + hgt);
+    ctx.lineTo(x + t + hgt, y);
+  }
+  ctx.strokeStyle = p.hair;
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.restore();
+}
 
+const frozenNames = (n: number) => {
+  const out: string[] = [];
+  for (let i = 0; i < n; i++) if (store.isFrozen(i)) out.push(layerName(i === n - 1 ? null : store.spec[i], i));
+  return out;
+};
+
+/**
+ * Grid sides of the point-data unit maps. While training: a pass of about 8 ms. Paused: 32². A
+ * slow network gets coarser maps rather than a long pass (see Budget).
+ */
+export const BUDGET_TILES: { running: Budget; paused: Budget } = {
+  running: { budget: 8, min: 16, max: 32, cap: 30, floor: 8 },
+  paused: { budget: 40, min: 32, max: 32, cap: 150, floor: 12 },
+};
 
 interface Tiles {
   res: number;
   r: number;
   dims: 2 | 3;
   axes: [number, number];
+  /** Slice position (3-D data). */
+  pos: number;
+  sliceAxis: number;
   /** Feature values over the plane, n × F. */
   feats: Float32Array;
   /** Per block, n × units (hidden activations, then output logits). */
   acts: Float32Array[];
   probs: Float32Array;
+  /** The page network these maps were computed for. */
+  net: Network;
+  features: string;
+  rev: number;
+}
+
+/** Colour look-up tables of the current theme: diverging over [−1, 1], sequential over [0, 1]. */
+function luts(): { div: Uint8ClampedArray; seq: Uint8ClampedArray } {
+  const div = new Uint8ClampedArray(511 * 3);
+  const seq = new Uint8ClampedArray(256 * 3);
+  const c: RGB = [0, 0, 0];
+  for (let i = 0; i < 511; i++) {
+    diverging(i / 255 - 1, c);
+    div.set(c, 3 * i);
+  }
+  for (let i = 0; i < 256; i++) {
+    sequential(i / 255, c);
+    seq.set(c, 3 * i);
+  }
+  return { div, seq };
 }
 
 export function mountNetworkView(): void {
@@ -180,15 +239,18 @@ export function mountNetworkView(): void {
   const legendNote = h('span', { class: 'legend-item' }, 'Lines show summed weights between units, maps and channels.');
   const wLabel = h('span', null, 'Weight');
   const aLabel = h('span', null, 'Activation');
+  const frozenKey = h('span', { class: 'legend-item nv-frozen-key', hidden: true }, h('i', { class: 'nv-hatch', 'aria-hidden': 'true' }), 'Frozen layer');
   const legend = h(
     'div',
     { class: 'legend' },
     h('span', { class: 'legend-item' }, wLabel, h('span', { class: 'mono' }, '−'), ramp(true), h('span', { class: 'mono' }, '+')),
     h('span', { class: 'legend-item' }, aLabel, h('span', { class: 'mono' }, '0'), ramp(false), h('span', { class: 'mono' }, 'max')),
+    frozenKey,
     legendNote,
   );
   const planeNote = h('p', { class: 'hint nv-plane-note', hidden: true });
-  root.append(h('div', { class: 'probe-row' }, h('span', { class: 'label' }, 'Input'), strip, randomBtn, caption), planeNote, box, legend);
+  const resNote = h('p', { class: 'hint nv-res-note', hidden: true });
+  root.append(h('div', { class: 'probe-row' }, h('span', { class: 'label' }, 'Input'), strip, randomBtn, caption), planeNote, box, legend, resNote);
 
   // ── Input picker ──
   const thumbs = new Map<string, HTMLButtonElement>();
@@ -214,13 +276,8 @@ export function mountNetworkView(): void {
         const p = palette();
         ctx.fillStyle = p.surface;
         ctx.fillRect(0, 0, 34, 34);
-        ctx.beginPath();
-        ctx.arc(17, 15, 7, 0, 2 * Math.PI);
-        ctx.fillStyle = p.cat[k % 10];
-        ctx.fill();
-        ctx.lineWidth = 1;
-        ctx.strokeStyle = p.ink;
-        ctx.stroke();
+        // The class's own mark (shape and colour), as in 03 and 07.
+        drawMark(ctx, k, 'train', 17, 15, 6.5, { color: p.cat[k % 10], ink: p.ink, surface: p.surface });
         title = `Test point #${i} (${name})`;
       } else {
         const x = new Float32Array(d.inputSize);
@@ -248,6 +305,15 @@ export function mountNetworkView(): void {
   };
 
   let hits: Hit[] = [];
+  /** Point data: the network has more weights than LINES, and only the strongest are drawn. */
+  let linesCapped = false;
+  const LINES = 1200;
+
+  /** Frozen layers' tooltips and labels. */
+  const FROZEN_TIP = '\nFrozen: training leaves this layer’s weights alone.';
+  const syncFrozenKey = (n: number) => {
+    frozenKey.hidden = !frozenNames(n).length;
+  };
 
   // ── Images ──
   const renderImages = () => {
@@ -269,7 +335,13 @@ export function mountNetworkView(): void {
     const ctx = fitCanvas(canvas, W, H);
     hits = [];
     canvas.dataset.view = 'image';
-    canvas.setAttribute('aria-label', `Network diagram: the ${shape.h}×${shape.w} ${shape.c === 3 ? 'colour' : 'grey'} input, the activations of every layer for it, and the output probabilities for ${K} classes.`);
+    const frozen = frozenNames(blocks.length);
+    canvas.dataset.frozen = frozen.join(',');
+    syncFrozenKey(blocks.length);
+    canvas.setAttribute(
+      'aria-label',
+      `Network diagram: the ${shape.h}×${shape.w} ${shape.c === 3 ? 'colour' : 'grey'} input, the activations of every layer for it, and the output probabilities for ${K} classes.${frozen.length ? ` Frozen: ${frozen.join(', ')}.` : ''}`,
+    );
 
     const colW = (W - extra) / cols;
     const headerH = 60;
@@ -296,6 +368,9 @@ export function mountNetworkView(): void {
       ctx.fillStyle = hl.dir === 'fwd' ? p.ink : p.accent;
       ctx.fillRect(centers[col] - colW / 2 + 2, 0, colW - 4 + (col === cols - 1 ? extra : 0), 3);
     }
+    blocks.forEach((_b, i) => {
+      if (store.isFrozen(i)) hatch(ctx, centers[i + 1] - colW / 2 + 2, 58, colW - 4 + (i === blocks.length - 1 ? extra - 10 : 0), H - 58);
+    });
 
     // Connections run between column edges so they never cross a neighbouring map.
     const right = layouts.map((items) => Math.max(...items.map((it) => it.x + it.s)));
@@ -355,7 +430,7 @@ export function mountNetworkView(): void {
     drawHeader(ctx, headerX(0), 'Input', [`${shape.h}×${shape.w}`, shape.c === 3 ? 'colour' : 'grey'], false, colW - 8);
     blocks.forEach((_b, i) => {
       const spec = i === blocks.length - 1 ? null : store.spec[i];
-      drawHeader(ctx, headerX(i + 1), layerName(spec, i), headerLines(spec, info), store.selected === i, colW - 8);
+      drawHeader(ctx, headerX(i + 1), layerName(spec, i), headerLines(spec, info, store.isFrozen(i)), store.selected === i, colW - 8);
     });
 
     // Input
@@ -366,13 +441,17 @@ export function mountNetworkView(): void {
     ctx.strokeRect(inItem.x - 0.5, inItem.y - 0.5, inItem.s + 1, inItem.s + 1);
     hits.push({ x: inItem.x, y: inItem.y, w: inItem.s, h: inItem.s, block: -1, unit: null, text: `Input · ${shape.h}×${shape.w}${shape.c === 3 ? ' colour' : ''} pixels\n${probe?.caption ?? ''}` });
 
+    // Signed activations (tanh, linear, Leaky ReLU layers) use the red/blue ramp: the legend says so.
+    let anySigned = false;
     blocks.forEach((b, i) => {
       const items = layouts[i + 1];
       const out = b.out;
       const signed = hasNegative(out);
       const max = maxAbs(out) || 1;
       const isOut = i === blocks.length - 1;
+      if (!isOut && signed) anySigned = true;
       const name = layerName(isOut ? null : store.spec[i], i);
+      const fz = store.isFrozen(i) ? FROZEN_TIP : '';
       if (b.kind === 'conv') {
         const { h: Hh, w: Ww } = b.outShape;
         const HW = Hh * Ww;
@@ -390,7 +469,7 @@ export function mountNetworkView(): void {
           }
           hits.push({
             x: it.x, y: it.y, w: it.s, h: it.s, block: i, unit: f,
-            text: `${name} · filter ${f + 1}\n${Hh}×${Ww} map · max ${mx.toFixed(3)} · mean ${(mean / HW).toFixed(3)}`,
+            text: `${name} · filter ${f + 1}\n${Hh}×${Ww} map · max ${fixed(mx, 3)} · mean ${fixed(mean / HW, 3)}\nColour scale: ${signed ? '±' : '0 … '}${fixed(max, 3)}, shared by this layer${fz}`,
           });
         });
       } else if (isOut) {
@@ -436,7 +515,7 @@ export function mountNetworkView(): void {
           const what = info.id === 'mnist' ? `digit ${k}` : info.classes[k];
           hits.push({
             x: it.x - 16, y: it.y, w: barX + barW - it.x + 26, h: it.s, block: i, unit: k,
-            text: `Output · ${what}${probe?.label === k ? ' (true label)' : ''}\nlogit ${fits ? b.z[k].toFixed(3) : '—'} · p = ${fits ? (probs[k] * 100).toFixed(1) : '—'}%`,
+            text: `Output · ${what}${probe?.label === k ? ' (true label)' : ''}\nlogit ${fits ? fixed(b.z[k], 3) : '—'} · p = ${fits ? (probs[k] * 100).toFixed(1) : '—'}%${fz}`,
           });
         });
       } else {
@@ -449,62 +528,152 @@ export function mountNetworkView(): void {
           ctx.strokeStyle = sel ? p.accent : p.hair;
           ctx.lineWidth = sel ? 2 : 1;
           ctx.strokeRect(it.x - 0.5, it.y - 0.5, it.s + 1, it.s + 1);
-          hits.push({ x: it.x, y: it.y, w: it.s, h: it.s, block: i, unit: j, text: `${name} · unit ${j + 1}\nz = ${z[j].toFixed(3)} · a = ${out[j].toFixed(3)}` });
+          hits.push({ x: it.x, y: it.y, w: it.s, h: it.s, block: i, unit: j, text: `${name} · unit ${j + 1}\nz = ${fixed(z[j], 3)} · a = ${fixed(out[j], 3)}\nColour scale: ${signed ? '±' : '0 … '}${fixed(max, 3)}, shared by this layer${fz}` });
         });
       }
     });
+    wLabel.textContent = anySigned ? 'Weight or activation' : 'Weight';
+    aLabel.textContent = anySigned ? 'Activation ≥ 0' : 'Activation';
+    legend.dataset.signed = String(anySigned);
   };
 
   // ── Points: every unit over the plane ──
-  const ev = new PointEvaluator();
+  const ev = new Evaluator();
+  const cost = new Cost();
   let tiles: Tiles | null = null;
-  /** Cost of a full-resolution tile pass, in ms. */
-  let tileMs = 0;
+  let tileRev = 0;
+  let job: { job: GridJob; coords: Float32Array; res: number; r: number; dims: 2 | 3; axes: [number, number]; pos: number; sliceAxis: number } | null = null;
+  /** Main-thread time of the pass under way (evaluation, painting the maps, drawing). */
+  let passMs = 0;
 
-  const evaluateTiles = (d: Data) => {
+  /** The maps of the current network, or null while they are being computed for a new one. */
+  const currentTiles = () => (tiles && tiles.net === store.net && tiles.features === store.features.join() ? tiles : null);
+
+  const startTiles = (d: Data) => {
     const dims = d.points!.dims;
     const r = pointDomain(d);
     const axes: [number, number] = dims === 2 ? [0, 1] : sliceAxes(slice.axis);
     const fixedAt = [0, 0, 0];
     if (dims === 3) fixedAt[slice.axis] = slice.pos;
-    const t0 = performance.now();
-    // A network that takes long per point gets coarser maps while it trains.
-    const res = store.running && tileMs > 12 ? TILE_RES_FAST : TILE_RES;
+    // A network that takes long per point gets coarser maps.
+    const res = cost.res(store.running ? BUDGET_TILES.running : BUDGET_TILES.paused, 2);
+    ev.sync();
     const coords = gridCoords(dims, res, r, axes, fixedAt);
-    ev.sync(store.net);
-    const out = ev.evaluate(coords, dims, store.features, { activations: true });
-    tiles = { res, r, dims, axes, feats: featurize(coords, dims, store.features), acts: out.acts!, probs: out.probs };
-    const ms = performance.now() - t0;
-    tileMs = (ms * TILE_RES * TILE_RES) / (res * res);
-    live.gap = Math.max(100, 4 * ms);
-    canvas.dataset.weights = String(store.weightsRev);
+    job = { job: new GridJob(ev.ev, coords, dims, true), coords, res, r, dims, axes, pos: slice.pos, sliceAxis: slice.axis };
   };
 
-  let tileImg: ImageData | null = null;
-  let tileCanvas: HTMLCanvasElement | null = null;
-  /** Paints a probability map from the surface toward one class colour. */
-  const drawProbTile = (ctx: CanvasRenderingContext2D, probs: Float32Array, K: number, k: number, it: Item, R: number) => {
-    const p = palette().rgb;
-    const n = R * R;
-    tileCanvas ??= document.createElement('canvas');
-    tileCanvas.width = R;
-    tileCanvas.height = R;
-    const tctx = tileCanvas.getContext('2d')!;
-    if (!tileImg || tileImg.width !== R) tileImg = tctx.createImageData(R, R);
-    const img = tileImg.data;
-    const c = p.cat[k % 10];
-    for (let i = 0; i < n; i++) {
-      const t = 0.85 * probs[i * K + k];
-      img[4 * i] = p.surface[0] + (c[0] - p.surface[0]) * t;
-      img[4 * i + 1] = p.surface[1] + (c[1] - p.surface[1]) * t;
-      img[4 * i + 2] = p.surface[2] + (c[2] - p.surface[2]) * t;
-      img[4 * i + 3] = 255;
+  /** Runs one slice of the tile pass; true when the maps are done. */
+  const stepTiles = (): boolean => {
+    if (!job) return false;
+    if (!job.job.step(sliceMs(), cost.perPoint)) return false;
+    const J = job;
+    job = null;
+    cost.add(J.job.busy, J.res * J.res);
+    tiles = {
+      res: J.res, r: J.r, dims: J.dims, axes: J.axes, pos: J.pos, sliceAxis: J.sliceAxis,
+      feats: featurize(J.coords, J.dims, store.features),
+      acts: J.job.acts!,
+      probs: J.job.probs!,
+      net: store.net,
+      features: store.features.join(),
+      rev: ++tileRev,
+    };
+    canvas.dataset.weights = String(store.weightsRev);
+    canvas.dataset.res = String(J.res);
+    return true;
+  };
+
+  // ── One picture holding every map (an atlas), repainted only when the maps change ──
+  const atlas = document.createElement('canvas');
+  let atlasKey = '';
+  let atlasCols = 1;
+  /** Colour scale of each map, for the tooltips: [feature, hidden layer 0, …]. */
+  let scales: { max: number; signed: boolean }[][] = [];
+  const paintAtlas = (T: Tiles) => {
+    const p = palette();
+    const key = `${T.rev}:${p.surface}:${p.ink}:${p.accent}:${p.neg}:${p.cat.join()}`;
+    if (key === atlasKey) return;
+    atlasKey = key;
+    const net = T.net;
+    const blocks = net.blocks;
+    const F = store.features.length;
+    const K = net.classes;
+    const hidden = blocks.slice(0, -1).map((b) => b.out.length);
+    const N = F + hidden.reduce((a, b) => a + b, 0) + K;
+    const R = T.res;
+    const S = R + 2; // one pixel of padding around each map (edge copied), so smoothing never bleeds
+    atlasCols = Math.max(1, Math.ceil(Math.sqrt(N)));
+    const rows = Math.ceil(N / atlasCols);
+    atlas.width = atlasCols * S;
+    atlas.height = rows * S;
+    const actx = atlas.getContext('2d')!;
+    const img = actx.createImageData(atlas.width, atlas.height);
+    const px = img.data;
+    const AW = atlas.width;
+    const { div, seq } = luts();
+    let t = 0;
+    const put = (colour: (q: number, out: Uint8ClampedArray, o: number) => void) => {
+      const ox = (t % atlasCols) * S;
+      const oy = Math.floor(t / atlasCols) * S;
+      t++;
+      for (let yy = 0; yy < S; yy++) {
+        const sy = Math.min(R - 1, Math.max(0, yy - 1));
+        for (let xx = 0; xx < S; xx++) {
+          const sx = Math.min(R - 1, Math.max(0, xx - 1));
+          const o = 4 * ((oy + yy) * AW + ox + xx);
+          colour(sy * R + sx, px, o);
+          px[o + 3] = 255;
+        }
+      }
+    };
+    const ramp = (v: number, signed: boolean, out: Uint8ClampedArray, o: number) => {
+      if (signed) {
+        const i = 3 * Math.round(255 * (Math.max(-1, Math.min(1, v)) + 1));
+        out[o] = div[i];
+        out[o + 1] = div[i + 1];
+        out[o + 2] = div[i + 2];
+      } else {
+        const i = 3 * Math.round(255 * Math.max(0, Math.min(1, v)));
+        out[o] = seq[i];
+        out[o + 1] = seq[i + 1];
+        out[o + 2] = seq[i + 2];
+      }
+    };
+    scales = [];
+    // Features: each on its own range over the whole domain (a constant slice shows its value).
+    const fsc = store.features.map((id) => featureScale(id, T.r));
+    scales.push(fsc);
+    for (let f = 0; f < F; f++) {
+      const { max, signed } = fsc[f];
+      const inv = 1 / (max || 1);
+      put((q, out, o) => ramp(T.feats[q * F + f] * inv, signed, out, o));
     }
-    tctx.putImageData(tileImg, 0, 0);
-    ctx.save();
-    ctx.imageSmoothingEnabled = true;
-    ctx.drawImage(tileCanvas, 0, 0, R, R, it.x, it.y, it.s, it.s);
-    ctx.restore();
+    // Hidden units: one scale per layer.
+    hidden.forEach((units, i) => {
+      const A = T.acts[i];
+      const signed = hasNegative(A);
+      const max = robustScale(A);
+      scales.push([{ max, signed }]);
+      const inv = 1 / max;
+      for (let j = 0; j < units; j++) put((q, out, o) => ramp(A[q * units + j] * inv, signed, out, o));
+    });
+    // Classes: probability, from the surface toward the class colour.
+    const rgb = p.rgb;
+    for (let k = 0; k < K; k++) {
+      const c = rgb.cat[k % 10];
+      put((q, out, o) => {
+        const a = 0.85 * T.probs[q * K + k];
+        out[o] = rgb.surface[0] + (c[0] - rgb.surface[0]) * a;
+        out[o + 1] = rgb.surface[1] + (c[1] - rgb.surface[1]) * a;
+        out[o + 2] = rgb.surface[2] + (c[2] - rgb.surface[2]) * a;
+      });
+    }
+    actx.putImageData(img, 0, 0);
+  };
+  /** Draws map number `t` of the atlas into `it`. */
+  const blit = (ctx: CanvasRenderingContext2D, T: Tiles, t: number, it: Item) => {
+    const S = T.res + 2;
+    ctx.drawImage(atlas, (t % atlasCols) * S + 1, Math.floor(t / atlasCols) * S + 1, T.res, T.res, it.x, it.y, it.s, it.s);
   };
 
   /**
@@ -552,11 +721,12 @@ export function mountNetworkView(): void {
     if (pfits) net.forward(probe!.x);
     hits = [];
     canvas.dataset.view = 'points';
-    if (!fits || !tiles) {
+    const T = fits ? currentTiles() : null;
+    if (!T) {
       fitCanvas(canvas, box.clientWidth || 400, 200);
       return;
     }
-    const T = tiles;
+    paintAtlas(T);
     const F = store.features.length;
     const defs = featureDefs(T.dims, store.features);
     const counts = [F, ...blocks.map((b) => (b.kind === 'dense' ? b.spec.units : 0))];
@@ -579,8 +749,15 @@ export function mountNetworkView(): void {
     const ctx = fitCanvas(canvas, W, H);
     const nTiles = counts.reduce((a, b) => a + b, 0);
     canvas.dataset.tiles = String(nTiles);
-    const planeName = T.dims === 2 ? 'the input plane' : `the slice ${axisName(slice.axis)} = ${fixed(slice.pos, 2)}`;
-    canvas.setAttribute('aria-label', `Network diagram: ${nTiles} small maps, one per input feature, hidden unit and class, each showing its value over ${planeName}; lines show the weights between them.`);
+    const sliceName = `${axisName(T.sliceAxis)} = ${fixed(T.pos, 2)}`;
+    const planeName = T.dims === 2 ? 'the input plane' : `the slice ${sliceName}`;
+    const frozen = frozenNames(blocks.length);
+    canvas.dataset.frozen = frozen.join(',');
+    syncFrozenKey(blocks.length);
+    canvas.setAttribute(
+      'aria-label',
+      `Network diagram: ${nTiles} small maps, one per input feature, hidden unit and class, each showing its value over ${planeName}; lines show the weights between them.${frozen.length ? ` Frozen: ${frozen.join(', ')}.` : ''}`,
+    );
 
     const hl = store.highlight;
     if (hl) {
@@ -592,196 +769,272 @@ export function mountNetworkView(): void {
       ctx.fillStyle = hl.dir === 'fwd' ? p.ink : p.accent;
       ctx.fillRect(x0, 0, w, 3);
     }
+    blocks.forEach((_b, i) => {
+      if (store.isFrozen(i)) hatch(ctx, centers[i + 1] - colW / 2 + 2, 58, colW - 4 + (i === blocks.length - 1 ? rightPad - 6 : 0), H - 58);
+    });
 
-    // Connections: one curve per weight, width and colour by sign and size.
+    // Connections: one curve per weight, width and colour by sign and size, stroked in a few
+    // batches of similar weights. Drawing them is most of the cost of a redraw (rasterising
+    // thousands of curves), so a large network shows only its strongest LINES weights, shared
+    // among the layers by size.
+    const BUCKETS = 8;
+    const totalW = blocks.reduce((a, b) => a + (b.kind === 'dense' ? b.W.length : 0), 0);
+    linesCapped = totalW > LINES;
     for (let i = 0; i < blocks.length; i++) {
       const b = blocks[i];
       if (b.kind !== 'dense') continue;
       const src = layouts[i];
       const dst = layouts[i + 1];
       const n = b.inSize;
+      const absW = new Float32Array(b.W.length);
+      for (let q = 0; q < b.W.length; q++) absW[q] = Math.abs(b.W[q]);
       let m = 0;
-      for (let q = 0; q < b.W.length; q++) m = Math.max(m, Math.abs(b.W[q]));
+      for (let q = 0; q < absW.length; q++) if (absW[q] > m) m = absW[q];
       if (m === 0) continue;
-      const idx: number[] = [];
-      for (let q = 0; q < b.W.length; q++) idx.push(q);
-      idx.sort((a, c) => Math.abs(b.W[a]) - Math.abs(b.W[c]));
-      const keep = idx.slice(Math.max(0, idx.length - 2500));
-      for (const q of keep) {
+      let thresh = 0;
+      const keep = linesCapped ? Math.max(48, Math.floor((LINES * absW.length) / totalW)) : absW.length;
+      if (absW.length > keep) thresh = absW.slice().sort()[absW.length - keep];
+      const paths: Path2D[][] = [[], []];
+      for (let s = 0; s < 2; s++) for (let q = 0; q < BUCKETS; q++) paths[s].push(new Path2D());
+      const used = new Uint8Array(2 * BUCKETS);
+      for (let q = 0; q < b.W.length; q++) {
+        if (absW[q] < thresh || absW[q] === 0) continue;
         const j = Math.floor(q / n);
         const c = q % n;
         const s = src[c];
         const t = dst[j];
         if (!s || !t) continue;
-        const w = b.W[q];
-        const a = Math.abs(w) / m;
+        const sign = b.W[q] >= 0 ? 0 : 1;
+        const bucket = Math.min(BUCKETS - 1, Math.floor((absW[q] / m) * BUCKETS));
         const x1 = s.x + s.s + 1;
         const y1 = s.y + s.s / 2;
         const x2 = t.x - 1;
         const y2 = t.y + t.s / 2;
         const mx = (x1 + x2) / 2;
-        ctx.beginPath();
-        ctx.moveTo(x1, y1);
-        ctx.bezierCurveTo(mx, y1, mx, y2, x2, y2);
-        ctx.strokeStyle = w >= 0 ? p.accent : p.neg;
-        ctx.globalAlpha = 0.18 + 0.7 * a;
-        ctx.lineWidth = 0.4 + 3.4 * a;
-        ctx.stroke();
+        const path = paths[sign][bucket];
+        path.moveTo(x1, y1);
+        path.bezierCurveTo(mx, y1, mx, y2, x2, y2);
+        used[sign * BUCKETS + bucket] = 1;
+      }
+      for (let q = 0; q < BUCKETS; q++) {
+        const a = (q + 0.5) / BUCKETS;
+        for (let s = 0; s < 2; s++) {
+          if (!used[s * BUCKETS + q]) continue;
+          ctx.strokeStyle = s === 0 ? p.accent : p.neg;
+          ctx.globalAlpha = 0.18 + 0.7 * a;
+          ctx.lineWidth = 0.4 + 3.4 * a;
+          ctx.stroke(paths[s][q]);
+        }
       }
       ctx.globalAlpha = 1;
     }
 
     // Headers
     const headW = colW - 8;
-    drawHeader(ctx, centers[0], 'Features', [`${F} input${F === 1 ? '' : 's'}`, T.dims === 2 ? `over ${axisName(0)}, ${axisName(1)}` : `${axisName(slice.axis)} = ${fixed(slice.pos, 2)}`], false, headW);
+    drawHeader(ctx, centers[0], 'Features', [`${F} input${F === 1 ? '' : 's'}`, T.dims === 2 ? `over ${axisName(0)}, ${axisName(1)}` : sliceName], false, headW);
     blocks.forEach((_b, i) => {
       const isOut = i === blocks.length - 1;
       const spec = isOut ? null : store.spec[i];
-      drawHeader(ctx, centers[i + 1] + (isOut ? 20 : 0), layerName(spec, i), headerLines(spec, info), store.selected === i, isOut ? headW + 40 : headW);
+      drawHeader(ctx, centers[i + 1] + (isOut ? 20 : 0), layerName(spec, i), headerLines(spec, info, store.isFrozen(i)), store.selected === i, isOut ? headW + 40 : headW);
     });
 
-    const R = T.res;
-    const n = R * R;
     const r = T.r;
     const pc = probe?.coords;
+    // The current input: an accent cross on a surface halo (it reads by its shape on any colour).
+    const crosses = new Map<string, number[]>();
+    // On the slice by the same rule as 03's slice map.
+    const probeOn = !!pc && pc.length === T.dims && (T.dims === 2 || onCurrentSlice(pc, r));
+    canvas.dataset.probeOn = pc && pc.length === T.dims ? (probeOn ? '1' : '0') : '';
     const marker = (it: Item) => {
       if (!pc || pc.length !== T.dims || it.s < 18) return;
       const u = pc[T.axes[0]];
       const v = pc[T.axes[1]];
-      const on = T.dims === 2 || Math.abs(pc[slice.axis] - slice.pos) <= 0.2 * r;
+      const on = probeOn;
       const x = it.x + ((u + r) / (2 * r)) * it.s;
       const y = it.y + ((r - v) / (2 * r)) * it.s;
       if (x < it.x || x > it.x + it.s || y < it.y || y > it.y + it.s) return;
-      const rad = Math.max(1.8, it.s / 16);
-      ctx.beginPath();
-      ctx.arc(x, y, rad, 0, 2 * Math.PI);
-      ctx.lineWidth = 3;
-      ctx.strokeStyle = p.surface;
-      ctx.stroke();
-      ctx.lineWidth = 1.6;
-      ctx.strokeStyle = p.accent;
-      ctx.stroke();
-      if (on) {
-        ctx.fillStyle = p.accent;
-        ctx.fill();
-      }
+      const size = Math.round(2 * Math.max(3, Math.min(5, it.s / 12))) / 2;
+      const key = `${size}:${on ? 1 : 0}`;
+      let xy = crosses.get(key);
+      if (!xy) crosses.set(key, (xy = []));
+      xy.push(x, y);
     };
+    // Frames: one path for all, the selected one on top.
+    const framePath = new Path2D();
+    let selFrame: Item | null = null;
     const frame = (it: Item, sel: boolean) => {
-      ctx.strokeStyle = sel ? p.accent : p.hair;
-      ctx.lineWidth = sel ? 2 : 1;
-      ctx.strokeRect(it.x - 0.5, it.y - 0.5, it.s + 1, it.s + 1);
+      if (sel) selFrame = it;
+      else if (it.s >= 8) framePath.rect(it.x - 0.5, it.y - 0.5, it.s + 1, it.s + 1);
     };
+    const labels: { it: Item; text: string; strong: boolean }[] = [];
     const value = (it: Item, text: string, strong = false) => {
-      if (!it.lab) return;
-      ctx.font = `${strong ? 600 : 400} 10px ${MONO}`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'top';
-      ctx.fillStyle = strong ? p.accent : p.muted;
-      ctx.fillText(text, it.x + it.s / 2, it.y + it.s + 2);
+      if (it.lab && text) labels.push({ it, text, strong });
     };
-    const planeTip = T.dims === 2 ? 'Map: its value over the plane' : `Map: its value over the slice ${axisName(slice.axis)} = ${fixed(slice.pos, 2)}`;
+    const planeTip = T.dims === 2 ? 'Map: its value over the plane' : `Map: its value over the slice ${sliceName}`;
+    const scaleText = (sc: { max: number; signed: boolean }) => `${sc.signed ? '±' : '0 … '}${fixed(sc.max, 2)}`;
 
     // Feature tiles
+    let t = 0;
+    ctx.imageSmoothingEnabled = false;
     layouts[0].forEach((it, f) => {
-      const vals = new Float32Array(n);
-      for (let q = 0; q < n; q++) vals[q] = T.feats[q * F + f];
-      const signed = hasNegative(vals);
-      drawMap(ctx, vals, 0, R, R, it.x, it.y, it.s, it.s, signed, maxAbs(vals) || 1);
+      blit(ctx, T, t++, it);
       frame(it, false);
       marker(it);
-      ctx.font = `600 11.5px ${SANS}`;
-      ctx.textAlign = 'right';
-      ctx.textBaseline = 'middle';
-      ctx.fillStyle = p.ink;
-      ctx.fillText(defs[f].label, it.x - 6, it.y + it.s / 2);
       const xv = pfits ? probe!.x[f] : NaN;
       value(it, fixed(xv, 2));
-      hits.push({ x: it.x, y: it.y, w: it.s, h: it.s, block: -1, unit: f, text: `Feature ${defs[f].label}: ${defs[f].title}\nFor the current input: ${fixed(xv, 3)}\n${planeTip}` });
+      hits.push({
+        x: it.x, y: it.y, w: it.s, h: it.s, block: -1, unit: f,
+        text: `Feature ${defs[f].label}: ${defs[f].title}\nFor the current input: ${fixed(xv, 3)}\n${planeTip}\nColour scale: ${scaleText(scales[0][f])}, the feature’s range over the whole ${T.dims === 2 ? 'plane' : 'cube'}`,
+      });
     });
+    canvas.dataset.slice = T.dims === 3 ? `${T.sliceAxis}:${T.pos.toFixed(2)}` : '';
+    canvas.dataset.featureTiles = layouts[0].map((it) => `${it.x} ${it.y} ${it.s}`).join(';');
+    ctx.font = `600 11.5px ${SANS}`;
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = p.ink;
+    layouts[0].forEach((it, f) => ctx.fillText(defs[f].label, it.x - 6, it.y + it.s / 2));
 
     // Hidden units and output
+    const outLabels: (() => void)[] = [];
     blocks.forEach((b, i) => {
       const items = layouts[i + 1];
       const isOut = i === blocks.length - 1;
       const name = layerName(isOut ? null : store.spec[i], i);
-      const A = T.acts[i];
-      const units = b.out.length;
+      const fz = store.isFrozen(i) ? FROZEN_TIP : '';
       if (!isOut) {
-        const signed = hasNegative(A);
-        const max = robustScale(A);
-        const vals = new Float32Array(n);
+        const sc = scales[1 + i][0];
         items.forEach((it, j) => {
-          for (let q = 0; q < n; q++) vals[q] = A[q * units + j];
-          drawMap(ctx, vals, 0, R, R, it.x, it.y, it.s, it.s, signed, max);
-          const sel = store.selected === i && store.selectedUnit === j;
-          frame(it, sel);
+          blit(ctx, T, t++, it);
+          frame(it, store.selected === i && store.selectedUnit === j);
           marker(it);
           value(it, pfits ? fixed(b.out[j], 2) : '');
-          hits.push({ x: it.x, y: it.y, w: it.s, h: it.s, block: i, unit: j, text: `${name} · unit ${j + 1}\nFor the current input: z = ${pfits ? fixed(b.z[j], 3) : '—'} · a = ${pfits ? fixed(b.out[j], 3) : '—'}\n${planeTip}` });
+          hits.push({
+            x: it.x, y: it.y, w: it.s, h: it.s, block: i, unit: j,
+            text: `${name} · unit ${j + 1}\nFor the current input: z = ${pfits ? fixed(b.z[j], 3) : '—'} · a = ${pfits ? fixed(b.out[j], 3) : '—'}\n${planeTip}\nColour scale: ${scaleText(sc)}, shared by this layer${fz}`,
+          });
         });
         return;
       }
       const probs = net.probs;
       let best = 0;
       for (let k = 1; k < K; k++) if (probs[k] > probs[best]) best = k;
+      ctx.imageSmoothingEnabled = true;
       items.forEach((it, k) => {
-        const shift = 20;
-        const t = { x: it.x + shift, y: it.y, s: it.s, lab: it.lab };
-        drawProbTile(ctx, T.probs, K, k, t, R);
+        const tt = { x: it.x + 20, y: it.y, s: it.s, lab: it.lab };
+        blit(ctx, T, t++, tt);
         const top = pfits && k === best;
-        frame(t, store.selected === i && store.selectedUnit === k);
-        marker(t);
-        value(t, pfits ? `${(100 * probs[k]).toFixed(0)}%` : '', top);
-        const bx = t.x + t.s + 7;
-        const bw = Math.max(24, W - bx - 10);
-        ctx.font = `${top ? 700 : 500} 11px ${SANS}`;
-        ctx.textAlign = 'left';
-        ctx.textBaseline = 'alphabetic';
-        ctx.fillStyle = top ? p.accent : p.ink;
-        ctx.fillText(info.classes[k], bx, t.y + Math.min(t.s / 2, 14), bw);
-        const by = t.y + Math.min(t.s / 2, 14) + 5;
-        ctx.fillStyle = p.hair;
-        ctx.fillRect(bx, by, bw, 5);
-        ctx.fillStyle = top ? p.accent : p.cat[k % 10];
-        ctx.fillRect(bx, by, bw * (pfits ? probs[k] : 0), 5);
-        if (probe?.label === k) {
-          ctx.fillStyle = p.ink;
-          ctx.font = `400 10px ${MONO}`;
-          ctx.fillText('true class', bx, by + 16, bw);
-        }
+        frame(tt, store.selected === i && store.selectedUnit === k);
+        marker(tt);
+        value(tt, pfits ? `${(100 * probs[k]).toFixed(0)}%` : '', top);
+        outLabels.push(() => {
+          const bx = tt.x + tt.s + 7;
+          const bw = Math.max(24, W - bx - 10);
+          ctx.font = `${top ? 700 : 500} 11px ${SANS}`;
+          ctx.textAlign = 'left';
+          ctx.textBaseline = 'alphabetic';
+          ctx.fillStyle = top ? p.accent : p.ink;
+          ctx.fillText(info.classes[k], bx, tt.y + Math.min(tt.s / 2, 14), bw);
+          const by = tt.y + Math.min(tt.s / 2, 14) + 5;
+          ctx.fillStyle = p.hair;
+          ctx.fillRect(bx, by, bw, 5);
+          ctx.fillStyle = top ? p.accent : p.cat[k % 10];
+          ctx.fillRect(bx, by, bw * (pfits ? probs[k] : 0), 5);
+          if (probe?.label === k) {
+            ctx.fillStyle = p.ink;
+            ctx.font = `400 10px ${MONO}`;
+            ctx.fillText('true class', bx, by + 16, bw);
+          }
+        });
         hits.push({
-          x: t.x, y: t.y, w: W - t.x, h: t.s, block: i, unit: k,
-          text: `Output · ${info.classes[k]}${probe?.label === k ? ' (true class)' : ''}\nFor the current input: logit ${pfits ? fixed(b.z[k], 3) : '—'} · p = ${pfits ? (100 * probs[k]).toFixed(1) : '—'}%\nMap: probability of ${info.classes[k]} over ${T.dims === 2 ? 'the plane' : 'the slice'}`,
+          x: tt.x, y: tt.y, w: W - tt.x, h: tt.s, block: i, unit: k,
+          text: `Output · ${info.classes[k]}${probe?.label === k ? ' (true class)' : ''}\nFor the current input: logit ${pfits ? fixed(b.z[k], 3) : '—'} · p = ${pfits ? (100 * probs[k]).toFixed(1) : '—'}%\nMap: probability of ${info.classes[k]} over ${T.dims === 2 ? 'the plane' : 'the slice'}, 0 to 100%${fz}`,
         });
       });
     });
+    ctx.imageSmoothingEnabled = true;
+    ctx.strokeStyle = p.hair;
+    ctx.lineWidth = 1;
+    ctx.stroke(framePath);
+    if (selFrame) {
+      const it = selFrame as Item;
+      ctx.strokeStyle = p.accent;
+      ctx.lineWidth = 2;
+      ctx.strokeRect(it.x - 0.5, it.y - 0.5, it.s + 1, it.s + 1);
+    }
+    for (const [key, xy] of crosses) {
+      const [size, on] = key.split(':').map(Number);
+      probeCrosses(ctx, xy, size, p.accent, p.surface, !on);
+    }
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    for (const l of labels) {
+      ctx.font = `${l.strong ? 600 : 400} 10px ${MONO}`;
+      ctx.fillStyle = l.strong ? p.accent : p.muted;
+      ctx.fillText(l.text, l.it.x + l.it.s / 2, l.it.y + l.it.s + 2);
+    }
+    for (const fn of outLabels) fn();
+    resNote.hidden = T.res >= 16;
+    if (!resNote.hidden) resNote.textContent = `This network is large, so the maps are computed on a coarse ${T.res} × ${T.res} grid${store.running ? ' while it trains' : ''}, a few frames at a time, to keep the page responsive.`;
   };
 
+  const setText = (el: HTMLElement, t: string) => {
+    if (el.textContent !== t) el.textContent = t;
+  };
   const syncNotes = () => {
     const info = store.info;
     const pts = info.kind === 'points';
     planeNote.hidden = !pts;
     if (pts) {
-      planeNote.textContent =
+      const where =
         info.dims === 3
-          ? `Each tile maps one feature, unit or class over the slice ${axisName(slice.axis)} = ${fixed(slice.pos, 2)} of the cube (move it in section 03). The red dot is the current input; the number under a tile is its value there.`
-          : `Each tile maps one feature, unit or class over the whole plane (${axisName(0)} across, ${axisName(1)} up). The red dot is the current input; the number under a tile is its value there.`;
-      legendNote.textContent = 'Lines are weights: thicker means larger.';
-      wLabel.textContent = 'Weight or value';
-      aLabel.textContent = 'Value ≥ 0';
+          ? `over the slice ${axisName(slice.axis)} = ${fixed(slice.pos, 2)} of the cube (move it in section 03)`
+          : `over the whole plane (${axisName(0)} across, ${axisName(1)} up)`;
+      setText(planeNote, `Each tile maps one feature, unit or class ${where}. Feature maps use each feature’s full range, a layer’s unit maps share one scale, and class maps show the probability; hover a tile for its scale. The red cross marks the current input; the number under a tile is its value there.`);
+      setText(legendNote, linesCapped ? `Lines are the strongest ${LINES.toLocaleString('en-US')} weights: thicker means larger.` : 'Lines are weights: thicker means larger.');
+      setText(wLabel, 'Weight or value');
+      setText(aLabel, 'Value ≥ 0');
     } else {
-      legendNote.textContent = 'Lines show summed weights between units, maps and channels.';
-      wLabel.textContent = 'Weight';
-      aLabel.textContent = 'Activation';
+      setText(legendNote, 'Lines show summed weights between units, maps and channels.');
+      setText(wLabel, 'Weight');
+      setText(aLabel, 'Activation');
+      resNote.hidden = true;
     }
   };
 
-  const render = (evaluate: boolean) => {
-    if (store.info.kind === 'points') {
-      const d = store.data;
-      if (netFits() && d?.points && (evaluate || !tiles)) evaluateTiles(d);
+  const render = (evaluate: boolean, draw: boolean): boolean => {
+    if (store.info.kind !== 'points') {
+      job = null;
+      renderImages();
+      return false;
+    }
+    const d = store.data;
+    if (!netFits() || !d?.points) {
+      job = null;
       renderPoints();
-    } else renderImages();
+      return false;
+    }
+    const t0 = performance.now();
+    if (job && !ev.current) job = null; // made for a network that is gone
+    if (!job && (evaluate || !currentTiles())) {
+      startTiles(d);
+      passMs = 0;
+    }
+    const inPass = !!job;
+    const fresh = stepTiles();
+    if (fresh || draw) {
+      renderPoints();
+      syncNotes();
+      live.noteDraw(t0, performance.now() - t0);
+    }
+    // Every millisecond of a pass counts against the budget: evaluation, painting, drawing, and
+    // the browser rasterising the drawing afterwards (Live.drawCost).
+    if (inPass) passMs += performance.now() - t0;
+    if (fresh) {
+      live.gap = Math.max(100, 4 * (passMs + live.drawCost));
+      canvas.dataset.ms = passMs.toFixed(1);
+    }
+    return job !== null;
   };
   const live = new Live(box, render);
 
@@ -810,19 +1063,31 @@ export function mountNetworkView(): void {
     buildStrip();
     redraw();
   });
-  for (const ev2 of ['model', 'weights'] as const) store.on(ev2, again);
+  store.on('weights', again);
+  store.on('model', () => {
+    job = null;
+    live.restart();
+  });
   store.on('data', () => {
     tiles = null;
+    job = null;
     buildStrip();
-    again();
+    live.restart();
   });
-  for (const ev2 of ['probe', 'select', 'highlight'] as const) store.on(ev2, redraw);
+  for (const ev2 of ['probe', 'select', 'highlight', 'frozen'] as const) store.on(ev2, redraw);
   store.on('probe', syncStrip);
   store.on('dataset', () => {
     tiles = null;
+    job = null;
     syncNotes();
     buildStrip();
     redraw();
+  });
+  let wasRunning = false;
+  store.on('status', () => {
+    // Full-size maps again once training pauses.
+    if (wasRunning && !store.running && store.info.kind === 'points') again();
+    wasRunning = store.running;
   });
   onSlice(() => {
     syncNotes();

@@ -3,7 +3,7 @@ import { addCustom, removeCustom, setProbe, testProbe } from '../actions';
 import { fixed } from '../analysis/stats';
 import { noun, sampleCaption, sampleInput, type Data, type DatasetId, type DatasetInfo } from '../data/datasets';
 import { featureDefs } from '../data/features';
-import { PointEvaluator, argmaxRows, pointDomain } from '../data/grid';
+import { argmaxRows, pointDomain } from '../data/grid';
 import { argmax, type Network } from '../nn/network';
 import { size } from '../nn/types';
 import { CUSTOM_REPEAT } from '../train/protocol';
@@ -12,6 +12,8 @@ import { mathLabel } from './datasetPicker';
 import { $, clear, digitChips, h, int, selectField } from './dom';
 import { fitCanvas, paintSample, sampleCanvas } from './draw';
 import { imageInput, privateNetwork, readImageFile } from './drawpad';
+import { Cost, Evaluator, GridJob, sliceMs } from './boundary2d';
+import { drawMarks, markSvg } from './marks';
 import { classColor, onThemeChange, palette } from './theme';
 import { hideTip, showTip } from './tip';
 
@@ -482,7 +484,7 @@ function pointPanel(): { el: HTMLElement } {
     { class: 'hint dp-plot-note' },
     'Click a point, or focus a plot and use the arrow keys, to make it the network’s input. ',
     h('span', { class: 'dp-ring', 'aria-hidden': 'true' }),
-    ' Red rings mark points the current weights get wrong.',
+    ' Red rings mark points the current weights get wrong. Each class has its own shape: filled for training points, outlined for test points.',
   );
   const readout = h('div', { class: 'dp-readout', 'aria-live': 'polite' });
   const counts = h('table', { class: 'dp-counts' });
@@ -505,7 +507,8 @@ function pointPanel(): { el: HTMLElement } {
 
   const isPoints = () => store.info.kind === 'points';
   let panels: Panel[] = [];
-  const evaluator = new PointEvaluator();
+  const evaluator = new Evaluator();
+  const cost = new Cost();
   /** Predicted class of every training and test point (null until evaluated). */
   let pred: { train: Uint8Array; test: Uint8Array } | null = null;
   let predStamp = '';
@@ -531,9 +534,11 @@ function pointPanel(): { el: HTMLElement } {
         title.append(h('b', null, splitName), ' · ', mathLabel(`x${SUB[axes[0]]}–x${SUB[axes[1]]}`));
         canvas.setAttribute(
           'aria-label',
-          `${splitName} points, x${axes[0] + 1} across, x${axes[1] + 1} up, coloured by class. Click a point, or use the arrow keys, to make it the network's input.`,
+          `${splitName} points, x${axes[0] + 1} across, x${axes[1] + 1} up, each class in its own colour and shape. Click a point, or use the arrow keys, to make it the network's input.`,
         );
-        canvas.setAttribute('role', 'img');
+        // Interactive: the arrow keys step through the points.
+        canvas.setAttribute('role', 'application');
+        canvas.setAttribute('aria-roledescription', 'scatter plot');
         attach(panel);
         panels.push(panel);
         plots.append(h('div', { class: 'dp-panel' }, title, canvas, stat));
@@ -607,7 +612,7 @@ function pointPanel(): { el: HTMLElement } {
       const y = labelsOf(d, p.split)[i];
       const dims = d.points.dims;
       const c = coordsOf(d, p.split);
-      const at = Array.from(c.slice(i * dims, (i + 1) * dims), (v) => fixed(v, 2)).join(', ');
+      const at = Array.from(c.slice(i * dims, (i + 1) * dims), (v) => fixed(v, 3)).join(', ');
       const pr = pred?.[p.split][i];
       const verdict = pr === undefined ? '' : pr === y ? '\npredicted correctly' : `\npredicted ${className(d.info, pr)}`;
       showTip(`${sampleCaption(d.info, p.split, i, y)}\n(${at})${verdict}`, e.clientX, e.clientY);
@@ -673,13 +678,17 @@ function pointPanel(): { el: HTMLElement } {
       const y = labelsOf(d, p.split);
       const n = y.length;
       const wrong = pred?.[p.split];
-      const side = n <= 400 && S >= 200 ? 4 : 3;
-      const ring = side + 0.5;
+      // A shape per class (as in 03): filled training points, outlined test points.
+      const rad = n <= 400 && S >= 200 ? 2.6 : 2.1;
+      const ring = rad * 1.6 + 1;
+      const byClass = new Map<number, number[]>();
       for (let i = 0; i < n; i++) {
         const [x, yy] = toScreen(p, r, c, i * dims);
-        ctx.fillStyle = classColor(y[i]);
-        ctx.fillRect(x - side / 2, yy - side / 2, side, side);
+        let xy = byClass.get(y[i]);
+        if (!xy) byClass.set(y[i], (xy = []));
+        xy.push(x, yy);
       }
+      for (const [k, xy] of byClass) drawMarks(ctx, k, p.split, xy, rad, { color: classColor(k), ink: pal.ink, surface: pal.surface });
       // Mistakes: a red ring around every misclassified point.
       if (wrong) {
         // Slightly see-through, so a crowd of mistakes early in training does not hide the classes.
@@ -700,16 +709,12 @@ function pointPanel(): { el: HTMLElement } {
         ctx.restore();
         p.stat.textContent = `${int(n)} points · ${int(k)} wrong · ${fixed((100 * (n - k)) / Math.max(1, n), 1)}% right`;
       } else p.stat.textContent = `${int(n)} points`;
-      // Your points are training data: larger squares with an ink outline.
+      // Your points are training data: their class mark, larger, heavily outlined.
       if (p.split === 'train') {
         for (const cu of store.custom) {
           if (!cu.coords || cu.coords.length !== dims) continue;
           const [x, yy] = toScreen(p, r, cu.coords, 0);
-          ctx.fillStyle = classColor(cu.y);
-          ctx.fillRect(x - 4, yy - 4, 8, 8);
-          ctx.strokeStyle = pal.ink;
-          ctx.lineWidth = 1.5;
-          ctx.strokeRect(x - 4, yy - 4, 8, 8);
+          drawMarks(ctx, cu.y, 'custom', [x, yy], 3, { color: classColor(cu.y), ink: pal.ink, surface: pal.surface });
         }
       }
       // The current input: a red crosshair, wherever it came from.
@@ -733,19 +738,45 @@ function pointPanel(): { el: HTMLElement } {
   };
 
   // ── Predictions (a private copy of the network; the page's network is left alone) ──
+  // Every point is classified a slice of a few milliseconds at a time across frames, so a large
+  // network never holds the page; a pass starts at most every 250 ms, or four times its own cost.
+  let job: { job: GridJob; stamp: string; nTrain: number; d: Data } | null = null;
+  let gap = 250;
   const evaluate = () => {
     const d = store.data;
-    if (!d?.points) return;
+    if (!d?.points || job) return;
     const feats = d.points.features;
-    if (store.net.inputSize !== feats.length || store.net.classes !== d.info.classes.length) return;
+    if (store.net.inputSize !== feats.length || store.features.join() !== feats.join() || store.net.classes !== d.info.classes.length) return;
     const stamp = `${store.version}:${store.weightsRev}:${d.trainY.length}:${d.testY.length}`;
     if (stamp === predStamp) return;
-    predStamp = stamp;
-    evaluator.sync(store.net);
+    evaluator.sync();
+    const p = d.points;
+    const coords = new Float32Array(p.trainCoords.length + p.testCoords.length);
+    coords.set(p.trainCoords);
+    coords.set(p.testCoords, p.trainCoords.length);
+    job = { job: new GridJob(evaluator.ev, coords, p.dims), stamp, nTrain: d.trainY.length, d };
+    stepJob();
+  };
+  const stepJob = () => {
+    if (!job) return;
+    if (job.d !== store.data || !evaluator.current) {
+      job = null;
+      return;
+    }
+    if (!job.job.step(sliceMs(), cost.perPoint)) {
+      requestAnimationFrame(stepJob);
+      return;
+    }
+    const { d, nTrain, stamp } = job;
+    const J = job.job;
+    job = null;
+    cost.add(J.busy, J.n);
+    gap = Math.max(250, 4 * J.busy);
     const K = d.info.classes.length;
-    const train = argmaxRows(evaluator.evaluate(d.points.trainCoords, d.points.dims, feats).probs, K);
-    const test = argmaxRows(evaluator.evaluate(d.points.testCoords, d.points.dims, feats).probs, K);
-    pred = { train, test };
+    const all = argmaxRows(J.probs!, K);
+    pred = { train: all.subarray(0, nTrain), test: all.subarray(nTrain) };
+    predStamp = stamp;
+    schedule();
   };
 
   // Redraws are coalesced to one per frame. The points do not move while training, only the
@@ -756,9 +787,9 @@ function pointPanel(): { el: HTMLElement } {
   function schedule(withEval = false): void {
     if (!isPoints() || !visible()) return;
     if (withEval) {
-      const wait = 250 - (performance.now() - lastEval);
-      if (wait > 0) {
-        if (!evalTimer) evalTimer = setTimeout(() => ((evalTimer = null), schedule(true)), wait);
+      const wait = gap - (performance.now() - lastEval);
+      if (wait > 0 || job) {
+        if (!evalTimer) evalTimer = setTimeout(() => ((evalTimer = null), schedule(true)), Math.max(16, wait));
         return;
       }
       lastEval = performance.now();
@@ -791,7 +822,7 @@ function pointPanel(): { el: HTMLElement } {
         const w = Math.min(1, Math.abs(v)) * 50;
         span.append(h('i', { class: v >= 0 ? 'is-pos' : 'is-neg', style: { left: v >= 0 ? '50%' : `${50 - w}%`, width: `${w}%` } }));
       }
-      table.append(h('tr', null, h('th', { scope: 'row' }, mathLabel(label)), h('td', { class: 'num' }, fixed(v, 2)), h('td', null, bar ? span : '')));
+      table.append(h('tr', null, h('th', { scope: 'row' }, mathLabel(label)), h('td', { class: 'num' }, fixed(v, 3)), h('td', null, bar ? span : '')));
     };
     head('Point (raw coordinates)');
     if (coords && coords.length === dims) for (let k = 0; k < dims; k++) row(`x${SUB[k]}`, coords[k], false);
@@ -826,7 +857,7 @@ function pointPanel(): { el: HTMLElement } {
         h(
           'tr',
           null,
-          h('th', { scope: 'row' }, h('span', { class: 'dp-swatch', style: { background: classColor(k) } }), d.info.classes[k]),
+          h('th', { scope: 'row' }, h('span', { class: 'dp-swatch' }, markSvg(k, 'train', { size: 13 })), d.info.classes[k]),
           h('td', { class: 'num' }, int(tr[k])),
           h('td', { class: 'num' }, int(te[k])),
         ),
@@ -842,7 +873,7 @@ function pointPanel(): { el: HTMLElement } {
     const mine = store.custom.filter((c): c is CustomEntry & { coords: Float32Array } => !!c.coords);
     if (!d?.points) return;
     for (const c of mine) {
-      const at = Array.from(c.coords, (v) => fixed(v, 2)).join(', ');
+      const at = Array.from(c.coords, (v) => fixed(v, 3)).join(', ');
       const use = h('button', { type: 'button', class: 'btn btn-sm' }, 'Use as input');
       use.addEventListener('click', () => setProbe({ x: c.x, label: c.y, caption: `Your point · ${d.info.classes[c.y]}`, key: `custom:${c.id}`, coords: c.coords }));
       const rm = h('button', { type: 'button', class: 'btn btn-sm', 'aria-label': `Remove your point at (${at})` }, 'Remove');
@@ -851,7 +882,7 @@ function pointPanel(): { el: HTMLElement } {
         h(
           'li',
           null,
-          h('span', { class: 'dp-swatch', style: { background: classColor(c.y) } }),
+          h('span', { class: 'dp-swatch' }, markSvg(c.y, 'custom', { size: 13 })),
           h('span', { class: 'dp-custom-text' }, h('b', null, d.info.classes[c.y]), ' ', h('span', { class: 'mono' }, `(${at})`)),
           use,
           rm,
@@ -867,6 +898,7 @@ function pointPanel(): { el: HTMLElement } {
     if (!isPoints()) return;
     pred = null;
     predStamp = '';
+    job = null;
     build();
     renderCounts();
     renderCustom();

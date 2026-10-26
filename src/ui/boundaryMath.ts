@@ -156,20 +156,28 @@ const EDGES = [
   [0, 2], [1, 3], [4, 6], [5, 7],
   [0, 4], [1, 5], [2, 6], [3, 7],
 ];
+/** Per axis d and side (0 = low, 1 = high): the bit mask of the cell corners on that face. */
+const FACE_MASKS = [0, 1, 2].map((d) => [0, 1].map((side) => CORNERS.reduce((m, o, c) => (o[d] === side ? m | (1 << c) : m), 0)));
+/** EDGE_ON_FACE[2·axis + side][edge]: the cell edge lies on that face of the cell. */
+const EDGE_ON_FACE = Array.from({ length: 6 }, (_, fc) => EDGES.map(([a, b]) => CORNERS[a][fc >> 1] === (fc & 1) && CORNERS[b][fc >> 1] === (fc & 1)));
+/** SHARED_EDGE[face][face]: the cell edge two faces share, or −1. */
+const SHARED_EDGE = Array.from({ length: 6 }, (_, f1) => Array.from({ length: 6 }, (_, f2) => ((f1 >> 1) === (f2 >> 1) ? -1 : EDGES.findIndex((_, e) => EDGE_ON_FACE[f1][e] && EDGE_ON_FACE[f2][e]))));
 
 /**
  * The surface where a field sampled on an n × n × n grid crosses `level`, by naive surface nets:
  * one vertex inside every grid cell the surface passes through (the mean of the crossings on its
  * edges), and one quad for every grid edge that crosses the level, joining the four cells around
  * it. Node (i, j, k) is f[i + n·(j + n·k)]. `keep(a, b)` may drop quads: `a` is the node above the
- * level, `b` the one below.
+ * level, `b` the one below. With `clamp`, the surface is carried out to the faces of the grid
+ * (nodes 0 and n − 1): border cells whose outer face it crosses put their vertex on that face.
  */
-export function surfaceNets(f: ArrayLike<number>, n: number, level = 0, keep?: (above: number, below: number) => boolean): Mesh {
+export function surfaceNets(f: ArrayLike<number>, n: number, level = 0, keep?: (above: number, below: number) => boolean, clamp = false): Mesh {
   const m = n - 1;
   const cell = new Int32Array(m * m * m).fill(-1);
   const verts: number[] = [];
   const v = new Float64Array(8);
   const idx = (i: number, j: number, k: number) => i + n * (j + n * k);
+  const at = [0, 0, 0];
   for (let k = 0; k < m; k++) {
     for (let j = 0; j < m; j++) {
       for (let i = 0; i < m; i++) {
@@ -180,15 +188,43 @@ export function surfaceNets(f: ArrayLike<number>, n: number, level = 0, keep?: (
           if (v[c] > 0) mask |= 1 << c;
         }
         if (mask === 0 || mask === 255) continue;
+        // On the border of the grid, a cell whose outer face the surface crosses puts its vertex on
+        // that face (the mean of the crossings on the face's edges; in a corner cell, on the edge
+        // two such faces share when the surface crosses it), so the mesh reaches the faces.
+        let face = -1; // first crossed outer face, as 2·axis + side
+        let only = -1; // a single shared edge to use instead
+        if (clamp && m > 1) {
+          at[0] = i;
+          at[1] = j;
+          at[2] = k;
+          let prev = -1;
+          for (let d = 0; d < 3; d++) {
+            for (let side = 0; side < 2; side++) {
+              if (at[d] !== (side ? m - 1 : 0)) continue;
+              let fm = 0;
+              for (let c = 0; c < 8; c++) if (CORNERS[c][d] === side && v[c] > 0) fm |= 1 << c;
+              if (fm === 0 || fm === FACE_MASKS[d][side]) continue;
+              const fc = 2 * d + side;
+              if (face < 0) face = fc;
+              if (prev >= 0 && only < 0) {
+                const e = SHARED_EDGE[prev][fc];
+                if (e >= 0 && v[EDGES[e][0]] > 0 !== v[EDGES[e][1]] > 0) only = e;
+              }
+              prev = fc;
+            }
+          }
+        }
         let sx = 0;
         let sy = 0;
         let sz = 0;
         let cnt = 0;
-        for (const [a, b] of EDGES) {
+        for (let e = 0; e < EDGES.length; e++) {
+          const [a, b] = EDGES[e];
           if (v[a] > 0 === v[b] > 0) continue;
-          const t = v[a] / (v[a] - v[b]);
+          if (only >= 0 ? e !== only : face >= 0 && !EDGE_ON_FACE[face][e]) continue;
           const A = CORNERS[a];
           const B = CORNERS[b];
+          const t = v[a] / (v[a] - v[b]);
           sx += A[0] + (B[0] - A[0]) * t;
           sy += A[1] + (B[1] - A[1]) * t;
           sz += A[2] + (B[2] - A[2]) * t;
@@ -243,20 +279,21 @@ export function surfaceNets(f: ArrayLike<number>, n: number, level = 0, keep?: (
  * Boundary surfaces between predicted classes on an n³ grid of probabilities (node order as in
  * surfaceNets). Two classes: the p₀ = p₁ surface. More: every class region's edge, each surface
  * between two regions kept once (from the lower class), so translucent layers do not double up.
+ * `clamp` carries the surfaces out to the faces of the grid (see surfaceNets).
  */
-export function classSurfaces(probs: ArrayLike<number>, classes: number, n: number): Mesh {
+export function classSurfaces(probs: ArrayLike<number>, classes: number, n: number, clamp = false): Mesh {
   if (classes === 2) {
     const N = n * n * n;
     const f = new Float32Array(N);
     for (let i = 0; i < N; i++) f[i] = probs[2 * i] - probs[2 * i + 1];
-    return surfaceNets(f, n);
+    return surfaceNets(f, n, 0, undefined, clamp);
   }
   const label = argmaxField(probs, classes);
   const parts: Mesh[] = [];
   const f = new Float32Array(n * n * n);
   for (let k = 0; k < classes; k++) {
     marginField(probs, classes, k, f);
-    parts.push(surfaceNets(f, n, 0, (_above, below) => label[below] > k));
+    parts.push(surfaceNets(f, n, 0, (_above, below) => label[below] > k, clamp));
   }
   return mergeMeshes(parts);
 }
@@ -342,12 +379,29 @@ export function robustScale(a: ArrayLike<number>): number {
 
 /**
  * Grid resolution (per side) whose res^dims evaluations fit in `budgetMs`, given the measured cost
- * of one evaluation, clamped to [min, max].
+ * of one evaluation, clamped to [min, max]. The minimum gives way to `capMs`: when even `min` per
+ * side would cost more than the cap, the grid gets coarser (down to `floor`), so a large network
+ * is drawn roughly instead of holding the page.
  */
-export function resolutionFor(msPerPoint: number, budgetMs: number, dims: 2 | 3, min: number, max: number): number {
+export function resolutionFor(msPerPoint: number, budgetMs: number, dims: 2 | 3, min: number, max: number, capMs = Infinity, floor = 4): number {
   if (!(msPerPoint > 0)) return max;
-  const r = Math.floor(Math.pow(budgetMs / msPerPoint, 1 / dims) + 1e-9);
-  return Math.max(min, Math.min(max, r));
+  const side = (ms: number) => Math.floor(Math.pow(ms / msPerPoint, 1 / dims) + 1e-9);
+  const r = Math.max(min, Math.min(max, side(budgetMs)));
+  if (msPerPoint * Math.pow(r, dims) <= capMs) return r;
+  return Math.max(Math.min(floor, r), Math.min(r, side(capMs)));
+}
+
+/**
+ * Colour scale of one input feature's map: its largest magnitude over the whole domain [−r, r]
+ * (not over the plane shown, so a feature that is constant on a 3-D slice shows its true value),
+ * and whether it takes negative values there. Coordinates reach ±r, squares r², products ±r²,
+ * sin(π·x) ±1 (±sin(π·r) for r < ½).
+ */
+export function featureScale(id: string, r: number): { max: number; signed: boolean } {
+  if (/^x\d\^2$/.test(id)) return { max: r * r, signed: false };
+  if (/^x\d\*x\d$/.test(id)) return { max: r * r, signed: true };
+  if (/^sin x\d$/.test(id)) return { max: r >= 0.5 ? 1 : Math.sin(Math.PI * r), signed: true };
+  return { max: r, signed: true };
 }
 
 /** Tick positions every `step` inside [−r, r]. */
