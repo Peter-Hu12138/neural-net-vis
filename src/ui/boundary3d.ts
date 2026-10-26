@@ -1,18 +1,18 @@
 import { fixed } from '../analysis/stats';
 import type { Data } from '../data/datasets';
-import { pointDomain, PointEvaluator } from '../data/grid';
+import { pointDomain, type PointEvaluator } from '../data/grid';
 import { store } from '../store';
 import { h } from './dom';
 import { fitCanvas } from './draw';
 import {
   Cost,
+  Evaluator,
+  GridJob,
   Live,
   PlaneCanvas,
+  PlaneJob,
   boundaryOpts,
-  dotCustom,
-  dotTest,
-  dotTrain,
-  evaluatePlane,
+  coarseNote,
   netFits,
   onBoundaryOpts,
   pickAt,
@@ -20,6 +20,9 @@ import {
   probeCross,
   probsText,
   regionCanvas,
+  sliceMs,
+  srHint,
+  type Budget,
   type Marker,
   type PlaneField,
   type PlaneHost,
@@ -27,6 +30,7 @@ import {
   type View,
 } from './boundary2d';
 import { axisName, backToFront, classSurfaces, nearSide, orbit, project, type Mesh } from './boundaryMath';
+import { drawMarks, type MarkKind } from './marks';
 import { onThemeChange, palette } from './theme';
 import { hideTip, showTip } from './tip';
 
@@ -51,6 +55,9 @@ export const sliceAxes = (axis: number): [number, number] => (axis === 0 ? [1, 2
 /** Points closer to the slice than this (in data units) are shown on the slice map. */
 export const slabWidth = (r: number) => Math.max(0.15, 0.16 * r);
 
+/** True when data coordinates `c` lie on the current slice (within slabWidth), as every view reads it. */
+export const onCurrentSlice = (c: ArrayLike<number>, r: number) => Math.abs(c[slice.axis] - slice.pos) <= slabWidth(r);
+
 const DEG = Math.PI / 180;
 const HOME = { yaw: 34 * DEG, pitch: 24 * DEG };
 const PITCH_MAX = 85 * DEG;
@@ -63,43 +70,80 @@ interface Voxels {
   mesh: Mesh;
 }
 
-/** Evaluates an n³ grid of cell centres over [−r, r]³ and extracts the class boundary surface. */
-function evaluateVoxels(ev: PointEvaluator, n: number, r: number): { vox: Voxels; ms: number } {
-  const t0 = performance.now();
-  const coords = new Float32Array(n * n * n * 3);
-  const step = (2 * r) / n;
-  let o = 0;
-  for (let k = 0; k < n; k++) {
-    for (let j = 0; j < n; j++) {
-      for (let i = 0; i < n; i++) {
-        coords[o++] = -r + (i + 0.5) * step;
-        coords[o++] = -r + (j + 0.5) * step;
-        coords[o++] = -r + (k + 0.5) * step;
+/**
+ * The cube evaluated a slice at a time: an n³ grid of nodes from face to face of [−r, r]³ (so the
+ * surface, carried out to the border nodes, meets the faces of the drawn cube).
+ */
+class VoxelJob {
+  readonly job: GridJob;
+  constructor(
+    ev: PointEvaluator,
+    readonly n: number,
+    readonly r: number,
+  ) {
+    const coords = new Float32Array(n * n * n * 3);
+    const step = (2 * r) / (n - 1);
+    let o = 0;
+    for (let k = 0; k < n; k++) {
+      for (let j = 0; j < n; j++) {
+        for (let i = 0; i < n; i++) {
+          coords[o++] = -r + i * step;
+          coords[o++] = -r + j * step;
+          coords[o++] = -r + k * step;
+        }
       }
     }
+    this.job = new GridJob(ev, coords, 3);
   }
-  const { probs } = ev.evaluate(coords, 3, store.features);
-  const classes = probs.length / (n * n * n);
-  const mesh = classSurfaces(probs, classes, n);
-  // Grid units → data coordinates.
-  for (let i = 0; i < mesh.verts.length; i++) mesh.verts[i] = -r + (mesh.verts[i] + 0.5) * step;
-  return { vox: { n, r, classes, mesh }, ms: performance.now() - t0 };
+  step(ms: number, perPoint: number): Voxels | null {
+    if (!this.job.step(ms, perPoint)) return null;
+    const { n, r } = this;
+    const probs = this.job.probs!;
+    const classes = probs.length / (n * n * n);
+    const mesh = classSurfaces(probs, classes, n, true);
+    // Grid units → data coordinates.
+    const step = (2 * r) / (n - 1);
+    for (let i = 0; i < mesh.verts.length; i++) mesh.verts[i] = -r + mesh.verts[i] * step;
+    return { n, r, classes, mesh };
+  }
 }
 
+/** Grid budgets of the cube and the slice map (see Budget); passes are sliced across frames. */
+export const BUDGET_3D: { cube: { running: Budget; paused: Budget }; slice: { running: Budget; paused: Budget } } = {
+  cube: {
+    running: { budget: 10, min: 8, max: 20, cap: 40, floor: 5 },
+    paused: { budget: 120, min: 12, max: 30, cap: 400, floor: 6 },
+  },
+  slice: {
+    running: { budget: 5, min: 16, max: 64, cap: 20, floor: 8 },
+    paused: { budget: 16, min: 24, max: 72, cap: 120, floor: 10 },
+  },
+};
+
+/** Opacity levels of the surface: quads are filled in one path per depth layer and level. */
+const ALPHA_STEPS = 16;
+/** Depth layers for drawing back to front (points and surface interleave by layer). */
+const DEPTH_BINS = 12;
+
 export function create3D(): View {
-  const ev = new PointEvaluator();
+  const ev = new Evaluator();
   const cost = new Cost();
   let vox: Voxels | null = null;
   let field: PlaneField | null = null;
-  let synced = false;
+  let vjob: VoxelJob | null = null;
+  let sjob: PlaneJob | null = null;
+  /** Main-thread time of the pass under way, all frames together. */
+  let passMs = 0;
   let sliceDirty = true;
   let yaw = HOME.yaw;
   let pitch = HOME.pitch;
 
   // ── Elements ──
-  const canvas = h('canvas', { class: 'bd-orbit', tabindex: '0', role: 'img' }) as HTMLCanvasElement;
+  const orbitKeys = srHint('Arrow keys turn the cube, 10° per press or 30° with Shift; Home returns to the starting view. Clicking a point makes it the network’s input.');
+  // An interactive plot, not a picture: it takes the arrow keys (role application).
+  const canvas = h('canvas', { class: 'bd-orbit', tabindex: '0', role: 'application', 'aria-roledescription': '3-D plot', 'aria-describedby': orbitKeys.id }) as HTMLCanvasElement;
   const orbitBox = h('div', { class: 'bd-orbit-box' }, canvas);
-  const btn = (label: string, title: string, fn: () => void) => h('button', { type: 'button', class: 'btn btn-sm', title, onclick: fn }, label);
+  const btn = (label: string, title: string, fn: () => void, aria?: string) => h('button', { type: 'button', class: 'btn btn-sm', title, 'aria-label': aria, onclick: fn }, label);
   const turn = (dy: number, dp = 0) => {
     yaw = (((yaw + dy) % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
     pitch = Math.max(-PITCH_MAX, Math.min(PITCH_MAX, pitch + dp));
@@ -108,8 +152,8 @@ export function create3D(): View {
   const viewBtns = h(
     'div',
     { class: 'bd-row', role: 'group', 'aria-label': 'Turn the cube' },
-    btn('↺ Turn', 'Turn the cube 30° to the left', () => turn(-30 * DEG)),
-    btn('Turn ↻', 'Turn the cube 30° to the right', () => turn(30 * DEG)),
+    btn('↺ Turn', 'Turn the cube 30° to the left', () => turn(-30 * DEG), 'Turn left 30°'),
+    btn('Turn ↻', 'Turn the cube 30° to the right', () => turn(30 * DEG), 'Turn right 30°'),
     btn('Top', 'Look straight down the x₃ axis', () => {
       pitch = PITCH_MAX;
       live.request(false);
@@ -121,6 +165,7 @@ export function create3D(): View {
     }),
     h('span', { class: 'hint bd-hint-inline' }, 'Drag to turn, or use the arrow keys.'),
   );
+  const note = h('p', { class: 'hint bd-res-note', hidden: true });
 
   const axisSeg = h('div', { class: 'seg bd-axis-seg', role: 'group', 'aria-label': 'Slice across axis' });
   const axisBtns = [0, 1, 2].map((a) => {
@@ -141,7 +186,7 @@ export function create3D(): View {
       const c = store.probe?.coords;
       if (!c || c.length !== 3 || !field) return null;
       const [a, b] = sliceAxes(slice.axis);
-      return { u: c[a], v: c[b], on: Math.abs(c[slice.axis] - slice.pos) <= slabWidth(field.r) };
+      return { u: c[a], v: c[b], on: onCurrentSlice(c, field.r) };
     },
     coordsAt: (u, v) => {
       const c = new Float32Array(3);
@@ -151,7 +196,14 @@ export function create3D(): View {
       c[slice.axis] = slice.pos;
       return c;
     },
-    probsAt: (coords) => (synced && netFits() ? ev.evaluate(coords, 3, store.features).probs : null),
+    probsAt: (coords) => {
+      // A new network (architecture or features) replaces any pass made with the old one.
+      if (netFits() && !ev.current && (vjob || sjob)) {
+        vjob = sjob = null;
+        live.restart();
+      }
+      return ev.probsAt(coords, 3);
+    },
   };
   const plane = new PlaneCanvas(host, true, 'Slice map');
   const planeBox = h('div', { class: 'bd-slice-plot' }, plane.canvas);
@@ -166,8 +218,8 @@ export function create3D(): View {
   const el = h(
     'div',
     { class: 'bd-3d' },
-    h('div', { class: 'bd-3d-main' }, orbitBox, viewBtns),
-    h('div', { class: 'bd-3d-side' }, sliceCtl, planeBox),
+    h('div', { class: 'bd-3d-main' }, orbitBox, viewBtns, note, orbitKeys),
+    h('div', { class: 'bd-3d-side' }, sliceCtl, planeBox, plane.keysHint),
   );
 
   /** Points near the slice, faded with distance from it. */
@@ -211,8 +263,11 @@ export function create3D(): View {
     const cx = W / 2;
     const cy = H / 2;
     const P = (x: number, y: number, z: number) => project(m, x, y, z, scale, cx, cy);
-    const near = nearSide(m, slice.axis);
-    const side = (c: number) => (c - slice.pos) * near >= 0; // true = between the slice and the viewer
+    // The slice drawn is the one the slice map was computed for (it may trail the slider by a frame).
+    const sAxis = field ? 3 - field.axes[0] - field.axes[1] : slice.axis;
+    const sPos = field ? field.fixedAt[sAxis] : slice.pos;
+    const near = nearSide(m, sAxis);
+    const side = (c: number) => (c - sPos) * near >= 0; // true = between the slice and the viewer
 
     // Cube edges: those behind the centre first.
     const corners: number[][] = [];
@@ -250,12 +305,26 @@ export function create3D(): View {
     };
     drawEdges(false);
 
-    // Everything with a depth, sorted back to front.
+    // Everything with a depth goes into layers, drawn back to front: in each layer the surface
+    // first, filled in one path per opacity level (no seams where quads meet, and a few fills
+    // instead of one per quad), then the points of that layer, one path per class and kind.
+    const zr = r * Math.sqrt(3);
+    const binOf = (z: number) => Math.max(0, Math.min(DEPTH_BINS - 1, Math.floor(((z + zr) / (2 * zr)) * DEPTH_BINS)));
+    interface Layer {
+      quads: number[][]; // per opacity level: quad indices
+      pts: { kind: MarkKind; cls: number; i: number; x: number; y: number; z: number }[];
+      probe: { x: number; y: number } | null;
+    }
+    const layers: Layer[][] = [0, 1].map(() => Array.from({ length: DEPTH_BINS }, () => ({ quads: Array.from({ length: ALPHA_STEPS }, () => []), pts: [], probe: null })));
+    const layer = (z: number, isNear: boolean) => layers[isNear ? 1 : 0][binOf(z)];
+
     const mesh = vox?.mesh;
     const nq = mesh ? mesh.quads.length / 4 : 0;
-    const pts = d.points!;
-    const items: { kind: 0 | 1 | 2 | 3 | 4; i: number; x: number; y: number; z: number; near: boolean; cls: number }[] = [];
-    const vs = mesh ? new Float32Array((mesh.verts.length / 3) * 3) : null;
+    const vs = mesh ? new Float32Array(mesh.verts.length) : null;
+    // Light from the upper left, toward the scene.
+    const L = [-0.45, 0.6, 0.66];
+    const A_MIN = 0.14;
+    const A_MAX = 0.14 + 0.36 + 0.14;
     if (mesh && vs) {
       const tmp = [0, 0, 0];
       for (let v = 0; v < mesh.verts.length / 3; v++) {
@@ -264,47 +333,15 @@ export function create3D(): View {
         vs[3 * v + 1] = tmp[1];
         vs[3 * v + 2] = tmp[2];
       }
+      const V = mesh.verts;
       for (let q = 0; q < nq; q++) {
+        const qv = mesh.quads.subarray(4 * q, 4 * q + 4);
         let z = 0;
         let c = 0;
         for (let t = 0; t < 4; t++) {
-          const vi = mesh.quads[4 * q + t];
-          z += vs[3 * vi + 2];
-          c += mesh.verts[3 * vi + slice.axis];
+          z += vs[3 * qv[t] + 2];
+          c += V[3 * qv[t] + sAxis];
         }
-        items.push({ kind: 0, i: q, x: 0, y: 0, z: z / 4, near: side(c / 4), cls: 0 });
-      }
-    }
-    const addPts = (kind: 1 | 2, c: Float32Array, y: Uint8Array) => {
-      for (let i = 0; i < y.length; i++) {
-        const q = P(c[3 * i], c[3 * i + 1], c[3 * i + 2]);
-        items.push({ kind, i, x: q[0], y: q[1], z: q[2], near: side(c[3 * i + slice.axis]), cls: y[i] });
-      }
-    };
-    addPts(1, pts.trainCoords, d.trainY);
-    if (boundaryOpts.showTest) addPts(2, pts.testCoords, d.testY);
-    for (const c of store.custom) {
-      if (c.origin !== 'point' || c.coords?.length !== 3) continue;
-      const q = P(c.coords[0], c.coords[1], c.coords[2]);
-      items.push({ kind: 3, i: c.id, x: q[0], y: q[1], z: q[2], near: side(c.coords[slice.axis]), cls: c.y });
-    }
-    const pr = store.probe?.coords;
-    if (pr && pr.length === 3) {
-      const q = P(pr[0], pr[1], pr[2]);
-      items.push({ kind: 4, i: 0, x: q[0], y: q[1], z: q[2], near: side(pr[slice.axis]), cls: 0 });
-    }
-    const order = backToFront(items.map((it) => it.z));
-    const zr = r * Math.sqrt(3);
-    const rad = Math.max(2.2, Math.min(3.6, W / 170));
-    // Light from the upper left, toward the scene.
-    const L = [-0.45, 0.6, 0.66];
-    const ink = p.rgb.ink;
-    screenPts = [];
-    const drawItem = (it: (typeof items)[number]) => {
-      const dn = Math.max(0, Math.min(1, (it.z + zr) / (2 * zr))); // 0 near, 1 far
-      if (it.kind === 0 && mesh && vs) {
-        const qv = mesh.quads.subarray(4 * it.i, 4 * it.i + 4);
-        const V = mesh.verts;
         const ax = V[3 * qv[2]] - V[3 * qv[0]];
         const ay = V[3 * qv[2] + 1] - V[3 * qv[0] + 1];
         const az = V[3 * qv[2] + 2] - V[3 * qv[0] + 2];
@@ -324,35 +361,89 @@ export function create3D(): View {
         const vd = m[6] * nx + m[7] * ny + m[8] * nz;
         const facing = Math.abs(vd);
         const lit = Math.abs(vr * L[0] + vu * L[1] - vd * L[2]);
-        const a = 0.14 + 0.36 * Math.pow(1 - facing, 1.5) + 0.14 * (1 - lit);
-        ctx.beginPath();
-        ctx.moveTo(vs[3 * qv[0]], vs[3 * qv[0] + 1]);
-        for (let t = 1; t < 4; t++) ctx.lineTo(vs[3 * qv[t]], vs[3 * qv[t] + 1]);
-        ctx.closePath();
-        ctx.fillStyle = `rgba(${ink[0] | 0},${ink[1] | 0},${ink[2] | 0},${a.toFixed(3)})`;
-        ctx.fill();
-        return;
+        const a = A_MIN + 0.36 * Math.pow(1 - facing, 1.5) + 0.14 * (1 - lit);
+        const level = Math.max(0, Math.min(ALPHA_STEPS - 1, Math.round(((a - A_MIN) / (A_MAX - A_MIN)) * (ALPHA_STEPS - 1))));
+        layer(z / 4, side(c / 4)).quads[level].push(q);
       }
-      const s = rad * (1.22 - 0.5 * dn);
-      ctx.globalAlpha = 1 - 0.55 * dn;
-      const col = p.cat[it.cls % 10];
-      if (it.kind === 1) dotTrain(ctx, it.x, it.y, s, col, p.ink);
-      else if (it.kind === 2) dotTest(ctx, it.x, it.y, s, col, p.surface);
-      else if (it.kind === 3) dotCustom(ctx, it.x, it.y, s + 0.6, col, p.ink);
-      ctx.globalAlpha = 1;
-      if (it.kind === 4) probeCross(ctx, it.x, it.y, 6, p.accent, p.surface);
-      else screenPts.push({ x: it.x, y: it.y, ref: { split: it.kind === 1 ? 'train' : it.kind === 2 ? 'test' : 'custom', i: it.i } });
+    }
+    const pts = d.points!;
+    const addPts = (kind: MarkKind, c: Float32Array, y: Uint8Array) => {
+      for (let i = 0; i < y.length; i++) {
+        const q = P(c[3 * i], c[3 * i + 1], c[3 * i + 2]);
+        layer(q[2], side(c[3 * i + sAxis])).pts.push({ kind, cls: y[i], i, x: q[0], y: q[1], z: q[2] });
+      }
     };
-    for (const i of order) if (!items[i].near) drawItem(items[i]);
+    if (boundaryOpts.showTest) addPts('test', pts.testCoords, d.testY);
+    addPts('train', pts.trainCoords, d.trainY);
+    for (const c of store.custom) {
+      if (c.origin !== 'point' || c.coords?.length !== 3) continue;
+      const q = P(c.coords[0], c.coords[1], c.coords[2]);
+      layer(q[2], side(c.coords[sAxis])).pts.push({ kind: 'custom', cls: c.y, i: c.id, x: q[0], y: q[1], z: q[2] });
+    }
+    const pr = store.probe?.coords;
+    if (pr && pr.length === 3) {
+      const q = P(pr[0], pr[1], pr[2]);
+      layer(q[2], side(pr[sAxis])).probe = { x: q[0], y: q[1] };
+    }
+
+    const rad = Math.max(2.2, Math.min(3.6, W / 170));
+    const ink = p.rgb.ink;
+    const hits: { x: number; y: number; z: number; ref: PointRef }[] = [];
+    const drawLayer = (ly: Layer, bin: number) => {
+      if (mesh && vs) {
+        for (let level = 0; level < ALPHA_STEPS; level++) {
+          const qs = ly.quads[level];
+          if (!qs.length) continue;
+          ctx.beginPath();
+          for (const q of qs) {
+            const qv = mesh.quads.subarray(4 * q, 4 * q + 4);
+            // Same winding on screen for every quad, so overlapping ones fill once (nonzero rule).
+            let area = 0;
+            for (let t = 0; t < 4; t++) {
+              const a = qv[t];
+              const b = qv[(t + 1) % 4];
+              area += vs[3 * a] * vs[3 * b + 1] - vs[3 * b] * vs[3 * a + 1];
+            }
+            const order = area >= 0 ? [0, 1, 2, 3] : [3, 2, 1, 0];
+            ctx.moveTo(vs[3 * qv[order[0]]], vs[3 * qv[order[0]] + 1]);
+            for (let t = 1; t < 4; t++) ctx.lineTo(vs[3 * qv[order[t]]], vs[3 * qv[order[t]] + 1]);
+            ctx.closePath();
+          }
+          const a = A_MIN + (level / (ALPHA_STEPS - 1)) * (A_MAX - A_MIN);
+          ctx.fillStyle = `rgba(${ink[0] | 0},${ink[1] | 0},${ink[2] | 0},${a.toFixed(3)})`;
+          ctx.fill();
+        }
+      }
+      if (ly.pts.length) {
+        const dn = (bin + 0.5) / DEPTH_BINS; // 0 near, 1 far
+        const s = rad * (1.22 - 0.5 * dn);
+        ctx.globalAlpha = 1 - 0.55 * dn;
+        const groups = new Map<string, { kind: MarkKind; cls: number; xy: number[] }>();
+        for (const kind of ['test', 'train', 'custom'] as const) {
+          for (const it of ly.pts) {
+            if (it.kind !== kind) continue;
+            const key = `${kind}:${it.cls}`;
+            let g = groups.get(key);
+            if (!g) groups.set(key, (g = { kind, cls: it.cls, xy: [] }));
+            g.xy.push(it.x, it.y);
+            hits.push({ x: it.x, y: it.y, z: it.z, ref: { split: kind, i: it.i } });
+          }
+        }
+        for (const g of groups.values()) drawMarks(ctx, g.cls, g.kind, g.xy, s, { color: p.cat[g.cls % 10], ink: p.ink, surface: p.surface });
+        ctx.globalAlpha = 1;
+      }
+      if (ly.probe) probeCross(ctx, ly.probe.x, ly.probe.y, 6, p.accent, p.surface);
+    };
+    for (let b = DEPTH_BINS - 1; b >= 0; b--) drawLayer(layers[0][b], b);
 
     // The slice: a quad painted with the class regions on that plane.
     if (field) {
-      const [ua, va] = sliceAxes(slice.axis);
+      const [ua, va] = field.axes;
       const world = (u: number, v: number) => {
         const c = [0, 0, 0];
         c[ua] = u;
         c[va] = v;
-        c[slice.axis] = slice.pos;
+        c[sAxis] = sPos;
         return P(c[0], c[1], c[2]).slice();
       };
       const P00 = world(-r, r);
@@ -406,8 +497,11 @@ export function create3D(): View {
       ctx.lineWidth = 1.2;
       ctx.stroke();
     }
-    for (const i of order) if (items[i].near) drawItem(items[i]);
+    for (let b = DEPTH_BINS - 1; b >= 0; b--) drawLayer(layers[1][b], b);
     drawEdges(true);
+    // Hit testing prefers the point nearest the viewer: later entries win ties.
+    const order = backToFront(hits.map((t) => t.z));
+    screenPts = Array.from(order, (i) => hits[i]);
 
     // Axis names just outside the positive end of their edges.
     ctx.font = '700 13px Archivo, "Helvetica Neue", Arial, sans-serif';
@@ -440,7 +534,7 @@ export function create3D(): View {
     if (vox) canvas.dataset.res = String(vox.n);
     canvas.setAttribute(
       'aria-label',
-      `3-D decision boundary of ${d.info.name}, turned to azimuth ${yd}°, elevation ${pd}°. The grey surface is where the predicted class changes; the coloured square is the slice ${axisName(slice.axis)} = ${fixed(slice.pos, 2)}. Drag, or use the arrow keys, to turn it.`,
+      `3-D decision boundary of ${d.info.name}, turned to azimuth ${yd}°, elevation ${pd}°. The grey surface is where the predicted class changes; the coloured square is the slice ${axisName(slice.axis)} = ${fixed(slice.pos, 2)}. Each class has its own shape. Drag, or use the arrow keys, to turn it.`,
     );
   }
 
@@ -469,40 +563,73 @@ export function create3D(): View {
     sliceNote.textContent = `The flat map shows the plane where ${axisName(slice.axis)} = ${fixed(slice.pos, 2)}: ${axisName(ua)} across, ${axisName(va)} up, with the points within ±${fixed(slabWidth(r), 2)} of it. Click it to try a point; with Add points on, click to add one.`;
   };
 
-  const render = (evaluate: boolean) => {
+  const startSlice = (r: number) => {
+    if (!ev.current) ev.sync();
+    const res = cost.res(store.running ? BUDGET_3D.slice.running : BUDGET_3D.slice.paused, 2);
+    const fixedAt = [0, 0, 0];
+    fixedAt[slice.axis] = slice.pos;
+    sjob = new PlaneJob(ev.ev, 3, sliceAxes(slice.axis), fixedAt, r, res);
+    sliceDirty = false;
+  };
+
+  const render = (evaluate: boolean, draw: boolean): boolean => {
     const d = store.data;
-    if (!d?.points || d.points.dims !== 3 || !netFits()) return;
+    if (!d?.points || d.points.dims !== 3 || !netFits()) {
+      vjob = sjob = null;
+      return false;
+    }
     const t0 = performance.now();
     const r = pointDomain(d);
     syncControls(r);
-    const running = store.running;
-    if (evaluate || !vox) {
-      ev.sync(store.net);
-      synced = true;
-      const n = running ? cost.res(10, 3, 8, 20) : cost.res(70, 3, 10, 30);
-      const out = evaluateVoxels(ev, n, r);
-      cost.add(out.ms, n * n * n);
-      vox = out.vox;
+    if ((vjob || sjob) && !ev.current) vjob = sjob = null; // made for a network that is gone
+    const idle = !vjob && !sjob;
+    if (idle && (evaluate || !vox)) {
+      ev.sync();
+      vjob = new VoxelJob(ev.ev, cost.res(store.running ? BUDGET_3D.cube.running : BUDGET_3D.cube.paused, 3), r);
       sliceDirty = true;
-      canvas.dataset.weights = String(store.weightsRev);
-      canvas.dataset.ms = out.ms.toFixed(1);
+      passMs = 0;
+    } else if (idle && (sliceDirty || !field)) {
+      startSlice(r);
+      passMs = 0;
     }
-    if (sliceDirty || !field) {
-      if (!synced) {
-        ev.sync(store.net);
-        synced = true;
+    const inPass = !!(vjob || sjob);
+    let fresh = false;
+    if (vjob) {
+      const out = vjob.step(sliceMs(), cost.perPoint);
+      if (out) {
+        cost.add(vjob.job.busy, vjob.n ** 3);
+        vox = out;
+        vjob = null;
+        canvas.dataset.weights = String(store.weightsRev);
+        canvas.dataset.ms = (passMs + performance.now() - t0).toFixed(1);
+        startSlice(r);
+        fresh = true;
       }
-      const res = running ? cost.res(5, 2, 16, 64) : cost.res(16, 2, 24, 72);
-      const fixedAt = [0, 0, 0];
-      fixedAt[slice.axis] = slice.pos;
-      const out = evaluatePlane(ev, 3, sliceAxes(slice.axis), fixedAt, r, res);
-      cost.add(out.ms, res * res);
-      field = out.field;
-      sliceDirty = false;
+    } else if (sjob) {
+      const f = sjob.step(sliceMs(), cost.perPoint);
+      if (f) {
+        cost.add(sjob.busy, sjob.res * sjob.res);
+        field = f;
+        sjob = null;
+        fresh = true;
+      }
     }
-    drawOrbit(d);
-    drawSlice();
-    live.gap = Math.max(100, 4 * (performance.now() - t0));
+    if (draw || fresh) {
+      drawOrbit(d);
+      drawSlice();
+      const coarse = vox && vox.n < 12;
+      note.hidden = !coarse;
+      if (coarse) note.textContent = coarseNote(vox!.n, 'the surface', 3);
+    }
+    if (inPass) passMs += performance.now() - t0;
+    // Every millisecond of a pass counts against the budget: evaluation, meshing and drawing.
+    if (fresh && !vjob && !sjob) live.gap = Math.max(100, 4 * passMs);
+    // A slider move during a pass is picked up when the pass is done.
+    if (!vjob && !sjob && sliceDirty) {
+      startSlice(r);
+      passMs = 0;
+    }
+    return !!(vjob || sjob);
   };
   const live = new Live(el, render);
   live.active = false;
@@ -588,11 +715,15 @@ export function create3D(): View {
   const again = () => live.request(true);
   const redraw = () => live.request(false);
   store.on('weights', again);
-  store.on('model', again);
+  store.on('model', () => {
+    vjob = sjob = null;
+    live.restart();
+  });
   store.on('data', () => {
     vox = null;
     field = null;
-    again();
+    vjob = sjob = null;
+    live.restart();
   });
   let wasRunning = false;
   store.on('status', () => {
@@ -616,4 +747,3 @@ export function create3D(): View {
     },
   };
 }
-

@@ -1,19 +1,21 @@
 import { addCustom, setProbe } from '../actions';
 import { fixed } from '../analysis/stats';
 import { sampleCaption, sampleInput, type Data } from '../data/datasets';
-import { featurize } from '../data/features';
+import { featurize, type FeatureId } from '../data/features';
 import { gridCoords, pointDomain, PointEvaluator } from '../data/grid';
+import type { Network } from '../nn/network';
 import { store } from '../store';
 import { h } from './dom';
 import { fitCanvas } from './draw';
 import { axisName, boundarySegments, paintRegions, resolutionFor, ticks, type RGB } from './boundaryMath';
+import { drawMarks, type MarkKind } from './marks';
 import { onThemeChange, palette } from './theme';
 import { hideTip, showTip } from './tip';
 
 /**
  * Section 03 for point datasets, 2-D part: the predicted class over the plane with the decision
  * boundary drawn on top. The plane renderer here (PlaneCanvas) also draws the slice map of the
- * 3-D view.
+ * 3-D view, and the sliced evaluation (Live, GridJob) serves sections 02 and 07 too.
  */
 
 // ── Shared view options (toggles above the plot) ─────────────────────────
@@ -29,15 +31,20 @@ export const onBoundaryOpts = (fn: () => void) => optListeners.add(fn);
 // ── Throttled, visibility-aware redraws ──────────────────────────────────
 
 /**
- * Runs `render(evaluate)` in an animation frame while `el` is on screen (or near it). Requests
- * that need a new evaluation of the network are spaced at least `gap` ms apart (about 10 per
- * second while training); requests that only redraw run on the next frame. Work requested while
- * off screen waits until the element scrolls into view.
+ * Runs `render(evaluate, draw)` in animation frames while `el` is on screen (or near it).
+ * Evaluations of the network are spaced at least `gap` ms apart; the views set the gap to four
+ * times the main-thread time of their last full pass (evaluation and painting), so a slow network
+ * is redrawn less often instead of taking over the page. A render that returns true has more work
+ * to do (an evaluation sliced across frames) and is called again on the next frame; no new
+ * evaluation starts until it is done. Requests that only redraw run on the next frame. Work
+ * requested while off screen waits until the element scrolls into view.
  */
 export class Live {
   private visible = false;
   private needEval = false;
   private needDraw = false;
+  /** A sliced pass is under way. */
+  private working = false;
   private raf = 0;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private lastEval = -Infinity;
@@ -45,14 +52,14 @@ export class Live {
 
   constructor(
     el: Element,
-    private render: (evaluate: boolean) => void,
+    private render: (evaluate: boolean, draw: boolean) => boolean | void,
     /** Minimum ms between evaluations; raised for slow networks so training keeps most of the thread. */
     public gap = 100,
   ) {
     new IntersectionObserver(
       (es) => {
         this.visible = es.some((e) => e.isIntersecting);
-        if (this.visible && (this.needEval || this.needDraw)) this.kick();
+        if (this.visible && (this.needEval || this.needDraw || this.working)) this.kick();
       },
       { rootMargin: '240px 0px' },
     ).observe(el);
@@ -65,13 +72,19 @@ export class Live {
     this.kick();
   }
 
+  /** Forgets a pass under way (the view dropped it) and asks for a fresh evaluation. */
+  restart(): void {
+    this.working = false;
+    this.request(true);
+  }
+
   private kick(): void {
     if (!this.visible || !this.active) return;
-    const wait = this.needEval ? this.lastEval + this.gap - performance.now() : 0;
-    if (this.needDraw || wait <= 0) {
+    const wait = this.needEval && !this.working ? this.lastEval + this.gap - performance.now() : 0;
+    if (this.needDraw || this.working || wait <= 0) {
       if (!this.raf) this.raf = requestAnimationFrame(() => this.run());
     }
-    if (this.needEval && wait > 0 && this.timer === null) {
+    if (this.needEval && !this.working && wait > 0 && this.timer === null) {
       this.timer = setTimeout(() => {
         this.timer = null;
         this.kick();
@@ -82,15 +95,82 @@ export class Live {
   private run(): void {
     this.raf = 0;
     if (!this.visible || !this.active) return;
-    const due = this.needEval && performance.now() >= this.lastEval + this.gap - 1;
-    if (!due && !this.needDraw) return;
+    const due = this.needEval && !this.working && performance.now() >= this.lastEval + this.gap - 1;
+    if (!due && !this.needDraw && !this.working) return;
     if (due) {
       this.needEval = false;
       this.lastEval = performance.now();
     }
+    const draw = this.needDraw;
     this.needDraw = false;
-    this.render(due);
-    if (this.needEval) this.kick();
+    this.working = this.render(due, draw) === true;
+    if (this.working || this.needEval || this.needDraw) this.kick();
+  }
+}
+
+// ── Evaluation over many points, sliced across frames ────────────────────
+
+/** Longest slice of evaluation per frame, in ms, while training runs and while it is paused. */
+export const SLICE_MS = { running: 6, paused: 10 };
+export const sliceMs = (): number => (store.running ? SLICE_MS.running : SLICE_MS.paused);
+
+/**
+ * Evaluates the network at many points (n × dims raw coordinates) a slice at a time, so a large
+ * network never holds the main thread for long: each step runs for about `ms` and a pass may take
+ * several frames. The caller syncs the evaluator once, before the pass, and the features are
+ * fixed when the job is made, so a pass stays consistent even if the page's network changes
+ * meanwhile (the views drop such passes).
+ */
+export class GridJob {
+  readonly n: number;
+  probs: Float32Array | null = null;
+  acts: Float32Array[] | null = null;
+  /** Main-thread time spent on this pass so far, in ms. */
+  busy = 0;
+  private i = 0;
+  private readonly features: FeatureId[];
+  /** Points per ms, measured as the pass goes. */
+  private rate = 0;
+
+  constructor(
+    private ev: PointEvaluator,
+    private coords: Float32Array,
+    private dims: 2 | 3,
+    private activations = false,
+  ) {
+    this.n = coords.length / dims;
+    this.features = store.features.slice();
+  }
+
+  get done(): boolean {
+    return this.i >= this.n;
+  }
+
+  /** Evaluates points for about `ms` (always a few); true when every point is done. */
+  step(ms: number, perPoint: number): boolean {
+    const t0 = performance.now();
+    let rate = this.rate || 1 / Math.max(1e-4, perPoint);
+    while (this.i < this.n) {
+      const left = ms - (performance.now() - t0);
+      if (left <= 0.25 && this.i > 0) break;
+      const a = this.i;
+      const b = Math.min(this.n, a + Math.max(4, Math.min(4096, Math.floor(left * rate))));
+      const s0 = performance.now();
+      const out = this.ev.evaluate(this.coords.subarray(a * this.dims, b * this.dims), this.dims, this.features, { activations: this.activations });
+      const K = out.probs.length / (b - a);
+      this.probs ??= new Float32Array(this.n * K);
+      this.probs.set(out.probs, a * K);
+      if (out.acts) {
+        const acts = (this.acts ??= out.acts.map((x) => new Float32Array((x.length / (b - a)) * this.n)));
+        out.acts.forEach((x, j) => acts[j].set(x, a * (x.length / (b - a))));
+      }
+      this.i = b;
+      const dt = performance.now() - s0;
+      if (dt > 0.05) rate = this.rate = this.rate ? 0.5 * this.rate + 0.5 * ((b - a) / dt) : (b - a) / dt;
+      if (this.i > 0 && performance.now() - t0 >= ms) break;
+    }
+    this.busy += performance.now() - t0;
+    return this.done;
   }
 }
 
@@ -115,19 +195,74 @@ export interface PlaneField {
 
 let fieldRev = 0;
 
-/** Evaluates the network on a res × res grid over one plane; returns the field and its cost. */
+function planeField(probs: Float32Array, dims: 2 | 3, axes: [number, number], fixedAt: number[], r: number, res: number): PlaneField {
+  const classes = probs.length / (res * res);
+  const segs = boundarySegments(probs, classes, res, res);
+  return { res, classes, probs, dims, axes, fixedAt: fixedAt.slice(), r, segs, rev: ++fieldRev };
+}
+
+/** Evaluates the network on a res × res grid over one plane at once; returns the field and its cost. */
 export function evaluatePlane(ev: PointEvaluator, dims: 2 | 3, axes: [number, number], fixedAt: number[], r: number, res: number): { field: PlaneField; ms: number } {
   const t0 = performance.now();
   const coords = gridCoords(dims, res, r, axes, fixedAt);
   const { probs } = ev.evaluate(coords, dims, store.features);
-  const classes = probs.length / (res * res);
-  const segs = boundarySegments(probs, classes, res, res);
-  return { field: { res, classes, probs, dims, axes, fixedAt: fixedAt.slice(), r, segs, rev: ++fieldRev }, ms: performance.now() - t0 };
+  return { field: planeField(probs, dims, axes, fixedAt, r, res), ms: performance.now() - t0 };
+}
+
+/** One plane evaluated a slice at a time (see GridJob). */
+export class PlaneJob {
+  readonly job: GridJob;
+  constructor(
+    ev: PointEvaluator,
+    readonly dims: 2 | 3,
+    readonly axes: [number, number],
+    readonly fixedAt: number[],
+    readonly r: number,
+    readonly res: number,
+  ) {
+    this.job = new GridJob(ev, gridCoords(dims, res, r, axes, fixedAt), dims);
+  }
+  get busy(): number {
+    return this.job.busy;
+  }
+  /** Runs one slice; returns the finished field (boundary lines included) once every point is done. */
+  step(ms: number, perPoint: number): PlaneField | null {
+    if (!this.job.step(ms, perPoint)) return null;
+    const t0 = performance.now();
+    const f = planeField(this.job.probs!, this.dims, this.axes, this.fixedAt, this.r, this.res);
+    this.job.busy += performance.now() - t0;
+    return f;
+  }
 }
 
 /** True when the page network takes the current point features (it may lag a dataset switch). */
 export function netFits(): boolean {
   return store.info.kind === 'points' && store.net.inputSize === store.features.length && !!store.data?.points;
+}
+
+/**
+ * A private evaluator that follows the page's network: `ready()` re-syncs it whenever the page
+ * network was replaced (a new architecture or new features), so a query between two passes never
+ * runs the old network on the new features.
+ */
+export class Evaluator {
+  readonly ev = new PointEvaluator();
+  private net: Network | null = null;
+  /** Copies the page network's current weights (and architecture) in. */
+  sync(): void {
+    this.ev.sync(store.net);
+    this.net = store.net;
+  }
+  /** True when the evaluator holds the page's current network (its weights may be a pass behind). */
+  get current(): boolean {
+    return this.net === store.net;
+  }
+  /** Class probabilities at one point, or null when the network does not fit the features. */
+  probsAt(coords: Float32Array, dims: 2 | 3): Float32Array | null {
+    if (!netFits()) return null;
+    if (!this.current) this.sync();
+    return this.ev.evaluate(coords, dims, store.features).probs;
+  }
 }
 
 /**
@@ -147,9 +282,21 @@ export class Cost {
   get perPoint(): number {
     return this.unit * (store.net.paramCount + 50);
   }
-  res(budgetMs: number, dims: 2 | 3, min: number, max: number): number {
-    return resolutionFor(this.perPoint, budgetMs, dims, min, max);
+  /** Grid side for a pass of about `b.budget` ms; `b.min` gives way when it would cost more than `b.cap`. */
+  res(b: Budget, dims: 2 | 3): number {
+    return resolutionFor(this.perPoint, b.budget, dims, b.min, b.max, b.cap, b.floor);
   }
+}
+
+/** Main-thread time for one pass of a view (ms) and the grid sides it may use. */
+export interface Budget {
+  budget: number;
+  min: number;
+  max: number;
+  /** Most time a pass may take before the grid gets coarser than `min`. */
+  cap: number;
+  /** Coarsest grid side ever used. */
+  floor: number;
 }
 
 // ── Points and picks ─────────────────────────────────────────────────────
@@ -230,7 +377,7 @@ export function probsText(d: Data, coords: Float32Array, probs: ArrayLike<number
     for (let k = 1; k < probs.length; k++) if (probs[k] > probs[best]) best = k;
     const w = Math.max(...d.info.classes.map((c) => c.length));
     // No-break spaces: the tooltip collapses ordinary runs of spaces.
-    const NB = '\u00a0';
+    const NB = ' ';
     d.info.classes.forEach((name, k) => {
       const pct = `${(100 * probs[k]).toFixed(1)}%`;
       lines.push(`${k === best ? '▸' : NB}${NB}${name.padEnd(w, NB)}${NB}${pct.padStart(6, NB)}`);
@@ -248,7 +395,7 @@ export interface Rect {
   h: number;
 }
 
-/** Training point: filled disc in the class colour with a thin ink outline. */
+/** Training point: filled disc in the class colour with a thin ink outline (other sections' plots). */
 export function dotTrain(ctx: CanvasRenderingContext2D, x: number, y: number, rad: number, fill: string, ink: string): void {
   ctx.beginPath();
   ctx.arc(x, y, rad, 0, 2 * Math.PI);
@@ -289,21 +436,56 @@ export function dotCustom(ctx: CanvasRenderingContext2D, x: number, y: number, r
 
 /** The current input: an accent cross with a surface halo. */
 export function probeCross(ctx: CanvasRenderingContext2D, x: number, y: number, size: number, accent: string, surface: string, faint = false): void {
+  probeCrosses(ctx, [x, y], size, accent, surface, faint);
+}
+
+/** Several current-input crosses (one per map) in one path: a surface halo under an accent cross. */
+export function probeCrosses(ctx: CanvasRenderingContext2D, xy: ArrayLike<number>, size: number, accent: string, surface: string, faint = false): void {
+  if (xy.length < 2) return;
   ctx.lineCap = 'round';
   ctx.beginPath();
-  ctx.moveTo(x - size, y - size);
-  ctx.lineTo(x + size, y + size);
-  ctx.moveTo(x + size, y - size);
-  ctx.lineTo(x - size, y + size);
+  for (let i = 0; i + 1 < xy.length; i += 2) {
+    const x = xy[i];
+    const y = xy[i + 1];
+    ctx.moveTo(x - size, y - size);
+    ctx.lineTo(x + size, y + size);
+    ctx.moveTo(x + size, y - size);
+    ctx.lineTo(x - size, y + size);
+  }
+  const s = Math.min(1, size / 6.5);
   ctx.strokeStyle = surface;
-  ctx.lineWidth = 5.5;
+  ctx.lineWidth = Math.max(3.8, 5.5 * s);
   ctx.globalAlpha = faint ? 0.6 : 1;
   ctx.stroke();
   ctx.strokeStyle = accent;
-  ctx.lineWidth = 2.4;
+  ctx.lineWidth = Math.max(1.8, 2.4 * s);
   ctx.stroke();
   ctx.globalAlpha = 1;
   ctx.lineCap = 'butt';
+}
+
+/**
+ * Draws point markers in batches, one path per class, kind and (rounded) opacity: test points
+ * first, then training points, then yours. Returns nothing; `X`/`Y` map data to canvas pixels.
+ */
+export function drawMarkers(ctx: CanvasRenderingContext2D, markers: Marker[], X: (u: number) => number, Y: (v: number) => number, rad: number): void {
+  const p = palette();
+  const groups = new Map<string, { cls: number; kind: MarkKind; alpha: number; xy: number[] }>();
+  for (const kind of ['test', 'train', 'custom'] as const) {
+    for (const m of markers) {
+      if (m.split !== kind) continue;
+      const alpha = Math.round(m.alpha * 20) / 20;
+      const key = `${kind}:${m.cls}:${alpha}`;
+      let g = groups.get(key);
+      if (!g) groups.set(key, (g = { cls: m.cls, kind, alpha, xy: [] }));
+      g.xy.push(X(m.u), Y(m.v));
+    }
+  }
+  for (const g of groups.values()) {
+    ctx.globalAlpha = g.alpha;
+    drawMarks(ctx, g.cls, g.kind, g.xy, rad, { color: p.cat[g.cls % 10], ink: p.ink, surface: p.surface });
+  }
+  ctx.globalAlpha = 1;
 }
 
 let regionScratch: HTMLCanvasElement | null = null;
@@ -399,8 +581,17 @@ export interface PlaneHost {
 const PAD = { l: 38, r: 10, t: 22, b: 38 };
 const PAD_SMALL = { l: 34, r: 8, t: 20, b: 34 };
 
+let hintId = 0;
+
+/** A visually hidden description, for aria-describedby. */
+export function srHint(text: string): HTMLElement {
+  return h('p', { class: 'bd-sr', id: `bd-hint-${++hintId}` }, text);
+}
+
 export class PlaneCanvas {
   readonly canvas: HTMLCanvasElement;
+  /** How to use the plot from the keyboard; the view puts it in the page next to the canvas. */
+  readonly keysHint: HTMLElement;
   rect: Rect = { x: 0, y: 0, w: 0, h: 0 };
   private markers: Marker[] = [];
   private tex = document.createElement('canvas');
@@ -411,7 +602,11 @@ export class PlaneCanvas {
     private small: boolean,
     label: string,
   ) {
-    this.canvas = h('canvas', { class: 'bd-plane', role: 'img', tabindex: '0', 'aria-label': label }) as HTMLCanvasElement;
+    this.keysHint = srHint(
+      'Arrow keys move the network’s input across the plot, 0.05 per press or 0.25 with Shift. Enter or Space makes that spot the input; with Add points on, it adds a training point there. Clicking a point uses it as the input.',
+    );
+    // An interactive plot, not a picture: it takes the arrow keys (role application).
+    this.canvas = h('canvas', { class: 'bd-plane', role: 'application', 'aria-roledescription': 'plot', tabindex: '0', 'aria-label': label, 'aria-describedby': this.keysHint.id }) as HTMLCanvasElement;
     const c = this.canvas;
     c.addEventListener('pointermove', (e) => this.hover(e));
     c.addEventListener('pointerleave', () => hideTip());
@@ -452,7 +647,7 @@ export class PlaneCanvas {
       this.canvas.dataset.res = String(field.res);
       this.canvas.dataset.rev = String(field.rev);
     }
-    // Points
+    // Points: a shape per class, filled for training, outlined for test.
     this.markers = this.host.markers();
     const rad = Math.max(2.6, Math.min(4.2, side / 135));
     const X = (u: number) => rect.x + ((u + r) / (2 * r)) * rect.w;
@@ -461,17 +656,7 @@ export class PlaneCanvas {
     ctx.beginPath();
     ctx.rect(rect.x - 6, rect.y - 6, rect.w + 12, rect.h + 12);
     ctx.clip();
-    for (const kind of ['test', 'train', 'custom'] as const) {
-      for (const m of this.markers) {
-        if (m.split !== kind) continue;
-        ctx.globalAlpha = m.alpha;
-        const col = p.cat[m.cls % 10];
-        if (kind === 'train') dotTrain(ctx, X(m.u), Y(m.v), rad, col, p.ink);
-        else if (kind === 'test') dotTest(ctx, X(m.u), Y(m.v), rad, col, p.surface);
-        else dotCustom(ctx, X(m.u), Y(m.v), rad + 0.6, col, p.ink);
-      }
-    }
-    ctx.globalAlpha = 1;
+    drawMarkers(ctx, this.markers, X, Y, rad);
     const pr = this.host.probe();
     if (pr) probeCross(ctx, X(pr.u), Y(pr.v), this.small ? 5 : 6.5, p.accent, p.surface, !pr.on);
     ctx.restore();
@@ -541,6 +726,12 @@ export class PlaneCanvas {
   }
 }
 
+/** A plain-language note for a map drawn on a coarser grid than usual, to keep the page responsive. */
+export function coarseNote(res: number, what: string, dims: 2 | 3 = 2): string {
+  const grid = dims === 3 ? `${res} × ${res} × ${res}` : `${res} × ${res}`;
+  return `This network is large, so ${what} is computed on a coarse ${grid} grid${store.running ? ' while it trains' : ''}, a few frames at a time, to keep the page responsive.`;
+}
+
 // ── The 2-D view ─────────────────────────────────────────────────────────
 
 /** Markers for every point of a 2-D dataset (and your added points). */
@@ -561,11 +752,25 @@ export interface View {
   setActive(on: boolean): void;
 }
 
+/**
+ * Grid budgets of the 2-D plot. While training: a pass of about 8 ms. Paused: up to 200² (thin
+ * slivers of a region stay visible), sliced across frames. A slow network gets a coarser grid
+ * rather than a pass of more than the cap.
+ */
+export const BUDGET_2D: { running: Budget; paused: Budget } = {
+  running: { budget: 8, min: 16, max: 100, cap: 40, floor: 8 },
+  paused: { budget: 120, min: 32, max: 200, cap: 400, floor: 12 },
+};
+/** Below this many cells per side, the plot says it is coarse. */
+const COARSE_2D = 32;
+
 export function create2D(): View {
-  const ev = new PointEvaluator();
+  const ev = new Evaluator();
   const cost = new Cost();
   let field: PlaneField | null = null;
-  let synced = false;
+  let job: PlaneJob | null = null;
+  /** Main-thread time of the pass under way, all frames together. */
+  let passMs = 0;
   const host: PlaneHost = {
     field: () => field,
     markers: () => (store.data?.points ? markers2d(store.data) : []),
@@ -574,43 +779,81 @@ export function create2D(): View {
       return c && c.length === 2 ? { u: c[0], v: c[1], on: true } : null;
     },
     coordsAt: (u, v) => new Float32Array([u, v]),
-    probsAt: (coords) => (synced && netFits() ? ev.evaluate(coords, 2, store.features).probs : null),
+    probsAt: (coords) => {
+      // A new network (architecture or features) replaces any pass made with the old one.
+      if (netFits() && !ev.current && job) {
+        job = null;
+        live.restart();
+      }
+      return ev.probsAt(coords, 2);
+    },
   };
   const plane = new PlaneCanvas(host, false, 'Decision boundary: the predicted class over the plane, with the training and test points');
   const box = h('div', { class: 'bd-plot' }, plane.canvas);
-  const el = h('div', { class: 'bd-2d' }, box);
+  const note = h('p', { class: 'hint bd-res-note', hidden: true });
+  const el = h('div', { class: 'bd-2d' }, box, note, plane.keysHint);
 
-  const render = (evaluate: boolean) => {
+  const start = (d: Data) => {
+    ev.sync();
+    const res = cost.res(store.running ? BUDGET_2D.running : BUDGET_2D.paused, 2);
+    job = new PlaneJob(ev.ev, 2, [0, 1], [], pointDomain(d), res);
+  };
+
+  const render = (evaluate: boolean, draw: boolean): boolean => {
     const d = store.data;
-    if (!d?.points || d.points.dims !== 2 || !netFits()) return;
-    if (evaluate || !field) {
-      ev.sync(store.net);
-      synced = true;
-      const r = pointDomain(d);
-      const res = store.running ? cost.res(8, 2, 16, 100) : cost.res(30, 2, 32, 100);
-      const out = evaluatePlane(ev, 2, [0, 1], [], r, res);
-      cost.add(out.ms, res * res);
-      live.gap = Math.max(100, 4 * out.ms);
-      field = out.field;
-      plane.canvas.dataset.weights = String(store.weightsRev);
-      plane.canvas.dataset.ms = out.ms.toFixed(1);
+    if (!d?.points || d.points.dims !== 2 || !netFits()) {
+      job = null;
+      return false;
     }
-    const w = Math.min(560, box.clientWidth || 560);
-    plane.draw(w);
-    plane.canvas.setAttribute(
-      'aria-label',
-      `Decision boundary of ${d.info.name}: the predicted class over the plane from −${fixed(field!.r, 2)} to ${fixed(field!.r, 2)} on both axes, shaded by confidence, with ${d.trainY.length} training points${boundaryOpts.showTest ? ` and ${d.testY.length} test points` : ''}.`,
-    );
+    const t0 = performance.now();
+    if (job && !ev.current) job = null; // made for a network that is gone
+    if ((evaluate || (!field && !job)) && !job) {
+      start(d);
+      passMs = 0;
+    }
+    let fresh = false;
+    const inPass = !!job;
+    if (job) {
+      const f = job.step(sliceMs(), cost.perPoint);
+      if (f) {
+        cost.add(job.busy, job.res * job.res);
+        field = f;
+        fresh = true;
+        job = null;
+        plane.canvas.dataset.weights = String(store.weightsRev);
+        plane.canvas.dataset.ms = (passMs + performance.now() - t0).toFixed(1);
+      }
+    }
+    if (draw || fresh) {
+      const w = Math.min(560, box.clientWidth || 560);
+      plane.draw(w);
+      if (field) {
+        plane.canvas.setAttribute(
+          'aria-label',
+          `Decision boundary of ${d.info.name}: the predicted class over the plane from −${fixed(field.r, 2)} to ${fixed(field.r, 2)} on both axes, shaded by confidence, with ${d.trainY.length} training points${boundaryOpts.showTest ? ` and ${d.testY.length} test points` : ''}, each class with its own shape.`,
+        );
+        note.hidden = field.res >= COARSE_2D;
+        if (!note.hidden) note.textContent = coarseNote(field.res, 'the map');
+      }
+    }
+    // Every millisecond of a pass counts against the budget: evaluation, painting and drawing.
+    if (inPass) passMs += performance.now() - t0;
+    if (fresh) live.gap = Math.max(100, 4 * passMs);
+    return job !== null;
   };
   const live = new Live(el, render);
   live.active = false;
   const again = () => live.request(true);
   const redraw = () => live.request(false);
   store.on('weights', again);
-  store.on('model', again);
+  store.on('model', () => {
+    job = null;
+    live.restart();
+  });
   store.on('data', () => {
     field = null;
-    again();
+    job = null;
+    live.restart();
   });
   let wasRunning = false;
   store.on('status', () => {

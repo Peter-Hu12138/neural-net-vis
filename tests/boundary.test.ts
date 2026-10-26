@@ -6,6 +6,7 @@ import {
   boundarySegments,
   classSurfaces,
   confidence,
+  featureScale,
   marchingSquares,
   marginField,
   nearSide,
@@ -216,6 +217,88 @@ describe('boundary surfaces in 3-D', () => {
   });
 });
 
+describe('boundary surfaces reach the faces of the cube', () => {
+  // A tilted plane through an n³ grid whose outer nodes lie on the faces.
+  const n = 10;
+  const plane = (x: number, y: number, z: number) => 0.8 * x - 0.5 * y + 0.6 * z - 0.2 * (n - 1);
+  const field = () => {
+    const f = new Float32Array(n * n * n);
+    for (let k = 0; k < n; k++) for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) f[i + n * (j + n * k)] = plane(i, j, k);
+    return f;
+  };
+  /** Range of the drawn surface (vertices used by quads) along one axis. */
+  const extent = (mesh: { verts: Float32Array; quads: Uint32Array }, axis: number) => {
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (const q of mesh.quads) {
+      lo = Math.min(lo, mesh.verts[3 * q + axis]);
+      hi = Math.max(hi, mesh.verts[3 * q + axis]);
+    }
+    return [lo, hi];
+  };
+
+  /** Share of the mesh's open rim (edges used by one quad) that lies on a face of the grid. */
+  const rimOnFaces = (mesh: { verts: Float32Array; quads: Uint32Array }) => {
+    const edges = new Set<string>();
+    for (let q = 0; q < mesh.quads.length; q += 4) for (let t = 0; t < 4; t++) edges.add(`${mesh.quads[q + t]}>${mesh.quads[q + ((t + 1) % 4)]}`);
+    const onFace = (v: number) => [0, 1, 2].some((a) => Math.abs(mesh.verts[3 * v + a]) < 1e-6 || Math.abs(mesh.verts[3 * v + a] - (n - 1)) < 1e-6);
+    let rim = 0;
+    let on = 0;
+    for (const e of edges) {
+      const [a, b] = e.split('>').map(Number);
+      if (edges.has(`${b}>${a}`)) continue;
+      rim++;
+      if (onFace(a) && onFace(b)) on++;
+    }
+    return rim ? on / rim : 1;
+  };
+
+  it('without clamping, the mesh stops short of the faces', () => {
+    expect(rimOnFaces(surfaceNets(field(), n))).toBe(0);
+  });
+
+  it('with clamping, border vertices sit on the faces and still on the plane', () => {
+    const mesh = surfaceNets(field(), n, 0, undefined, true);
+    // The plane spans the whole y and z range of the cube: the mesh must reach both faces.
+    for (const axis of [1, 2]) {
+      const [lo, hi] = extent(mesh, axis);
+      expect(lo).toBeCloseTo(0, 6);
+      expect(hi).toBeCloseTo(n - 1, 6);
+    }
+    // A linear field's crossings are exact, so every vertex (moved or not) lies on the plane.
+    for (let v = 0; v < mesh.verts.length; v += 3) expect(Math.abs(plane(mesh.verts[v], mesh.verts[v + 1], mesh.verts[v + 2]))).toBeLessThan(1e-4);
+    // Nothing leaves the cube, and the quads still all refer to real vertices.
+    for (let v = 0; v < mesh.verts.length; v++) {
+      expect(mesh.verts[v]).toBeGreaterThanOrEqual(-1e-6);
+      expect(mesh.verts[v]).toBeLessThanOrEqual(n - 1 + 1e-6);
+    }
+    expect(Math.max(...mesh.quads)).toBeLessThan(mesh.verts.length / 3);
+    // The open rim of the surface runs along the faces.
+    expect(rimOnFaces(mesh)).toBe(1);
+  });
+
+  it('leaves a surface that never touches the border where it was', () => {
+    const m = 16;
+    const f = new Float32Array(m * m * m);
+    const c = (m - 1) / 2;
+    for (let k = 0; k < m; k++) for (let j = 0; j < m; j++) for (let i = 0; i < m; i++) f[i + m * (j + m * k)] = 4 - Math.hypot(i - c, j - c, k - c);
+    expect(Array.from(surfaceNets(f, m, 0, undefined, true).verts)).toEqual(Array.from(surfaceNets(f, m).verts));
+  });
+
+  it('classSurfaces passes clamping through', () => {
+    const f = field();
+    const probs = new Float32Array(f.length * 2);
+    for (let i = 0; i < f.length; i++) {
+      const p0 = 1 / (1 + Math.exp(-f[i]));
+      probs[2 * i] = p0;
+      probs[2 * i + 1] = 1 - p0;
+    }
+    const [lo, hi] = extent(classSurfaces(probs, 2, n, true), 2);
+    expect(lo).toBeCloseTo(0, 6);
+    expect(hi).toBeCloseTo(n - 1, 6);
+  });
+});
+
 describe('orbit camera', () => {
   const dot = (m: number[], a: number, b: number) => m[3 * a] * m[3 * b] + m[3 * a + 1] * m[3 * b + 1] + m[3 * a + 2] * m[3 * b + 2];
 
@@ -272,10 +355,33 @@ describe('budgets and labels', () => {
     expect(resolutionFor(0, 8, 2, 20, 100)).toBe(100);
   });
 
+  it('lets the cap win over the minimum for a slow network', () => {
+    // 0.48 ms per point (a 3 × 256 network): the minimum 32² would take 490 ms.
+    expect(resolutionFor(0.48, 30, 2, 32, 100)).toBe(32); // no cap: as before
+    const r = resolutionFor(0.48, 30, 2, 32, 100, 60);
+    expect(r).toBe(11); // √(60 / 0.48)
+    expect(0.48 * r * r).toBeLessThanOrEqual(60);
+    expect(resolutionFor(5, 30, 2, 32, 100, 60, 6)).toBe(6); // never below the floor
+    expect(resolutionFor(0.48, 30, 3, 10, 30, 200, 4)).toBe(7); // ∛(200 / 0.48)
+    // A fast network is not affected by the cap.
+    expect(resolutionFor(0.001, 8, 2, 20, 100, 40)).toBe(89);
+  });
+
   it('ticks and axis names', () => {
     expect(ticks(1.25)).toEqual([-1, -0.5, 0, 0.5, 1]);
     expect(ticks(2, 1)).toEqual([-2, -1, 0, 1, 2]);
     expect([0, 1, 2].map(axisName)).toEqual(['x₁', 'x₂', 'x₃']);
+  });
+});
+
+describe('feature map colour scale', () => {
+  it('is each feature’s range over the whole domain, not over one slice', () => {
+    expect(featureScale('x1', 1.25)).toEqual({ max: 1.25, signed: true });
+    expect(featureScale('x3', 2)).toEqual({ max: 2, signed: true });
+    expect(featureScale('x2^2', 1.25)).toEqual({ max: 1.5625, signed: false });
+    expect(featureScale('x1*x3', 1.5)).toEqual({ max: 2.25, signed: true });
+    expect(featureScale('sin x2', 1.25)).toEqual({ max: 1, signed: true });
+    expect(featureScale('sin x1', 0.25).max).toBeCloseTo(Math.SQRT1_2, 12);
   });
 });
 
