@@ -1,5 +1,6 @@
+import type { FeatureId } from '../data/features';
 import './modelPanel.css';
-import { exportModel, loadModel, readModel, setFrozen, transferModel } from '../actions';
+import { exportModel, loadModel, readModel, setFrozen, transferModel, transferProblem } from '../actions';
 import { datasetInfo, noun, type DatasetId } from '../data/datasets';
 import type { ModelFile } from '../models/format';
 import { controlFinding, fetchIndex, fetchModel, fetchTransfer, fmtBytes, layersSummary, notMeasuredHere, sameShape, shapeWords, transferFinding, type TransferCell, type TransferReport, type ZooEntry } from '../models/zoo';
@@ -306,8 +307,26 @@ export function mountModelPanel(): void {
   const zooList = h('ul', { class: 'zoo', 'aria-label': 'Pretrained models' });
   const zooStatus = h('div', { class: 'zoo-empty' });
 
-  const transferBlock = (input: Shape): string | null =>
-    sameShape(input, store.input) ? null : `Needs ${shapeWords(input)} input`;
+  /**
+   * Why Transfer is unavailable, in a few words, or null. A point model trained on other features
+   * can still transfer (the page switches to its features) unless this dataset lacks them.
+   */
+  const transferBlock = (input: Shape, features?: FeatureId[]): string | null => {
+    if (store.info.kind === 'points' && features) {
+      return transferProblem({ name: 'This model', arch: { input, layers: [], classes: store.classes }, features }) ? 'Needs features this dataset lacks' : null;
+    }
+    return sameShape(input, store.input) ? null : `Needs ${shapeWords(input)} input`;
+  };
+  /** Features a saved point model was trained on (read from its stored file). */
+  const savedFeatures = (id: string): FeatureId[] | undefined => {
+    try {
+      const raw = localStorage.getItem(savedKey(id));
+      const f = raw ? (JSON.parse(raw) as { features?: unknown }).features : undefined;
+      return Array.isArray(f) ? (f as FeatureId[]) : undefined;
+    } catch {
+      return undefined;
+    }
+  };
 
   /** Re-renders replace the buttons; keep keyboard focus on the one that was in use. */
   const keepFocus = (fn: () => void) => {
@@ -635,7 +654,7 @@ export function mountModelPanel(): void {
     savedEmpty.textContent = list.length ? '' : 'Nothing saved in this browser yet.';
     savedEmpty.hidden = !!list.length;
     for (const e of list) {
-      const why = transferBlock(e.input);
+      const why = transferBlock(e.input, savedFeatures(e.id));
       const isArmed = armed === e.id;
       const del = h(
         'button',
@@ -688,7 +707,7 @@ export function mountModelPanel(): void {
     choice.hidden = !opened;
     if (opened) {
       const o = opened;
-      const why = transferBlock(o.file.arch.input);
+      const why = transferBlock(o.file.arch.input, o.file.features);
       const acc = o.file.meta?.testAccuracy;
       choice.append(
         h('p', { class: 'model-choice-text' }, h('b', null, o.file.name), ` (${o.fileName}): trained on ${datasetName(o.file.dataset)}, ${shapeWords(o.file.arch.input)} input, ${layersSummary(o.file.arch)}${acc !== undefined ? `, ${pct(acc)} test when saved` : ''}.`),
