@@ -2,8 +2,8 @@ import './modelPanel.css';
 import { exportModel, loadModel, readModel, setFrozen, transferModel } from '../actions';
 import { datasetInfo, noun, type DatasetId } from '../data/datasets';
 import type { ModelFile } from '../models/format';
-import { controlFinding, fetchIndex, fetchModel, fetchTransfer, fmtBytes, layersSummary, sameShape, shapeWords, transferFinding, type TransferCell, type TransferReport, type ZooEntry } from '../models/zoo';
-import { blockSignature, type Network } from '../nn/network';
+import { controlFinding, fetchIndex, fetchModel, fetchTransfer, fmtBytes, layersSummary, notMeasuredHere, sameShape, shapeWords, transferFinding, type TransferCell, type TransferReport, type ZooEntry } from '../models/zoo';
+import { blockSignature, matchBlocks, type Network } from '../nn/network';
 import type { Shape } from '../nn/types';
 import { store } from '../store';
 import { $, clear, h, int, pct } from './dom';
@@ -29,8 +29,11 @@ interface Message {
 
 interface Provenance {
   origin: Origin;
-  /** Blocks of the current network that still hold the origin's weights (after keep-weights edits). */
-  kept: number | null;
+  /**
+   * Per block of the current network: does it still hold the origin's weights (carried through
+   * keep-weights edits)? Null when every block does.
+   */
+  kept: boolean[] | null;
 }
 
 /** A model saved in this browser (the list lives under one key, each file under its own). */
@@ -90,17 +93,20 @@ const slug = (s: string) =>
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
-/** How many blocks of `next` hold exactly the weights of the same block in `prev`. */
-function keptBlocks(prev: Network, next: Network): number {
-  let n = 0;
-  next.blocks.forEach((b, i) => {
-    const p = prev.blocks[i];
-    if (!p || blockSignature(p) !== blockSignature(b)) return;
-    for (let j = 0; j < b.W.length; j++) if (b.W[j] !== p.W[j]) return;
-    for (let j = 0; j < b.b.length; j++) if (b.b[j] !== p.b[j]) return;
-    n++;
+/**
+ * Per block of `next`: the block of `prev` whose exact weights it holds (the block it continues,
+ * as matchBlocks pairs them after an edit), or null when its weights are new.
+ */
+function carriedFrom(prev: Network, next: Network): (number | null)[] {
+  const src = matchBlocks(prev.arch, next.arch);
+  return next.blocks.map((b, i) => {
+    const j = src[i];
+    const p = j === null ? undefined : prev.blocks[j];
+    if (!p || blockSignature(p) !== blockSignature(b)) return null;
+    for (let k = 0; k < b.W.length; k++) if (b.W[k] !== p.W[k]) return null;
+    for (let k = 0; k < b.b.length; k++) if (b.b[k] !== p.b[k]) return null;
+    return j;
   });
-  return n;
 }
 
 /** "Conv layers", "Conv and dense layers" or "Dense layers", for the copied blocks. */
@@ -108,6 +114,16 @@ function copiedWords(net: Network, copied: boolean[]): string {
   const kinds = new Set(net.blocks.filter((_, i) => copied[i]).map((b) => b.kind));
   if (kinds.size === 2) return 'Conv and dense layers';
   return kinds.has('conv') ? 'Conv layers' : 'Dense layers';
+}
+
+/** The blocks that are not copied, in words: "new output layer" or "new dense and output layers". */
+function freshWords(net: Network, copied: boolean[]): string {
+  const last = net.blocks.length - 1;
+  const kinds = [...new Set(net.blocks.map((b, i) => (copied[i] ? null : i === last ? 'output' : b.kind)).filter((k) => k !== null))];
+  kinds.sort((a, b) => ['conv', 'dense', 'output'].indexOf(a) - ['conv', 'dense', 'output'].indexOf(b));
+  const n = net.blocks.filter((_, i) => !copied[i]).length;
+  const list = kinds.length > 1 ? `${kinds.slice(0, -1).join(', ')} and ${kinds[kinds.length - 1]}` : kinds[0];
+  return `new ${list} layer${n === 1 ? '' : 's'}`;
 }
 
 export function mountModelPanel(): void {
@@ -149,12 +165,14 @@ export function mountModelPanel(): void {
         return `${o.name}, saved in this browser${elsewhere ? `, trained on ${datasetName(o.dataset)}` : ''}${acc}`;
       }
       case 'transfer': {
-        const copied = o.copied.map((c, i) => c && i < store.net.blocks.length);
+        // `copied` follows the layers through keep-weights edits (see onModel), so the words say
+        // which layers still hold transferred weights and how many of those are frozen.
+        const copied = store.net.blocks.map((_, i) => !!o.copied[i]);
         const nFrozen = copied.filter((c, i) => c && store.isFrozen(i)).length;
         const nCopied = copied.filter(Boolean).length;
         const state = nFrozen === nCopied ? 'frozen' : nFrozen === 0 ? 'unfrozen' : 'partly frozen';
         const where = o.source === 'zoo' ? o.name : o.source === 'file' ? `${o.name} (file ${o.label})` : `${o.name} (saved in this browser)`;
-        return `${copiedWords(store.net, copied)} transferred from ${where}, ${state}; new output layer for ${o.to}`;
+        return `${copiedWords(store.net, copied)} transferred from ${where}, ${state}; ${freshWords(store.net, copied)} for ${o.to}`;
       }
     }
   };
@@ -162,8 +180,10 @@ export function mountModelPanel(): void {
   const renderProv = () => {
     let text = originText(prov.origin);
     const total = store.net.blocks.length;
-    if (prov.kept !== null && prov.kept < total && (prov.origin.kind !== 'random' || store.keepWeights)) {
-      text = prov.origin.kind === 'random' ? `${text}; ${prov.kept} of ${total} layers kept their weights through an edit` : `${prov.kept} of ${total} layers from: ${text}`;
+    const kept = prov.kept ? prov.kept.filter(Boolean).length : total;
+    // A transfer's own words already say which layers it supplied.
+    if (kept < total && prov.origin.kind !== 'transfer' && (prov.origin.kind !== 'random' || store.keepWeights)) {
+      text = prov.origin.kind === 'random' ? `${text}; ${kept} of ${total} layers kept their weights through an edit` : `${kept} of ${total} layers from: ${text}`;
     }
     const s = store.status;
     if (s && s.seen > 0) text += `, then trained here for ${s.epochFraction.toFixed(2)} epochs`;
@@ -181,10 +201,18 @@ export function mountModelPanel(): void {
   const onModel = () => {
     if (busy) return;
     if (store.version !== provVersion) {
-      const kept = keptBlocks(lastNet, store.net);
-      const total = store.net.blocks.length;
-      if (kept === 0) prov = { origin: { kind: 'random' }, kept: null };
-      else if (kept < total) prov = { origin: prov.origin, kept: Math.min(kept, prov.kept ?? total) };
+      // Follow every block through the edit: which old block's weights does it still hold?
+      const from = carriedFrom(lastNet, store.net);
+      const was = prov.kept ?? lastNet.blocks.map(() => true);
+      const kept = from.map((j) => j !== null && was[j]);
+      let origin = prov.origin;
+      if (origin.kind === 'transfer') {
+        const copied = origin.copied;
+        origin = { ...origin, copied: from.map((j, i) => kept[i] && j !== null && !!copied[j]) };
+        // Nothing transferred is left: what remains was trained here from a random start.
+        if (!origin.copied.some(Boolean)) origin = { kind: 'random' };
+      }
+      prov = kept.some(Boolean) ? { origin, kept: kept.every(Boolean) ? null : kept } : { origin: { kind: 'random' }, kept: null };
       provVersion = store.version;
       lastNet = store.net;
       // A rebuild from elsewhere (an edit, a reset, another dataset) makes the last message stale.
@@ -402,39 +430,45 @@ export function mountModelPanel(): void {
         null,
         'A ',
         h('b', null, 'frozen'),
-        ' layer keeps its weights while the rest of the network trains, which is quick: no gradients have to flow into it. Transferred layers start frozen, so at first only the new output layer learns. Unlock a layer with its lock button under Layers to ',
+        ' layer keeps its weights while the rest of the network trains, which is quick: no gradients have to flow into it. Transferred layers start frozen, so at first only the new output layer learns. To ',
         h('b', null, 'fine-tune'),
-        ' it too.',
+        ' a layer as well, unfreeze it: click its Frozen button under Layers.',
       ),
     );
     const rows = transfer?.rows ?? [];
     if (!transfer || !rows.length) return;
-    // Headline: the measurement closest to what the reader is looking at.
-    const r = rows.find((x) => x.to === store.dataset) ?? rows[0];
-    const control = controlFinding(r, short(zooSet(r.from)), short(r.to));
-    explain.append(h('div', { class: 'model-measured' }, h('p', null, transferFinding(r, zooName(r.from), datasetName(r.to), transfer.checkpoints?.[0])), control ? h('p', null, control) : null));
+    // Headline: the measurement on the dataset the reader is on. Where none was made (CIFAR-10,
+    // point data), say so and where transfer was measured, rather than quote another dataset's row.
+    const r = rows.find((x) => x.to === store.dataset) ?? null;
+    if (r) {
+      const control = controlFinding(r, short(zooSet(r.from)), short(r.to));
+      explain.append(h('div', { class: 'model-measured' }, h('p', null, transferFinding(r, zooName(r.from), datasetName(r.to), transfer.checkpoints?.[0])), control ? h('p', null, control) : null));
+    } else {
+      const pairs = [...new Map(rows.map((x) => [`${x.from}>${x.to}`, [datasetName(zooSet(x.from) as DatasetId), datasetName(x.to)] as [string, string]])).values()];
+      explain.append(h('div', { class: 'model-measured', id: 'transfer-not-here' }, h('p', null, notMeasuredHere(store.info.name, store.input, zoo, pairs))));
+    }
 
     const cols: { key: 'scratch' | 'frozen' | 'convFrozen' | 'fineTune'; label: string; title: string }[] = [
       { key: 'scratch', label: 'Scratch', title: 'Random starting weights; every layer learns' },
       { key: 'frozen', label: 'Frozen', title: 'What Transfer does: every copied layer frozen; only the new output layer learns' },
-      { key: 'convFrozen', label: 'Conv frozen', title: 'Transfer, then unlock the dense layer: only the conv layers stay frozen' },
-      { key: 'fineTune', label: 'Fine-tuned', title: 'Transfer and train the new output layer, then unlock everything and train on at a lower rate' },
+      { key: 'convFrozen', label: 'Conv frozen', title: 'Transfer, then unfreeze the dense layer: only the conv layers stay frozen' },
+      { key: 'fineTune', label: 'Fine-tuned', title: 'Transfer and train the new output layer, then unfreeze everything and train on at a lower rate' },
     ];
     // One group of rows per pair of datasets ("MNIST → Fashion"), one row per training-set size.
     const pairs = [...new Set(rows.map((x) => `${x.from}>${x.to}`))].map((key) => rows.filter((x) => `${x.from}>${x.to}` === key));
-    const table = (caption: string, value: (c: TransferCell) => number | undefined) =>
+    const table = (caption: string, value: (c: TransferCell) => number | undefined, columns = cols) =>
       h(
         'table',
         { class: 'transfer-table' },
         h('caption', null, caption),
-        h('thead', null, h('tr', null, h('th', { scope: 'col' }, 'Images'), ...cols.map((c) => h('th', { scope: 'col', class: 'num', title: c.title }, c.label)))),
+        h('thead', null, h('tr', null, h('th', { scope: 'col' }, 'Images'), ...columns.map((c) => h('th', { scope: 'col', class: 'num', title: c.title }, c.label)))),
         ...pairs.map((group) =>
           h(
             'tbody',
             null,
-            h('tr', { class: 'transfer-group' }, h('th', { scope: 'rowgroup', colspan: String(cols.length + 1) }, `${short(zooSet(group[0].from))} → ${short(group[0].to)}`)),
+            h('tr', { class: 'transfer-group' }, h('th', { scope: 'rowgroup', colspan: String(columns.length + 1) }, `${short(zooSet(group[0].from))} → ${short(group[0].to)}`)),
             ...group.map((row) => {
-              const vals = cols.map((c) => value(row[c.key]));
+              const vals = columns.map((c) => value(row[c.key]));
               const best = Math.max(...vals.map((v) => v ?? -1));
               return h(
                 'tr',
@@ -448,6 +482,11 @@ export function mountModelPanel(): void {
       );
     const seen = rows[0].train * rows[0].epochs;
     const cp = transfer.checkpoints?.[0];
+    // Fine-tuning unfreezes the copied layers only after half the images, so early on it is the very
+    // same run as Frozen: leave its column out of the early table rather than repeat those numbers.
+    const early = (c: TransferCell) => c.early?.[0]?.mean;
+    const fineIsFrozen = rows.every((x) => early(x.fineTune) !== undefined && early(x.fineTune) === early(x.frozen));
+    const earlyCols = fineIsFrozen ? cols.filter((c) => c.key !== 'fineTune') : cols;
     const details = h(
       'details',
       { class: 'transfer-details', open: detailsOpen },
@@ -456,11 +495,18 @@ export function mountModelPanel(): void {
         'div',
         { class: 'transfer-body' },
         h('div', { class: 'transfer-wrap' }, table(`Test accuracy after ${int(seen)} training images`, (c) => c.mean)),
-        cp ? h('div', { class: 'transfer-wrap' }, table(`After only the first ${int(cp)} training images`, (c) => c.early?.[0]?.mean)) : null,
+        cp
+          ? h(
+              'div',
+              { class: 'transfer-wrap' },
+              table(`After only the first ${int(cp)} training images`, early, earlyCols),
+              fineIsFrozen ? h('p', { class: 'hint transfer-note', id: 'transfer-early-note' }, `No Fine-tuned column here: fine-tuning unfreezes the copied layers only after ${int(seen / 2)} images, so until then it is the same run as Frozen.`) : null,
+            )
+          : null,
         h(
           'p',
           { class: 'hint' },
-          'Frozen: what Transfer does. Conv frozen: Transfer, then unlock the dense layer. Fine-tuned: Transfer, train, then unlock everything at a lower learning rate. ',
+          'Frozen: what Transfer does. Conv frozen: Transfer, then unfreeze the dense layer. Fine-tuned: Transfer, train, then unfreeze everything at a lower learning rate. ',
           `Images: the first N of the training set, shown again and again until ${int(seen)} have gone by. Means of ${transfer.seeds} runs, each tested on the ${int(10000)} official test images, with Adam at this page's default settings. Both source networks are the small CNN preset, trained on all 60,000 images of their own dataset.`,
         ),
       ),

@@ -275,6 +275,12 @@
   font-family: var(--sans);
 }
 
+/* Why the early table has no Fine-tuned column. */
+.transfer-note {
+  margin-top: 6px;
+  font-size: 12px;
+}
+
 /* ── Your model ── */
 
 .model-yours {

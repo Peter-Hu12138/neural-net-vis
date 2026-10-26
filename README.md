@@ -23,7 +23,7 @@ which inputs drive a prediction, and how each layer arranges the data.
 The strip under the training bar switches dataset. For point data it also sets the noise, the
 number of points, the share used for training and a fresh draw, and it picks the network's input
 features. As in the TensorFlow Playground, these can be the raw coordinates or also squares, products
-and sines of them (x₁², x₁x₂, sin x₁, …). With the right features even a network with no hidden
+and sines of them (x₁², x₁x₂, sin πx₁, …). With the right features even a network with no hidden
 layer separates the circle. **Train on** limits any dataset to its first few examples (for MNIST,
 200, 1,000 or 5,000), which shows overfitting and why transfer learning helps.
 

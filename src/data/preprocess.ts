@@ -13,25 +13,48 @@
 export const SIDE = 28;
 const BOX = 20;
 
+/** Median of the values of a w × h image along its border. */
+function borderMedian(v: ArrayLike<number>, w: number, h: number): number {
+  const border: number[] = [];
+  for (let x = 0; x < w; x++) border.push(v[x], v[(h - 1) * w + x]);
+  for (let y = 0; y < h; y++) border.push(v[y * w], v[y * w + w - 1]);
+  border.sort((p, q) => p - q);
+  return border[border.length >> 1];
+}
+
+/**
+ * The opacity of an image's background, read from its border (0 = transparent, 1 = opaque), and
+ * whether that background is transparent: then the image's own alpha channel says where the
+ * drawing or the object is, whatever its colour (white ink, a pale cut-out).
+ */
+function backdropAlpha(data: ArrayLike<number>, w: number, h: number): { alpha: number; clear: boolean } {
+  const a = new Float32Array(w * h);
+  for (let i = 0; i < a.length; i++) a[i] = data[4 * i + 3] / 255;
+  const alpha = borderMedian(a, w, h);
+  return { alpha, clear: alpha < 0.5 };
+}
+
 /**
  * Ink intensity in [0, 1] (1 = full ink) from RGBA pixels. The background colour is taken
- * from the border, so dark-on-light photos and light-on-dark images both work.
+ * from the border, so dark-on-light photos and light-on-dark images both work. On a transparent
+ * background the ink is wherever the image is opaque, so white or pale ink works as well as dark.
  */
 export function inkFromRGBA(data: Uint8ClampedArray, w: number, h: number): Float32Array {
-  const lum = new Float32Array(w * h);
-  for (let i = 0; i < w * h; i++) {
-    const a = data[4 * i + 3] / 255;
-    const l = (0.299 * data[4 * i] + 0.587 * data[4 * i + 1] + 0.114 * data[4 * i + 2]) / 255;
-    lum[i] = l * a + (1 - a); // transparent pixels read as white paper
-  }
-  const border: number[] = [];
-  for (let x = 0; x < w; x++) border.push(lum[x], lum[(h - 1) * w + x]);
-  for (let y = 0; y < h; y++) border.push(lum[y * w], lum[y * w + w - 1]);
-  border.sort((p, q) => p - q);
-  const bg = border[border.length >> 1];
-  const darkInk = bg > 0.5;
   const ink = new Float32Array(w * h);
-  for (let i = 0; i < ink.length; i++) ink[i] = Math.max(0, darkInk ? bg - lum[i] : lum[i] - bg);
+  const back = backdropAlpha(data, w, h);
+  if (back.clear) {
+    for (let i = 0; i < ink.length; i++) ink[i] = Math.max(0, data[4 * i + 3] / 255 - back.alpha);
+  } else {
+    const lum = new Float32Array(w * h);
+    for (let i = 0; i < w * h; i++) {
+      const a = data[4 * i + 3] / 255;
+      const l = (0.299 * data[4 * i] + 0.587 * data[4 * i + 1] + 0.114 * data[4 * i + 2]) / 255;
+      lum[i] = l * a + (1 - a); // the odd transparent pixel reads as white paper
+    }
+    const bg = borderMedian(lum, w, h);
+    const darkInk = bg > 0.5;
+    for (let i = 0; i < ink.length; i++) ink[i] = Math.max(0, darkInk ? bg - lum[i] : lum[i] - bg);
+  }
 
   // Contrast stretch between a noise floor and a robust maximum.
   const sorted = Float32Array.from(ink).sort();
@@ -149,11 +172,11 @@ export interface Box {
   y1: number;
 }
 
-/** Red, green and blue of pixel `i` in [0, 1], composited on white paper when transparent. */
-function rgbAt(img: ImageLike, i: number, out: number[]): number[] {
+/** Red, green and blue of pixel `i` in [0, 1], composited on a grey of `paper` (1 = white) when transparent. */
+function rgbAt(img: ImageLike, i: number, out: number[], paper = 1): number[] {
   const d = img.data;
   const a = d[4 * i + 3] / 255;
-  for (let ch = 0; ch < 3; ch++) out[ch] = (d[4 * i + ch] / 255) * a + (1 - a);
+  for (let ch = 0; ch < 3; ch++) out[ch] = (d[4 * i + ch] / 255) * a + paper * (1 - a);
   return out;
 }
 
@@ -246,34 +269,45 @@ export interface FashionResult {
  * from the border; a pixel's value is how far it is from that colour, so the item comes out light
  * on a black background whatever the backdrop (Fashion-MNIST negates studio photos taken on
  * white). The item's box is cropped, its longest edge scaled to 28 px and the result centred.
+ * A cut-out on a transparent background is found by its alpha channel, and laid on black when it
+ * is mostly light (on white when dark), so a pale item stands out as it would on a dark backdrop.
  */
 export function toFashion(img: ImageLike): FashionResult {
   const { width: w, height: h } = img;
   const n = w * h;
+  const d = img.data;
+  const back = backdropAlpha(d, w, h);
+  let paper = 1;
+  if (back.clear) {
+    // The item's mean brightness, weighted by how opaque each pixel is beyond the backdrop.
+    let sum = 0;
+    let weight = 0;
+    for (let i = 0; i < n; i++) {
+      const a = Math.max(0, d[4 * i + 3] / 255 - back.alpha);
+      sum += a * (0.299 * d[4 * i] + 0.587 * d[4 * i + 1] + 0.114 * d[4 * i + 2]) / 255;
+      weight += a;
+    }
+    if (weight > 0 && sum / weight > 0.5) paper = 0;
+  }
   const r = new Float32Array(n);
   const g = new Float32Array(n);
   const b = new Float32Array(n);
   const px = [0, 0, 0];
   for (let i = 0; i < n; i++) {
-    rgbAt(img, i, px);
+    rgbAt(img, i, px, paper);
     r[i] = px[0];
     g[i] = px[1];
     b[i] = px[2];
   }
-  const median = (a: Float32Array) => {
-    const border: number[] = [];
-    for (let x = 0; x < w; x++) border.push(a[x], a[(h - 1) * w + x]);
-    for (let y = 0; y < h; y++) border.push(a[y * w], a[y * w + w - 1]);
-    border.sort((p, q) => p - q);
-    return border[border.length >> 1];
-  };
-  const bg = [median(r), median(g), median(b)];
+  const bg = [borderMedian(r, w, h), borderMedian(g, w, h), borderMedian(b, w, h)];
   const bgLum = 0.299 * bg[0] + 0.587 * bg[1] + 0.114 * bg[2];
   const range = Math.max(bgLum, 1 - bgLum, 0.25);
   const mask = new Uint8Array(n);
   const values = new Float32Array(n);
   for (let i = 0; i < n; i++) {
-    const dist = Math.max(Math.abs(r[i] - bg[0]), Math.abs(g[i] - bg[1]), Math.abs(b[i] - bg[2]));
+    // On a transparent background the item is where the image is opaque, even where its colour
+    // happens to match the backdrop it is laid on.
+    const dist = back.clear ? d[4 * i + 3] / 255 - back.alpha : Math.max(Math.abs(r[i] - bg[0]), Math.abs(g[i] - bg[1]), Math.abs(b[i] - bg[2]));
     if (dist > 0.1) mask[i] = 1;
     const lum = 0.299 * r[i] + 0.587 * g[i] + 0.114 * b[i];
     values[i] = Math.abs(lum - bgLum) / range;

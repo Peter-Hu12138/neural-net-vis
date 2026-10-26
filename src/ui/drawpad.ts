@@ -138,7 +138,7 @@ export function mountDrawpad(): void {
   const photoDrop = h('label', { class: 'drop dp-photo-drop', for: 'photo-input' }, h('b', null, 'Drop, paste or choose a photo'), h('span', { class: 'hint' }, 'It is cropped to its centre square and averaged down to 32×32 pixels.'));
   const randomBtn = h('button', { type: 'button', class: 'btn btn-sm', id: 'photo-random' }, 'Random test image');
   const flipBtn = h('button', { type: 'button', class: 'btn btn-sm', id: 'photo-flip', 'aria-pressed': 'false', title: 'Mirror the input left to right' }, 'Flip ↔');
-  const resetBtn = h('button', { type: 'button', class: 'btn btn-sm', id: 'photo-reset', disabled: true, title: 'Undo flip, brightness and contrast' }, 'Undo nudges');
+  const resetBtn = h('button', { type: 'button', class: 'btn btn-sm', id: 'photo-reset', disabled: true, title: 'Undo flip, brightness and contrast' }, 'Undo changes');
   const origCanvas = h('canvas', { class: 'dp-orig', role: 'img', 'aria-label': 'The original image' }) as HTMLCanvasElement;
   const inputCanvas = h('canvas', { class: 'dp-input', role: 'img', 'aria-label': 'The network input, pixel for pixel' }) as HTMLCanvasElement;
   const origCap = h('figcaption', null, 'Original');

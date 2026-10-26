@@ -2,7 +2,7 @@
 
 Section 01 of the page has three views, chosen with the tabs under the **Weights** line:
 
-- **Layers**: the architecture builder, with a lock button on every layer to freeze it.
+- **Layers**: the architecture builder, with a **Freeze** button on every layer.
 - **Pretrained**: a small model zoo of four networks trained in advance with the app's own engine
   on the full original datasets. **Load** puts one on the page exactly as it was trained.
   **Transfer** copies its hidden layers into a network for the current dataset, freezes them, and
@@ -23,7 +23,11 @@ The **Weights** line above the tabs always says where the current weights came f
 Test accuracy is measured on the full official test set (10,000 images for each dataset) with the
 weights exactly as stored. The page evaluates on its own test subset, the first 2,000 official test
 images, where the numbers come out slightly differently: 98.25% (LeNet), 98.55% (MNIST small CNN),
-90.90% (Fashion-MNIST small CNN) and 70.75% (CIFAR-10 CNN).
+90.90% (Fashion-MNIST small CNN) and 70.60% (CIFAR-10 CNN). The page's CIFAR-10 test images are
+JPEG-compressed (`public/data/cifar10-test.jpg`, on average 2.6 of 255 off per value), which
+changes 69 of the network's 2,000 answers: on the raw first 2,000 test images the same weights get
+1,415 right instead of 1,412, 70.75%, the figure `scripts/pretrain.ts` prints. The MNIST and
+Fashion-MNIST images are lossless PNG, so their figures match the script's.
 
 `mnist-lenet` and `mnist-cnn` have the layers of the builder's LeNet-ish and Small CNN presets, so
 after **Load** every builder control shows a familiar network. `mnist-cnn` and `fashion-cnn` share
@@ -110,15 +114,17 @@ The five conditions, each as it can be done on the page:
 3. **Transfer, conv frozen:** copy every hidden layer, freeze only the two convolution layers; the
    dense layer and the new output layer learn. On the page: Transfer, then **Unfreeze Dense 3**.
 4. **Transfer, then fine-tune:** condition 2 for the first 10,000 images, then every layer unfrozen
-   for the other 10,000 at learning rate 0.001. On the page: Transfer, train, unlock every layer,
+   for the other 10,000 at learning rate 0.001. On the page: Transfer, train, unfreeze every layer,
    lower the learning rate, train on.
-5. **Control, random conv frozen:** like condition 3, but the frozen convolution layers keep their
-   random starting weights instead of the copied ones. It shows how much the copied filters
-   themselves are worth.
+5. **Control, nothing copied:** trained like condition 3 (the convolution layers frozen, the dense
+   layer and the new output layer learning), but nothing is copied: the frozen convolution layers
+   keep their random starting weights, and the dense layer starts from random weights too. It shows
+   how much the copied layers are worth together; since it changes the filters and the dense
+   layer's start at once, it cannot say which of the two matters.
 
 ### Test accuracy after 20,000 training images
 
-| From → to | Images | From scratch | Transfer, all frozen | Transfer, conv frozen | Transfer, then fine-tune | Control: random conv frozen |
+| From → to | Images | From scratch | Transfer, all frozen | Transfer, conv frozen | Transfer, then fine-tune | Control: nothing copied |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | MNIST → Fashion-MNIST | 1,000 | 81.9% (80.9–82.4) | 63.6% (63.0–64.0) | 82.0% (81.5–82.4) | 81.2% (81.1–81.3) | 81.2% (80.1–82.6) |
 | MNIST → Fashion-MNIST | 200 | 76.0% (75.2–77.1) | 58.8% (58.7–59.2) | 75.0% (74.5–75.4) | 74.6% (73.7–75.4) | 76.6% (75.4–78.1) |
@@ -127,7 +133,7 @@ The five conditions, each as it can be done on the page:
 
 ### Early on: after the first 1,000 and 5,000 training images
 
-| From → to | Images | From scratch | Transfer, all frozen | Transfer, conv frozen | Control: random conv frozen |
+| From → to | Images | From scratch | Transfer, all frozen | Transfer, conv frozen | Control: nothing copied |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | MNIST → Fashion-MNIST | 1,000 | 68.2% → 78.8% | 14.5% → 51.6% | 67.4% → 79.8% | 66.4% → 75.6% |
 | MNIST → Fashion-MNIST | 200 | 67.2% → 75.4% | 16.0% → 50.5% | 63.4% → 73.6% | 65.0% → 73.5% |
@@ -138,7 +144,7 @@ The five conditions, each as it can be done on the page:
 
 ### Training time per run (20,000 images, evaluations excluded)
 
-| From → to | Images | From scratch | Transfer, all frozen | Transfer, conv frozen | Transfer, then fine-tune | Control: random conv frozen |
+| From → to | Images | From scratch | Transfer, all frozen | Transfer, conv frozen | Transfer, then fine-tune | Control: nothing copied |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | MNIST → Fashion-MNIST | 1,000 | 28.7 s | 12.9 s | 13.7 s | 21.8 s | 14.2 s |
 | MNIST → Fashion-MNIST | 200 | 27.1 s | 11.8 s | 12.0 s | 19.2 s | 12.6 s |
@@ -155,14 +161,16 @@ The five conditions, each as it can be done on the page:
    81.9% on Fashion-MNIST from 1,000 images; at most 1.2 points behind elsewhere) **in under half the
    training time** (13 s against 28 s per run), because no gradients flow into the frozen
    convolutions.
-3. **The copied filters themselves carry little here.** Random, untrained convolution filters,
-   frozen, do about as well: within 1.6 points of the copied ones either way. A dense layer that
-   learns can do a lot with random features. So the time saved comes from freezing, not from what
-   the filters learned.
+3. **What is copied carries little here.** The control, with nothing copied (random, untrained
+   convolution filters, frozen, and a dense layer that learns from random weights), does about as
+   well: within 1.6 points of the copied layers either way. A dense layer that learns can do a lot
+   with random features. So the time saved comes from freezing, not from what the source network
+   learned. (The control changes the filters and the dense layer's starting weights together, so
+   it does not tell the two apart.)
 4. **No head start.** After the first 1,000 training images, the transferred network is level with
    training from scratch on Fashion-MNIST (67.4% against 68.2%) and behind it on MNIST (59.3% against
-   75.3%; random filters reach 72.4%): filters learned on clothing slow down the first steps on
-   digits.
+   75.3%; the control, with nothing copied, reaches 72.4%): layers learned on clothing slow down the
+   first steps on digits.
 5. **Fine-tuning everything does not help with this little data**: it ends 0.3–0.8 points below
    keeping the convolutions frozen.
 
@@ -187,18 +195,24 @@ conditions lower still.
   the button is disabled and the row says what input the model needs. The copied layers are frozen,
   the output layer is new, and the **Layers** tab says how many layers are frozen. When the copied
   layers include a dense layer, the page offers to unfreeze it, because of the measurements above.
-- **Freeze** (the lock button on each layer under **Layers**, the output layer included) holds a
-  layer's weights fixed while the rest trains. A frozen layer is hatched and its lock is closed. The
+- **Freeze** (the button on each layer under **Layers**, the output layer included) holds a layer's
+  weights fixed while the rest trains. A frozen layer is hatched and its button reads **Frozen**;
+  click it again to unfreeze the layer. The
   engine skips the gradients of frozen weights, and stops backpropagating below the lowest layer that
   still learns, which is why training a new head is fast.
 - **Keep trained weights when editing**: with it on, an edit to the architecture keeps the weights
-  (and freeze setting) of every layer whose shape did not change; changed layers start fresh. With
-  it off, every edit restarts from random weights.
+  (and freeze setting) of every layer whose size and input size did not change, even when its
+  activation function did. Layers are followed through the edit, not matched by position: removing
+  a hidden layer drops that layer's weights; the layer above it starts fresh when its input size
+  changes; the output layer keeps its weights as long as its own shape is unchanged. A layer whose
+  size changes starts fresh. With the option off, every edit restarts from random weights.
 - The line under **Weights** says where the current weights came from, for example "Random start
   (seed 1)", "MNIST LeNet, pretrained (98.9% test)", "MNIST LeNet, pretrained on MNIST digits (98.9%
   test there)" after a switch to another dataset, "Conv and dense layers transferred from MNIST
   small CNN, frozen; new output layer for Fashion-MNIST", or "3 of 4 layers from: …" after an edit,
-  followed by how long they have been trained on the page.
+  followed by how long they have been trained on the page. After a transfer the line follows the
+  layers through edits: with the dense layer widened, it reads "Conv layers transferred from MNIST
+  small CNN, frozen; new dense and output layers for Fashion-MNIST".
 - **Save and open**: Save to file downloads the current network as JSON; Open file reads one back
   and asks whether to load it as it is or transfer it; Save in this browser keeps it in
   `localStorage` (a page gets about 5 MB; when it is full the page says so and suggests deleting a
@@ -212,15 +226,25 @@ conditions lower still.
   "version": 1,
   "name": "MNIST LeNet",
   "dataset": "mnist",                // decides the class names (and, for points, the features)
-  "features": ["x1", "x2"],          // point datasets only
+  "features": ["x1", "x2"],          // point datasets only, one per input of the first layer
   "arch": { "input": { "c": 1, "h": 28, "w": 28 }, "layers": [/* LayerSpec */], "classes": 10 },
   "weights": ["<base64 float32>", …], // [W0, b0, W1, b1, …], little-endian
-  "frozen": [false, false, false, false],
+  "frozen": [false, false, false, false], // optional: one per layer, the output layer included
   "meta": { "description": "…", "trainedOn": "…", "samples": 120000, "epochs": 2,
             "testAccuracy": 0.9889, "created": "2026-10-08T20:33:50.412Z" }
 }
 ```
 
-Base64 adds a third to the 4 bytes per weight, so a file takes about 5.3 bytes per parameter. The
-page refuses files whose architecture is invalid, whose weight counts do not match the
-architecture, or that contain weights that are not finite numbers, and says which.
+Base64 adds a third to the 4 bytes per weight, so a file takes about 5.3 bytes per parameter.
+Before anything on the page changes, Open file, Load and Transfer check every field and refuse,
+saying what is wrong, a file:
+
+- with no name, or a dataset this page does not have;
+- whose architecture is invalid, or does not fit its dataset (input shape, number of classes);
+- whose point features are missing, unknown, repeated, or not one per input of the first layer
+  (and an image model that lists features);
+- whose weights are not base64 text, not whole float32 values, of the wrong count or size, or not
+  finite numbers;
+- whose frozen list is not one true or false per layer;
+- whose meta data hold the wrong kind of value (a test accuracy that is not a number between 0
+  and 1, for example).

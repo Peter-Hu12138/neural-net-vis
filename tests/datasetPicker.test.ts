@@ -42,6 +42,40 @@ describe('dataset strip helpers', () => {
     }
   });
 
+  it('ships a 2 × 2 preview mosaic of real samples with every image dataset', () => {
+    for (const d of DATASETS.filter((x) => x.kind === 'image')) {
+      const m = /^data:image\/(png|jpeg);base64,(.+)$/.exec(d.preview ?? '');
+      expect(m, d.id).not.toBeNull();
+      const bytes = Buffer.from(m![2], 'base64');
+      const { c, h, w } = d.image!.shape;
+      let width = 0;
+      let height = 0;
+      let channels = 0;
+      if (m![1] === 'png') {
+        expect(bytes.subarray(1, 4).toString()).toBe('PNG');
+        width = bytes.readUInt32BE(16);
+        height = bytes.readUInt32BE(20);
+        channels = bytes[25] === 0 ? 1 : 3; // colour type 0: grey
+      } else {
+        // The first start-of-frame marker holds the size and the number of components.
+        let at = 2;
+        while (bytes[at + 1] !== 0xc0 && bytes[at + 1] !== 0xc2) at += 2 + bytes.readUInt16BE(at + 2);
+        height = bytes.readUInt16BE(at + 5);
+        width = bytes.readUInt16BE(at + 7);
+        channels = bytes[at + 9];
+      }
+      expect([width, height, channels], d.id).toEqual([2 * w, 2 * h, c]);
+      // A few kilobytes at most: it is part of the page's script.
+      expect(d.preview!.length, d.id).toBeLessThan(6_000);
+    }
+    // Point datasets draw theirs from the generator.
+    for (const d of DATASETS.filter((x) => x.kind === 'points')) expect(d.preview).toBeUndefined();
+  });
+
+  it('names the groups with one spelling of 2-D and 3-D', () => {
+    expect([...new Set(DATASETS.map((d) => d.group))]).toEqual(['Images', 'Points in 2-D', 'Points in 3-D']);
+  });
+
   it('projects 3-D points with the vertical axis up', () => {
     const [u0, v0] = picker.project3(0, 0, 0);
     expect(u0).toBeCloseTo(0);
