@@ -611,7 +611,7 @@ With ReLU, the result depended on how many units happened to die. The Leaky ReLU
 
 ### Review of the datasets release
 
-Six reviewer agents, one lens each, examined the merged release: data correctness; decision boundaries; models, transfer and freezing; sections 04–11 on the new datasets; integration and performance; and design and copy. They could not edit the project, and every finding needed a reproduction. Together they reported **54 findings: 3 high, 16 medium and 35 low**. Several were reported twice through different lenses (for example DATA-1 and FLOW-1).
+Six reviewer agents, one lens each, examined the merged release: data correctness; decision boundaries; models, transfer and freezing; sections 04–11 on the new datasets; integration and performance; and design and copy. They could not edit the project, and every finding needed a reproduction. Together they reported **54 findings: 3 high, 15 medium and 36 low**. Several were reported twice through different lenses (for example DATA-1 and FLOW-1).
 
 Five fixers then worked in their own worktrees, each on its own files. Each reproduced its findings first and proved each fix with a test that failed before it (sections 1.19 and 2.22). **Every finding was fixed.** The high and medium ones:
 
