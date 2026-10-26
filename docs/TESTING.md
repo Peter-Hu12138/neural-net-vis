@@ -8,7 +8,7 @@ Raster is checked at two levels:
 | Browser | Playwright + Chromium | `npm run test:e2e` | Every user-facing feature, run against the production build, with screenshots |
 | Adversarial review | Independent reviewer agents | sections 4 and 7 | The analysis views (08–11), then the datasets release: maths, behaviour, integration, design and code, each finding backed by a reproduction |
 
-Both suites were last run on the complete datasets release: **294/294 unit tests** and **76/76 browser tests** pass.
+Both suites were last run after the datasets release's review fixes: **353/353 unit tests** and **122/122 browser tests** pass.
 
 ```bash
 npm install
@@ -141,7 +141,7 @@ Errors and unknown job names are reported.
 - **Randomized PCA for wide layers:** equals exact PCA when the sketch is as wide as the data. A second pass over very wide layers gives the same result as reading from memory.
 - **Flat layers** are reported as flat. Tick and tooltip labels use a true minus and never "−0.0000".
 
-### 1.12 Datasets, freezing and model files: `tests/foundation.test.ts` (12 tests)
+### 1.12 Datasets, freezing and model files: `tests/foundation.test.ts` (13 tests)
 
 - **Colour images:** shapes and gradients through a 32×32×3 input match finite differences.
 - **Feature vectors:** dense layers work; a convolution on a feature vector is flagged with a reason.
@@ -162,7 +162,7 @@ Errors and unknown job names are reported.
 - Grid cells are centred, row 0 is at the top and other axes stay fixed. The plotting domain covers every point.
 - `PointEvaluator` matches the network exactly, follows weight and architecture changes, and never disturbs the page's own network (whose intermediates the views read).
 
-### 1.15 Decision boundaries: `tests/boundary.test.ts` (17 tests)
+### 1.15 Decision boundaries: `tests/boundary.test.ts` (23 tests)
 
 - **Confidence shading:** 1/K maps to pale and certainty to full colour; ties are pale; discrete mode gives flat tints. Margins and argmax agree on the predicted class.
 - **Marching squares:** finds a straight boundary in the right place, traces a circle as one closed curve at the right radius, resolves saddles, and draws the edges between three class regions.
@@ -170,7 +170,7 @@ Errors and unknown job names are reported.
 - **Orbit camera:** a true rotation for any angles, x₁ to the right and x₃ up when level, back-to-front order, and which side of a slice faces the eye.
 - **Budgets and labels:** the largest grid that fits the time budget, ticks and axis names, and a robust colour scale for unit maps that one runaway unit cannot wash out.
 
-### 1.16 Dataset strip: `tests/datasetPicker.test.ts` (3 tests)
+### 1.16 Dataset strip: `tests/datasetPicker.test.ts` (5 tests)
 
 Training-set sizes the point generator produces, subset options that fit images or points, and 3-D projections with the vertical axis up.
 
@@ -186,6 +186,13 @@ Training-set sizes the point generator produces, subset options that fit images 
 Small CNN fields on 32×32 match MNIST's sizes and are centred on the larger map; clipping happens at the edge of the 32×32 image; a field larger than the image becomes the whole image; one box covers all three channels, so a pixel outside it in any channel never moves the unit.
 
 The existing analysis tests (1.7–1.11) also gained colour-image, point-dataset and tie cases.
+
+### 1.19 Regression tests from the datasets review: `tests/review3-*.test.ts`, `tests/marks.test.ts` (43 tests)
+
+Each finding of the review in section 7 was reproduced before it was fixed, and each test failed on the code before the fix:
+- `review3-training.test.ts` (13 tests): closing evaluations, exact epoch ends, optimiser state on unfreeze, the data-change rule, and Step during an evaluation.
+- `review3-models.test.ts` (24 tests): model-file checks, layers followed through edits, the sin πx label, transparent uploads, and the docs' numbers.
+- `marks.test.ts` (6 tests): class marks of equal area and distinct shape.
 
 ---
 
@@ -427,6 +434,15 @@ With `window.Worker` replaced by a constructor that throws, the engine reports
 
 The 08–11 specs (2.13–2.16) gained CIFAR-10 and point-dataset cases.
 
+### 2.22 Regression tests from the datasets review: `e2e/review3-*.spec.ts` (46 tests)
+
+Each spec failed on the build before its fixes:
+- `review3-training` (15 tests): test figures after Pause, Step and +1 Epoch; Train on; points kept; dataset switches; transfer of point models.
+- `review3-models` (10 tests): damaged files; keep-weights; labels; transparent uploads; the accuracies the docs quote.
+- `review3-boundary` (11 tests): main-thread time while training large point networks; feature scales; slices; class marks; accessibility.
+- `review3-views` (5 tests): integrated gradients along the described path; the completeness gap; dead units on point data; wording.
+- `review3-strip` (5 tests): dataset previews before loading; naming; loss precision; copy.
+
 ---
 
 ## 3. Design review
@@ -592,3 +608,41 @@ Usage limits interrupted several of them. Each saved checkpoint commits, and a f
 | 16-32-64, ReLU | 0.003 | 49.4% · 46 of 64 | |
 
 With ReLU, the result depended on how many units happened to die. The Leaky ReLU dense layer costs the same and kept nearly every unit alive at about 49% after two epochs, as good as a network four times larger. Colour datasets now default to it. Switching to a dataset with a different input shape (images and points, or grey and colour) also resets the network to that data's default, because a network built for 28×28 grey input is rarely right for colour photos.
+
+### Review of the datasets release
+
+Six reviewer agents, one lens each, examined the merged release: data correctness; decision boundaries; models, transfer and freezing; sections 04–11 on the new datasets; integration and performance; and design and copy. They could not edit the project, and every finding needed a reproduction. Together they reported **54 findings: 3 high, 16 medium and 35 low**. Several were reported twice through different lenses (for example DATA-1 and FLOW-1).
+
+Five fixers then worked in their own worktrees, each on its own files. Each reproduced its findings first and proved each fix with a test that failed before it (sections 1.19 and 2.22). **Every finding was fixed.** The high and medium ones:
+
+| Finding | Problem (as reproduced) | Fix |
+| --- | --- | --- |
+| DATA-1, FLOW-1, ANA-1 (high) | On point data, Pause and +1 Epoch left test accuracy, the confusion matrix and the curves at an earlier step: 61.7% shown against a true 100% on Four blobs. | Every stop records a final curve point and evaluates the weights training stopped at. |
+| FLOW-2 (high) | A dataset switch evaluated the new network on the old dataset's test set and recorded it as the new dataset's accuracy. | The trainer drops its data at a switch; every evaluation records which data it measured, and stale ones are discarded. |
+| DATA-2, FLOW-3, FLOW-7 | "Train on" kept trained weights and history, so 200 images showed accuracy learned on 20,000. Noise and Regenerate erased the history of a trained network. | One rule: weights and their history go together. Noise and Regenerate continue the run on new points; count, share and Train on start a fresh experiment from the run's starting weights. |
+| DATA-3 | The feature labelled "sin x₁" computed sin(πx₁). | Labelled "sin πx₁" everywhere. |
+| DATA-4, FLOW-8 | Points you added were deleted by feature and data changes. | They are kept, and their inputs are recomputed. |
+| MOD-1, FLOW-5 | Unfreezing a layer mid-training gave it Adam steps 1.6–7× the learning rate. | Each layer keeps its own Adam step count, reset on unfreeze. The fine-tuning experiment in docs/models.md was repeated with the fix. |
+| MOD-2 | A model file naming an unknown dataset broke the page until reload. | Every field of a model file is checked before anything on the page changes. |
+| MOD-3 | "Keep trained weights" matched layers by position: removing a hidden layer left its weights in the next one. | Layers are followed through edits; frozen settings move with them. |
+| FLOW-4 | Transferring a point model ignored its features. | Transfer switches to the model's features, or explains why it cannot. |
+| BND-1, BND-2 | Large point networks froze the page: 55–71% of the main thread busy while training, single tasks up to 1.1 s. | One atlas for 02's tiles, batched drawing, and evaluation in 6–10 ms slices under a budget that wins over minimum resolutions. Now 6% busy; longest task about 100 ms. |
+| BND-3 | On 3-D slices, a feature constant over the slice was drawn at full colour whatever its value. | Feature maps use each feature's range over the whole domain. |
+| ANA-1 | 05 could describe weights thousands of steps older than 06–11. | As DATA-1. |
+| design-1 | On point data, class was shown by colour alone; two of Four blobs' classes merge for red-green colour-blind readers. | Each class also has its own shape (circle, square, triangle, diamond, …) in 03, 07, 09, 10 and 02. |
+| design-2 | Before loading, the strip showed coloured digits as previews of Fashion-MNIST and CIFAR-10. | Real 2×2 previews ship with the page. |
+| design-3 | 02's legend did not match the signed unit tiles of CIFAR-10's default network. | The legend follows the layer's activation. |
+
+The low findings were fixed too. They covered:
+- epoch boundaries with partial batches;
+- the input shown while a dataset loads;
+- transparent uploads;
+- the docs' CIFAR-10 accuracy: the page measures 70.60%, because its test images are JPEG;
+- integrated gradients on point data, now computed along the path the sentence describes;
+- the completeness check, now measured against the score change, so a 53% miss can no longer read "0.1%";
+- dead units that still fire off the test points;
+- accessibility of the interactive canvases;
+- frozen layers shown in 02;
+- one vocabulary for freezing (Freeze and Unfreeze);
+- consistent precision;
+- assorted wording.
