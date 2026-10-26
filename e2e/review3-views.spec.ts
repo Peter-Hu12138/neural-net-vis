@@ -123,7 +123,8 @@ test('point data: 06 names classes once, 09 says "a unit", 10 integrates along t
   // Every feature: integrated gradients now follow the point along the line from the origin, and
   // the bars match that line integral, computed here from the page's own network (ANA-2).
   await page.evaluate(() => (window as unknown as Win).raster.actions.setFeatures(['x1', 'x2', 'x1^2', 'x2^2', 'x1*x2', 'sin x1', 'sin x2']));
-  await attributed(page, /^test:0\|\d$/);
+  // The chosen point stays the input through a feature change (review finding FLOW-7).
+  await attributed(page, /^pt:[-\d.]+,[-\d.]+\|\d$/);
   const target = Number(await attr(page).getAttribute('data-target'));
   const shown = await page.locator('#attr-features tbody tr').evaluateAll((trs) => trs.map((tr) => tr.querySelectorAll('.attr-bar-num')[1].textContent!));
   const ref = await page.evaluate((t) => {

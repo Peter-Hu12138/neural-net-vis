@@ -129,7 +129,8 @@ test('pre-activations, activations and gradients come from the layerStats job', 
 
   // The shared progress bar sits under the one-line status row: nothing below moves while computing.
   const status = page.locator('#dist-root .synced-status');
-  const guideTop = async () => (await page.locator('#dist-root .dist-guide').boundingBox())!.y;
+  // Measured from the section's top: sections above may change height as training updates them.
+  const guideTop = async () => (await page.locator('#dist-root .dist-guide').boundingBox())!.y - (await page.locator('#distributions').boundingBox())!.y;
   const top0 = await guideTop();
   expect(Math.round((await status.boundingBox())!.height)).toBe(28);
   await page.click('#dist-q-a');

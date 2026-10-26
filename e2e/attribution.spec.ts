@@ -576,7 +576,8 @@ test('point data: a bar per feature, the steepest way up on the plane, click or 
 
   // More input features: one row each, labelled as in the dataset strip.
   await page.evaluate(() => (window as unknown as { raster: { actions: { setFeatures(f: string[]): void } } }).raster.actions.setFeatures(['x1', 'x2', 'x1^2', 'x2^2', 'x1*x2']));
-  await resultFor(page, /^test:0\|\d$/);
+  // The chosen point stays the input through a feature change (review finding FLOW-7).
+  await resultFor(page, /^pt:[-\d.]+,[-\d.]+\|\d$/);
   await expect(rows.locator('.attr-feat-name')).toHaveText(['x₁', 'x₂', 'x₁²', 'x₂²', 'x₁x₂']);
   await expect(rows.locator('.attr-bar')).toHaveCount(10);
   await expect(page.locator('#attr-check')).toHaveText(/^Σ IG = \S+; z\(x\) − z\(origin\) = \S+ \(/);
