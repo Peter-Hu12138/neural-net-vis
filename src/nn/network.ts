@@ -439,6 +439,46 @@ export function blockSignature(b: Block): string {
   return `${spec}|${s.c}x${s.h}x${s.w}|${o.c}x${o.h}x${o.w}|${b.W.length}`;
 }
 
+/**
+ * Which block of the network built from `from` each block of the one built from `to` continues,
+ * or null for a block that is new. Layers are followed by identity, not by position: the builder's
+ * edits keep the spec objects of the layers they leave alone, so the same object in both lists is
+ * the same layer (removing the first of two hidden layers leaves the second one, not the first).
+ * Between two such layers, the remaining ones pair up in order: an edited layer continues the one
+ * it replaced, and two unrelated specs (a preset, a transferred model) pair up position by position.
+ * The output layer always continues the output layer. Whether weights can actually be carried over
+ * is up to the caller (the shapes may have changed).
+ */
+export function matchBlocks(from: Arch, to: Arch): (number | null)[] {
+  const a = from.layers;
+  const b = to.layers;
+  // Longest common subsequence of identical spec objects: the layers both lists share, in order.
+  const L = Array.from({ length: a.length + 1 }, () => new Int32Array(b.length + 1));
+  for (let i = a.length - 1; i >= 0; i--) {
+    for (let j = b.length - 1; j >= 0; j--) L[i][j] = a[i] === b[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+  }
+  const out: (number | null)[] = new Array(b.length + 1).fill(null);
+  let i = 0;
+  let j = 0;
+  let gapA = 0; // start of the current run of unshared layers in each list
+  let gapB = 0;
+  const pairGap = (endA: number, endB: number) => {
+    for (let k = 0; k < Math.min(endA - gapA, endB - gapB); k++) out[gapB + k] = gapA + k;
+  };
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) {
+      pairGap(i, j);
+      out[j] = i;
+      gapA = ++i;
+      gapB = ++j;
+    } else if (L[i + 1][j] >= L[i][j + 1]) i++;
+    else j++;
+  }
+  pairGap(a.length, b.length);
+  out[b.length] = a.length;
+  return out;
+}
+
 export class Network {
   readonly blocks: Block[] = [];
   readonly probs: Float32Array;
@@ -474,16 +514,18 @@ export class Network {
   }
 
   /**
-   * Copies weights from `from` into every block of this network whose layout matches the block at
-   * the same position (same kind, sizes, input and output shapes). Used for transfer learning and
-   * for keeping trained layers when the architecture is edited. Returns which blocks were copied.
+   * Copies weights from `from` into every block of this network that corresponds to a block of
+   * `from` (see matchBlocks) with the same layout (kind, sizes, input and output shapes). Used for
+   * transfer learning and for keeping trained layers when the architecture is edited. Returns
+   * which blocks were copied.
    */
   copyCompatible(from: Network): boolean[] {
+    const src = matchBlocks(from.arch, this.arch);
     return this.blocks.map((b, i) => {
-      const src = from.blocks[i];
-      if (!src || src.kind !== b.kind || blockSignature(src) !== blockSignature(b)) return false;
-      b.W.set(src.W);
-      b.b.set(src.b);
+      const s = src[i] === null ? undefined : from.blocks[src[i]!];
+      if (!s || s.kind !== b.kind || blockSignature(s) !== blockSignature(b)) return false;
+      b.W.set(s.W);
+      b.b.set(s.b);
       return true;
     });
   }
