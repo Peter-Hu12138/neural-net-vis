@@ -418,32 +418,41 @@ describe('integrated gradients', () => {
     }
   });
 
-  it('the completeness gap is measured against Σ|IG|, so it cannot blow up when z(x) − z(blank) ≈ 0 (ATTR-1)', () => {
+  it('when the attributions cancel and z(x) − z(blank) ≈ 0, the gap shows against the score change and Σ|IG| (ATTR-1, ANA-4)', () => {
     // Trained MLP, test digit 1 (a 2), target 8: the network neither likes nor rejects an 8 here,
     // so positive and negative attributions cancel and z(x) − z(blank) is close to 0. Relative to
-    // that difference, the gap read "78% apart"; relative to the attributions it is tiny.
+    // that difference the 32-step sum is far off; relative to the attributions it is tiny. The line
+    // says both, so neither a large miss of the change nor the accuracy of the bars is hidden.
     const net = trained(MLP, 1600);
     const r = run(net, testDigit(1), 8, 32, { size: 28, stride: 28 });
     expect(Math.abs(r.igExpected)).toBeLessThan(0.01);
-    expect(relativeGap(r.igSum, r.igExpected)).toBeGreaterThan(0.5); // the old measure
+    expect(relativeGap(r.igSum, r.igExpected)).toBeGreaterThan(0.5);
     let abs = 0;
     for (const v of r.integrated) abs += Math.abs(v);
     expect(r.igAbsSum).toBeCloseTo(abs, 4);
     expect(r.igAbsSum).toBeGreaterThan(1);
     const g = completenessGap(r.igSum, r.igExpected, r.igAbsSum);
-    expect(g.ref).toBe('ig');
+    expect(g.cancels).toBe(true);
+    expect(g.large).toBe(true);
     expect(g.diff).toBeCloseTo(Math.abs(r.igSum - r.igExpected), 12);
-    expect(g.rel).toBeLessThan(0.005);
+    expect(g.ofScore).toBeCloseTo(relativeGap(r.igSum, r.igExpected), 9);
+    expect(g.ofIG).toBeLessThan(0.005);
     // The line shows both numbers with three significant digits (not "0.00" twice) and says what
-    // the percentage is of.
+    // each percentage is of.
     const c = completenessText(r);
     expect(c.sum).toBe(`Σ IG = ${sig(r.igSum)};`);
     expect(c.expected).toBe(`z(x) − z(blank) = ${sig(r.igExpected)}`);
     expect(c.sum).not.toMatch(/= −?0(\.0+)?;$/);
     expect(c.expected).not.toMatch(/= −?0(\.0+)?$/);
     expect(c.sum).not.toBe(c.expected.replace('z(x) − z(blank)', 'Σ IG') + ';');
-    expect(c.gap).toMatch(/^\(off by [\d.e−]+, (<0\.1|0\.\d)% of Σ\|IG\|\)$/);
+    expect(c.gap).toBe(`(off by ${sig(g.diff)}: ${percentText(g.ofScore)} of the score change, ${percentText(g.ofIG)} of Σ|IG|)`);
+    expect(c.large).toBe(true);
     expect(c.title).toContain(`Σ|IG| = ${exact(r.igAbsSum)}`);
+    expect(c.title).toContain('the positive and negative attributions largely cancel');
+    // Refining the integral closes most of the gap, even against the tiny change.
+    const fine = computeAttribution(net, { x: testDigit(1), target: 8, igSteps: 32, igTolerance: 0.02, occlusion: { size: 28, stride: 28 } });
+    expect(fine.igSteps).toBeGreaterThan(32);
+    expect(Math.abs(fine.igSum - fine.igExpected)).toBeLessThan(Math.abs(r.igSum - r.igExpected) / 3);
   }, 30_000);
 
   it('the completeness gap stays under 1% of Σ|IG| for every target, trained MLP and Small CNN (ATTR-1)', () => {
@@ -457,27 +466,46 @@ describe('integrated gradients', () => {
           const r = run(net, testDigit(d), t, 32, { size: 28, stride: 28 });
           if (Math.abs(r.igExpected) < 0.1) nearZero++;
           const g = completenessGap(r.igSum, r.igExpected, r.igAbsSum);
-          expect(g.rel, `${name}, digit ${d}, target ${t}`).toBeLessThan(0.01);
-          expect(Number.isFinite(g.rel)).toBe(true);
+          expect(g.ofIG, `${name}, digit ${d}, target ${t}`).toBeLessThan(0.01);
+          expect(Number.isFinite(g.ofIG)).toBe(true);
         }
       }
       expect(nearZero, `${name}: the scan reaches the near-zero case`).toBeGreaterThan(0);
     }
   }, 60_000);
 
-  it('completeness text: a match, the score as reference, and number formatting', () => {
-    expect(completenessText({ igSum: 0, igExpected: 0, igAbsSum: 0 })).toMatchObject({ sum: 'Σ IG = 0;', expected: 'z(x) − z(blank) = 0', gap: '(a match)' });
-    // IG missing most of a real score change: the gap is measured against the score instead.
-    const g = completenessGap(0.1, 2, 0.1);
-    expect(g).toEqual({ diff: 1.9, rel: 0.95, ref: 'score' });
-    expect(completenessText({ igSum: 0.1, igExpected: 2, igAbsSum: 0.1 }).gap).toBe('(off by 1.9, 95% of |z(x) − z(blank)|)');
-    expect(completenessText({ igSum: 8.3912, igExpected: 8.4301, igAbsSum: 12.07 }).gap).toBe('(off by 0.0389, 0.3% of Σ|IG|)');
-    expect(completenessGap(0, 0, 0).rel).toBe(0);
+  it('completeness text: always against the score change, Σ|IG| too when they cancel, and number formatting', () => {
+    expect(completenessText({ igSum: 0, igExpected: 0, igAbsSum: 0 })).toMatchObject({ sum: 'Σ IG = 0;', expected: 'z(x) − z(blank) = 0', gap: '(a match)', large: false });
+    // IG missing most of a real score change.
+    const miss = completenessGap(0.1, 2, 0.1);
+    expect(miss).toMatchObject({ diff: 1.9, ofScore: 0.95, cancels: false, large: true });
+    expect(miss.ofIG).toBeCloseTo(19, 9);
+    expect(completenessText({ igSum: 0.1, igExpected: 2, igAbsSum: 0.1 }).gap).toBe('(off by 1.90, 95% of the score change)');
+    // A close sum: 0.0389 of 8.43 is 0.46%.
+    expect(completenessText({ igSum: 8.3912, igExpected: 8.4301, igAbsSum: 12.07 })).toMatchObject({ gap: '(off by 0.0389, 0.5% of the score change)', large: false });
+    // ANA-4, CIFAR-10 test image #1600 at 32 steps: the sum misses the change by more than half,
+    // which the old measure (against Σ|IG|, 632 times the change) printed as "0.1% of Σ|IG|".
+    const photo1600 = { igSum: 0.30693615, igExpected: 0.20092475, igAbsSum: 126.99435 };
+    const c = completenessText(photo1600, 'black');
+    expect(c.gap).toBe('(off by 0.106: 53% of the score change, 0.1% of Σ|IG|)');
+    expect(c.large).toBe(true);
+    expect(c.title).toContain('632 times the score change');
+    // No change at all, but a sum: only Σ|IG| can scale it.
+    expect(completenessText({ igSum: 0.01, igExpected: 0, igAbsSum: 5 }).gap).toBe('(off by 0.0100, 0.2% of Σ|IG|; the score does not change)');
+    expect(completenessGap(0, 0, 0)).toMatchObject({ ofScore: 0, ofIG: 0, large: false });
+    expect(completenessText({ igSum: 1, igExpected: 1.001, igAbsSum: 1, igSteps: 96 }).title).toContain('Σ IG = 1 from 96 steps');
     expect(sig(-0.000173)).toBe('−1.7e−4');
     expect(sig(0.00528)).toBe('0.00528');
     expect(sig(-8.3912)).toBe('−8.39');
-    expect(sig(0.31, true)).toBe('+0.31');
     expect(sig(-0)).toBe('0');
+    // design-9: trailing zeros stay, so a column of values lines up and reads as in the sentence.
+    expect(sig(0.31, true)).toBe('+0.310');
+    expect(sig(-3.3)).toBe('−3.30');
+    expect(sig(5.75, true)).toBe('+5.75');
+    expect(sig(1, true)).toBe('+1.00');
+    expect(sig(123.4)).toBe('123');
+    expect(sig(999.7)).toBe('1000');
+    expect(sig(-12345)).toBe('−12345');
     expect(exact(-0.00528312)).toBe('−0.00528312');
     expect(percentText(0.0004)).toBe('<0.1%');
     expect(percentText(0.0312)).toBe('3.1%');
@@ -598,6 +626,48 @@ describe('attribution job', () => {
     expect(seen).toEqual(Array.from({ length: total }, (_, k) => k + 1));
   });
 
+  it('with a tolerance, triples the integrated-gradient steps until Σ IG is close to the score change (ANA-4)', () => {
+    const net = trained(SMALL_CNN, 1200);
+    // Find inputs whose 32-step sum misses the change by more than 2%.
+    const misses: { d: number; t: number; gap: number }[] = [];
+    for (let d = 0; d < 12 && misses.length < 3; d++) {
+      for (let t = 0; t < 10 && misses.length < 3; t++) {
+        const r = run(net, testDigit(d), t, 32, { size: 28, stride: 28 });
+        const g = completenessGap(r.igSum, r.igExpected, r.igAbsSum);
+        if (g.ofScore > 0.02 && Math.abs(r.igExpected) > 0.05) misses.push({ d, t, gap: g.diff });
+      }
+    }
+    expect(misses.length).toBeGreaterThan(0);
+    for (const { d, t, gap } of misses) {
+      const gen = attribution(net, { x: testDigit(d), target: t, igSteps: 32, igTolerance: 0.02, occlusion: { size: 28, stride: 28 } });
+      const seen: number[] = [];
+      let total = 0;
+      let r: AttributionResult;
+      for (;;) {
+        const s = gen.next();
+        if (s.done) {
+          r = s.value;
+          break;
+        }
+        seen.push(s.value.done);
+        total = s.value.total;
+      }
+      // 32 → 96 → 288: every earlier gradient is reused, and progress counts every pass.
+      expect([96, 288]).toContain(r.igSteps);
+      expect(total).toBe(2 + r.igSteps + r.patchesEvaluated);
+      expect(seen).toEqual(Array.from({ length: total }, (_, k) => k + 1));
+      const g = completenessGap(r.igSum, r.igExpected, r.igAbsSum);
+      expect(g.diff, `digit ${d}, target ${t}`).toBeLessThan(gap);
+      if (r.igSteps < 288) expect(g.ofScore).toBeLessThanOrEqual(0.02);
+      // The same as asking for that many steps outright.
+      const direct = run(net, testDigit(d), t, r.igSteps, { size: 28, stride: 28 });
+      expect(r.igSum).toBeCloseTo(direct.igSum, 4);
+    }
+    // Already close: no extra steps.
+    const lin = new Network(mnistArch(SOFTMAX), 7);
+    expect(computeAttribution(lin, { x: testDigit(2), target: 3, igSteps: 32, igTolerance: 0.02, occlusion: { size: 28, stride: 28 } }).igSteps).toBe(32);
+  }, 60_000);
+
   it('runs end to end through the Analyzer on a real CNN in under 3 s', async () => {
     const spec = SMALL_CNN;
     const source = trained(spec, 320);
@@ -692,7 +762,7 @@ describe('colour images', () => {
     for (const v of r.integrated) sum += v;
     expect(sum).toBeCloseTo(r.igSum, 4);
     expect(r.baseLogit).toBeCloseTo(targetLogit(net, new Float32Array(3072), 5), 5);
-    expect(completenessGap(r.igSum, r.igExpected, r.igAbsSum).rel).toBeLessThan(0.01);
+    expect(completenessGap(r.igSum, r.igExpected, r.igAbsSum).ofIG).toBeLessThan(0.01);
     expect(completenessText(r, 'black').expected).toMatch(/^z\(x\) − z\(black\) = /);
     expect(completenessText(r, 'black').title).toContain('from a black image to this one');
   });
@@ -812,6 +882,58 @@ describe('point features', () => {
     expect(text).toContain('all the feature attributions');
   });
 
+  it('given the coordinates, integrated gradients follow the point along the line from the origin (ANA-2)', () => {
+    // Three blobs with every 2-D feature, test point (0.40, −0.38), explaining class 2. Before,
+    // the job scaled the feature vector (α·x), a path on which x₁² = 0.08 when x₁ = 0.20: no point
+    // of the plane, while the page said "on the straight path from the origin".
+    const ids = featureCatalog(2).map((f) => f.id);
+    const net = new Network(pointArch(ids.length, TANH, 3), 21);
+    const coords = [0.4, -0.38];
+    const x = featurize(Float32Array.from(coords), 2, ids);
+    const r = computeAttribution(net, { x, target: 2, igSteps: 32, point: { coords, dims: 2, features: ids } });
+    expect(r.igPath).toBe('plane');
+    expect(Math.abs(r.igSum - r.igExpected)).toBeLessThan(1e-3 * Math.max(1, r.igAbsSum));
+    // Reference: the line integral Σ_f ∫ g_f(γ(α)) γ_f′(α) dα along γ(α) = features(α·coords),
+    // by a fine midpoint sum with the feature derivatives from central differences.
+    const N = 4000;
+    const ref = new Float64Array(ids.length);
+    const feat = (a: number) => featurize(Float32Array.from(coords, (c) => a * c), 2, ids);
+    for (let k = 0; k < N; k++) {
+      const a = (k + 0.5) / N;
+      const g = logitGradient(net, feat(a), 2).grad;
+      const up = feat(a + 1e-3);
+      const down = feat(a - 1e-3);
+      for (let f = 0; f < ids.length; f++) ref[f] += (g[f] * (up[f] - down[f])) / 2e-3 / N;
+    }
+    for (let f = 0; f < ids.length; f++) expect(r.integrated[f], ids[f]).toBeCloseTo(ref[f], 3);
+    // The old path (no coordinates given) shares the change out differently: x₁² is the clearest.
+    const straight = computeAttribution(net, { x, target: 2, igSteps: 32 });
+    expect(straight.igPath).toBe('straight');
+    expect(straight.igSum).toBeCloseTo(r.igSum, 2); // both add up to the same change
+    const sq = ids.indexOf('x1^2');
+    expect(Math.abs(straight.integrated[sq] - r.integrated[sq])).toBeGreaterThan(0.05 * Math.abs(r.integrated[sq]) + 1e-4);
+  });
+
+  it('the line through the plane is the straight path when the features are the coordinates, and exact for a linear score', () => {
+    const raw = ['x1', 'x2'];
+    const net = new Network(pointArch(2, TANH), 5);
+    const coords = [-0.7, 0.35];
+    const x = featurize(Float32Array.from(coords), 2, raw);
+    const plane = computeAttribution(net, { x, target: 1, igSteps: 16, point: { coords, dims: 2, features: raw } });
+    const straight = computeAttribution(net, { x, target: 1, igSteps: 16 });
+    expect(plane.igPath).toBe('plane');
+    for (let f = 0; f < 2; f++) expect(plane.integrated[f]).toBeCloseTo(straight.integrated[f], 6);
+    // No hidden layer: z = W·features + b, so each feature's share is W_f · x_f at any step count.
+    const ids = ['x1', 'x2', 'x1^2', 'x1*x2', 'sin x1', 'sin x2'];
+    const lin = new Network(pointArch(ids.length, []), 9);
+    const c3 = [0.8, -0.55];
+    const x3 = featurize(Float32Array.from(c3), 2, ids);
+    const r = computeAttribution(lin, { x: x3, target: 0, igSteps: 3, point: { coords: c3, dims: 2, features: ids } });
+    for (let f = 0; f < ids.length; f++) expect(r.integrated[f], ids[f]).toBeCloseTo(lin.output.W[f] * x3[f], 6);
+    // Coordinates that do not belong to x: back to the straight path in feature space.
+    expect(computeAttribution(lin, { x: x3, target: 0, igSteps: 3, point: { coords: [0.1, 0.1], dims: 2, features: ids } }).igPath).toBe('straight');
+  });
+
   it('the gradient with respect to the coordinates follows the chain rule through the features (2-D and 3-D)', () => {
     const cases: [number[], 2 | 3, string[]][] = [
       [[0.3, -0.6], 2, ids2],
@@ -841,17 +963,31 @@ describe('point features', () => {
 
   it('says in words which feature pushes toward the class and which pushes away', () => {
     const labels = ['x₁', 'x₂', 'x₁²'];
-    expect(featureSentence(labels, [0.1, -0.31, 0.82], 'Class 1')).toBe('x₁² pushes toward Class 1 the most (+0.82). x₂ pushes away from it (−0.31).');
-    expect(featureSentence(labels, [0.4, 0.0001, 0], 'Class 0')).toBe('x₁ pushes toward Class 0 the most (+0.4).');
-    expect(featureSentence(labels, [-0.2, -0.5, 0], 'Class 2')).toBe('Every feature that matters pushes away from Class 2 here; x₂ the most (−0.5).');
+    expect(featureSentence(labels, [0.1, -0.31, 0.82], 'Class 1')).toBe('x₁² pushes toward Class 1 the most (+0.820). x₂ pushes away from it (−0.310).');
+    expect(featureSentence(labels, [0.4, 0.0001, 0], 'Class 0')).toBe('x₁ pushes toward Class 0 the most (+0.400).');
+    expect(featureSentence(labels, [-0.2, -0.5, 0], 'Class 2')).toBe('Every feature that matters pushes away from Class 2 here; x₂ the most (−0.500).');
     expect(featureSentence(labels, [0, 0, 0], 'Class 1')).toBe('No feature moves the score for Class 1 much at this point.');
     // a feature with under 5% of the total does not count
-    expect(featureSentence(labels, [1, -0.04, 0], 'Class 1')).toBe('x₁ pushes toward Class 1 the most (+1).');
-    // Measured from the origin: a predicted class can still score lower here than there.
+    expect(featureSentence(labels, [1, -0.04, 0], 'Class 1')).toBe('x₁ pushes toward Class 1 the most (+1.00).');
+    // Measured from the origin: a class can still score lower here than there.
     expect(featureSentence(labels, [-1.24, -3.3, 0], 'Class 0', -4.05)).toBe(
-      'From the origin to this point, the score for Class 0 falls by 4.05. Every feature that matters pushes away from Class 0 here; x₂ the most (−3.3).',
+      'From the origin to this point, the score for Class 0 falls by 4.05. Every feature that matters lowers the score on the way; x₂ the most (−3.30).',
     );
-    expect(featureSentence(labels, [0.5, 0, 0], 'Class 1', 0.5)).toBe('From the origin to this point, the score for Class 1 rises by 0.5. x₁ pushes toward Class 1 the most (+0.5).');
+    expect(featureSentence(labels, [0.5, 0, 0], 'Class 1', 0.5)).toBe('From the origin to this point, the score for Class 1 rises by 0.500. x₁ pushes toward Class 1 the most (+0.500).');
     expect(featureSentence(labels, [0, 0, 0], 'Class 1', 0)).toBe('From the origin to this point, the score for Class 1 stays about the same. No feature moves the score for Class 1 much at this point.');
+  });
+
+  it('when the predicted class scores even higher at the origin, the sentence says so (design-10)', () => {
+    // Circle, default input: Class 0 predicted at 99.6%, yet from the origin its score falls.
+    const labels = ['x₁', 'x₂'];
+    const text = featureSentence(labels, [-0.99, -5.36], 'Class 0', -6.35, true);
+    expect(text).toBe(
+      'From the origin to this point, the score for Class 0 falls by 6.35. Class 0 is still the prediction here; the origin just scores even higher for it. ' +
+        'Every feature that matters lowers the score on the way; x₂ the most (−5.36).',
+    );
+    expect(text).not.toContain('pushes away from Class 0');
+    // Not the prediction, or a rising score: no such clause.
+    expect(featureSentence(labels, [-0.99, -5.36], 'Class 1', -6.35, false)).not.toContain('still the prediction');
+    expect(featureSentence(labels, [0.99, 5.36], 'Class 0', 6.35, true)).not.toContain('still the prediction');
   });
 });

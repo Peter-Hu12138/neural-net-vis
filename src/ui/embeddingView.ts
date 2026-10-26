@@ -7,6 +7,7 @@ import {
   DEFAULT_ITERATIONS,
   DEFAULT_N,
   DEFAULT_PERPLEXITY,
+  embedCount,
   embedIndices,
   isFrame,
   layerFeatures,
@@ -14,7 +15,8 @@ import {
   PHASES,
   projectPca,
   REDUCING,
-  signedValue,
+  pcDecimals,
+  pcValue,
   tickLabel,
   TSNE_PCA_DIM,
   type EmbedMethod,
@@ -233,7 +235,7 @@ export function mountEmbedding(): void {
   /** "7" for MNIST digits, "cat" or "Class 1" otherwise. */
   const labelName = (k: number) => (isMnist() ? String(k) : className(k));
   /** Test samples a map shows for the loaded data (all of them for small test sets). */
-  const sampleCount = () => (store.data ? Math.min(DEFAULT_N, store.data.testY.length) : DEFAULT_N);
+  const sampleCount = () => (store.data ? embedCount(store.data.testY, DEFAULT_N, store.classes) : DEFAULT_N);
   /**
    * The section note says how many test samples a map shows. main.ts writes it on a dataset switch
    * with 1,000 for every dataset; once the data is in, this corrects it (a microtask, so it runs
@@ -642,13 +644,28 @@ export function mountEmbedding(): void {
     return { i: bi, probe: false };
   };
 
+  /** PCA coordinates at one precision per map (design-9): the decimals its largest coordinate needs. */
+  const pcDigits = new WeakMap<Float32Array, number>();
+  const pc = (v: View, value: number): string => {
+    let d = pcDigits.get(v.coords);
+    if (d === undefined) {
+      d = pcDecimals(v.coords);
+      pcDigits.set(v.coords, d);
+    }
+    return pcValue(value, d);
+  };
+  const pcOf = (value: number): string => {
+    const v = view();
+    return v ? pc(v, value) : pcValue(value, 2);
+  };
+
   const pointText = (s: number): string => {
     const v = view()!;
     const i = v.indices[s];
     // "Test digit #12 · label 7 · predicted 7", "Test image #3 · cat · predicted dog".
     let t = sampleCaption(info(), 'test', i, v.labels[s]);
     if (v.preds) t += ` · predicted ${labelName(v.preds[s])}`;
-    if (v.method === 'pca') t += `\nPC1 ${signedValue(v.coords[2 * s])} · PC2 ${signedValue(v.coords[2 * s + 1])}`;
+    if (v.method === 'pca') t += `\nPC1 ${pc(v, v.coords[2 * s])} · PC2 ${pc(v, v.coords[2 * s + 1])}`;
     if (pts()) t += `\nAt ${coordsText(i)} in the input`;
     return t;
   };
@@ -663,7 +680,7 @@ export function mountEmbedding(): void {
   const probeText = () => {
     const p = store.probe;
     if (!p || !geo?.probe) return '';
-    return `Current input · ${p.caption}\nPC1 ${signedValue(geo.probe.a)} · PC2 ${signedValue(geo.probe.b)}${geo.probe.off ? ' (off the chart)' : ''}`;
+    return `Current input · ${p.caption}\nPC1 ${pcOf(geo.probe.a)} · PC2 ${pcOf(geo.probe.b)}${geo.probe.off ? ' (off the chart)' : ''}`;
   };
 
   const tipAt = (clientX: number, clientY: number) => {
@@ -877,7 +894,7 @@ export function mountEmbedding(): void {
       append(previewMeta, [
         h('div', null, `Label${sep}${labelName(label)}`),
         pred !== null ? h('div', null, `Predicted${sep}${labelName(pred)} `, pred !== label ? h('span', { class: 'tag is-on' }, 'Mistake') : null) : null,
-        v.method === 'pca' ? h('div', null, `PC1 ${signedValue(v.coords[2 * hover])} · PC2 ${signedValue(v.coords[2 * hover + 1])}`) : null,
+        v.method === 'pca' ? h('div', null, `PC1 ${pc(v, v.coords[2 * hover])} · PC2 ${pc(v, v.coords[2 * hover + 1])}`) : null,
         d.points ? h('div', null, coordsText(i)) : null,
         h('div', { class: 'embed-preview-act' }, 'Click to use it as the input'),
       ]);
@@ -907,7 +924,7 @@ export function mountEmbedding(): void {
     if (rest) previewMeta.append(h('div', null, rest));
     if (d.points && p.coords) previewMeta.append(h('div', null, Array.from(p.coords, (c, k) => `${axisName(k)} ${fixed(c, 2)}`).join(' · ')));
     const pcaShown = !!v && v.method === 'pca' && !v.flat && !!probePt && probePt.key === p.key && probePt.coords === v.coords;
-    if (pcaShown) previewMeta.append(h('div', null, `PC1 ${signedValue(probePt!.a)} · PC2 ${signedValue(probePt!.b)}`));
+    if (pcaShown) previewMeta.append(h('div', null, `PC1 ${pc(v!, probePt!.a)} · PC2 ${pc(v!, probePt!.b)}`));
     const marked = pcaShown || (!!v && v.method === 'tsne' && !v.flat && probeIndex(v) !== null);
     const act = marked ? 'Marked on the map with a red cross' : v?.flat ? `Every ${one()} lands on the same point at this layer` : `Hover a ${one()} on the map to see it here`;
     previewMeta.append(h('div', { class: 'embed-preview-act' }, act));

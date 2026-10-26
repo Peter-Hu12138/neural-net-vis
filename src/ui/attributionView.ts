@@ -5,6 +5,7 @@ import {
   DEFAULT_IG_STEPS,
   DEFAULT_OCCLUSION,
   featureSentence,
+  IG_TOLERANCE,
   kinkText,
   sig,
   type AttributionParams,
@@ -372,7 +373,7 @@ export function mountAttribution(): void {
     running = { req, stamp: begun };
     setBusy();
     sync.setProgress(0);
-    const params: AttributionParams = { x: req.x, target: req.target, igSteps: DEFAULT_IG_STEPS };
+    const params: AttributionParams = { x: req.x, target: req.target, igSteps: DEFAULT_IG_STEPS, igTolerance: IG_TOLERANCE };
     if (mode !== 'points') params.occlusion = DEFAULT_OCCLUSION;
     const coords = req.probe.coords;
     const dims = store.data.points?.dims;
@@ -550,14 +551,17 @@ export function mountAttribution(): void {
     const base = baseName();
     if (s) {
       const c = completenessText(s.r, base);
-      // Unbreakable pieces, so a narrow column wraps after "=" or ",", never inside a term.
-      const pieces = (text: string, cls?: string) =>
-        text.split(/(?<= =|,) (?=\S)|(?<= of) (?=\|)/).flatMap((t, k) => [k ? ' ' : '', h('span', cls ? { class: cls } : null, t)]);
-      check.replaceChildren(...pieces(c.sum), ' ', ...pieces(c.expected), ' ', ...pieces(c.gap, 'attr-gap'));
+      // Unbreakable pieces, so a narrow column wraps after "=", never inside a term; the gap
+      // clause wraps between its words, keeping "off by 0.106" together.
+      const pieces = (text: string, split: RegExp, cls?: string) => text.split(split).flatMap((t, k) => [k ? ' ' : '', h('span', cls ? { class: cls } : null, t)]);
+      const terms = /(?<= =) (?=\S)/;
+      check.replaceChildren(...pieces(c.sum, terms), ' ', ...pieces(c.expected, terms), ' ', ...pieces(c.gap, /(?<!\(off|\boff by) /, 'attr-gap'));
       check.title = c.title;
+      check.dataset.large = String(c.large);
     } else {
       check.textContent = `Σ IG = –; z(x) ${MINUS} z(${base}) = –`;
       check.removeAttribute('title');
+      delete check.dataset.large;
     }
   }
 
@@ -572,9 +576,12 @@ export function mountAttribution(): void {
     const sc = scoreName(t);
     switch (key) {
       case 'input':
+        // MNIST digits are ink on paper; Fashion-MNIST pictures are bright clothes on black.
         return colour
           ? [`The ${shape.h}×${shape.w} photo the network sees: red, green and blue values from 0 to 1 for every pixel.`]
-          : [`The ${shape.h}×${shape.w} image the network sees, from 0 (blank) to 1 (full ink).`];
+          : isMnist()
+            ? [`The ${shape.h}×${shape.w} image the network sees, from 0 (blank) to 1 (full ink).`]
+            : [`The ${shape.h}×${shape.w} image the network sees, from 0 (the black background) to 1 (the brightest part of the picture).`];
       case 'saliency': {
         const kinks = r ? kinkText(r.kinks, colour ? 'image' : 'blank') : '';
         const base = colour ? `How strongly the score for ${sc} reacts to a small change in each pixel, its three channels added up` : `How strongly the score for ${sc} reacts to a small change in each pixel`;
@@ -583,11 +590,16 @@ export function mountAttribution(): void {
       case 'gradInput':
         return colour
           ? [`The gradient times each pixel’s values, added over its channels: red pixels raise the score for ${sc}, blue ones lower it.`]
-          : [`The gradient times each pixel’s ink: red ink raises the score for ${sc}, blue ink lowers it.`];
-      case 'integrated':
-        return [
-          `Gradient × input averaged while the image fades in from ${colour ? 'black' : 'blank'} (${r?.igSteps ?? DEFAULT_IG_STEPS} steps), so the pixels share out the whole change in the score for ${sc}.`,
-        ];
+          : isMnist()
+            ? [`The gradient times each pixel’s ink: red ink raises the score for ${sc}, blue ink lowers it.`]
+            : [`The gradient times each pixel’s brightness: red pixels raise the score for ${sc}, blue ones lower it.`];
+      case 'integrated': {
+        const lead = `Gradient × input averaged while the image fades in from ${colour ? 'black' : 'blank'} (${r?.igSteps ?? DEFAULT_IG_STEPS} steps)`;
+        // When the sum misses the score change by more than a little, the hint must not say it adds up.
+        return r && completenessText(r, baseName()).large
+          ? [`${lead}. The pixels should share out the whole change in the score for ${sc}; the line below shows how far off they are.`]
+          : [`${lead}, so the pixels share out the whole change in the score for ${sc}.`];
+      }
       case 'occlusion': {
         const size = r?.occlusionSize ?? DEFAULT_OCCLUSION.size;
         if (!colour) return [`Erases a ${size}×${size} patch at a time: red where that lowers the score for ${sc}, blue where it raises it.`];
@@ -814,7 +826,7 @@ export function mountAttribution(): void {
     }
     const r = s.r;
     const labels = defs.map((f) => f.label);
-    sentence.textContent = featureSentence(labels, r.integrated, sc, r.igExpected);
+    sentence.textContent = featureSentence(labels, r.integrated, sc, r.igExpected, r.target === r.pred);
     const max = Math.max(maxAbs(r.gradInput), maxAbs(r.integrated));
     defs.forEach((f, k) => {
       featBody.append(
@@ -834,16 +846,48 @@ export function mountAttribution(): void {
     let top = 0;
     for (let k = 1; k < labels.length; k++) if (Math.abs(r.integrated[k]) > Math.abs(r.integrated[top])) top = k;
     const v = r.integrated[top];
-    const example =
-      Math.abs(v) > 1e-6
-        ? `Reading a bar: ${labels[top]} ${signed(v)} means that growing ${labels[top]} from 0 to its value here (${fixed(s.x[top], 2)}), on the straight path from the origin, ${v > 0 ? 'raised' : 'lowered'} the score for ${sc} by ${sig(Math.abs(v))} in all.`
-        : '';
+    const name = labels[top];
+    // The path the job actually integrated along: the point moving across the plane from the
+    // origin, or (without coordinates) every feature scaled together from 0.
+    const plane = r.igPath === 'plane';
+    const raw = store.features.every(isCoordinate);
+    const adds = completenessText(r, baseName()).large ? 'so the bars should add up to the whole change in the score; the line below shows how far off they are' : 'so the bars add up to the whole change in the score';
+    const how = plane
+      ? raw
+        ? `Integrated gradients average the slope along the straight line from the origin to the point, ${adds}.`
+        : `Integrated gradients move the point along the straight line from the origin to here and add up, step by step, each feature’s slope times how much that feature changes, ${adds}.${halfway(s)}`
+      : `Integrated gradients scale every feature together from 0 to its value here and average each slope on the way, ${adds}.`;
+    const route = plane ? 'as the point moves in a straight line from the origin to here' : 'as every feature moves together from 0 to its value here';
+    const example = Math.abs(v) > 1e-6 ? `Reading a bar: ${name} ${signed(v)} is ${name}’s share of the change in the score for ${sc} ${route}, with ${name} going from 0 to ${fixed(s.x[top], 2)}.` : '';
     featHint.replaceChildren(
-      h('p', { class: 'hint' }, `Slope is the gradient ∂z/∂f: how fast the score for ${sc} changes as one feature grows. Gradient × input multiplies it by the feature’s value. Integrated gradients average the slope along the straight path from the origin, so the bars add up to the whole change in the score.`),
+      h('p', { class: 'hint' }, `Slope is the gradient ∂z/∂f: how fast the score for ${sc} changes as one feature grows. Gradient × input multiplies it by the feature’s value. ${how}`),
       example ? h('p', { class: 'hint' }, example) : '',
       kinks ? h('p', { class: 'hint' }, kinks) : '',
     );
     renderPlane(s);
+  }
+
+  /**
+   * " Features need not change at a steady rate on the way: halfway there, x₁² is at 25% of its
+   * value here." for the first feature that is not a coordinate; '' when there is none.
+   */
+  function halfway(s: Shown): string {
+    const c = coordsOf(s);
+    if (!c) return '';
+    try {
+      const dims = c.length as 2 | 3;
+      const defs = featureDefs(dims, store.features);
+      const half = Float64Array.from(c, (v) => v / 2);
+      for (let k = 0; k < defs.length; k++) {
+        const end = s.x[k];
+        if (isCoordinate(defs[k].id) || Math.abs(end) < 1e-3) continue;
+        const pct = Math.round((100 * defs[k].fn(half, 0)) / end);
+        return ` Features need not change at a steady rate on the way: halfway there, ${defs[k].label} is at ${pct}% of its value here.`;
+      }
+    } catch {
+      // unknown features: say nothing
+    }
+    return '';
   }
 
   /** A bar from a centre line: right and red for positive, left and blue for negative. */
@@ -1112,6 +1156,9 @@ export function mountAttribution(): void {
   renderPanels();
   for (const p of panels) paintRamp(p);
 }
+
+/** A feature that is one of the raw coordinates (x1, x2, x3). */
+const isCoordinate = (id: string) => /^x\d$/.test(id);
 
 const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
 

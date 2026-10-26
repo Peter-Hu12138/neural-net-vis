@@ -11,7 +11,9 @@ import type { Job, Progress } from './protocol';
  * - gradInput     x ⊙ g(x)
  * - integrated    x ⊙ mean_k g(α_k·x), α_k = (k + ½)/m: integrated gradients from an all-zero
  *                 input (a blank or black image; for point data, every feature 0), midpoint Riemann
- *                 sum. Its total should match z_t(x) − z_t(0) (completeness).
+ *                 sum. Its total should match z_t(x) − z_t(0) (completeness). With `igTolerance`,
+ *                 the steps triple (reusing every gradient already taken) until it does, to within
+ *                 that share of z_t(x) − z_t(0), or until IG_MAX_STEPS.
  * - occlusion     images only: paint a size×size patch with a plain fill, record the drop in z_t;
  *                 each pixel gets the mean drop over the patches that cover it. The logit, like the
  *                 other three maps, so all four share units; the probability saturates near 0 and 1,
@@ -25,7 +27,12 @@ import type { Job, Progress } from './protocol';
  *
  * Point data feeds the network a short feature vector (x₁, x₂, x₁², …): the same quantities come
  * out per feature, plus the signed gradient, and, given the raw coordinates, the gradient with
- * respect to them (which way to move the point to raise the score).
+ * respect to them (which way to move the point to raise the score). Given the coordinates,
+ * integrated gradients also follow the point itself along the straight line from the origin
+ * (γ(α) = features(α·coords)), not the straight line in feature space, which leaves the plane as
+ * soon as a feature is not a coordinate (halfway there, x₁² is a quarter of its value, not half):
+ * feature f gets Σ_k g_f(γ(α_k)) · (γ_f(b_k+1) − γ_f(b_k)) over the steps [b_k, b_k+1], its share of
+ * the change in the score along that path. With the raw coordinates only, the two paths coincide.
  *
  * The gradients come from Network.inputGradient in its symmetric mode: blank MNIST pixels leave
  * many units exactly on a kink (a ReLU at z = 0, a max-pool window of equal values), where the
@@ -50,7 +57,13 @@ export interface PointParams {
 export interface AttributionParams {
   x: Float32Array;
   target: number;
+  /** Integrated gradients: the number of steps to start with. */
   igSteps?: number;
+  /**
+   * Integrated gradients: triple the steps (up to IG_MAX_STEPS) while Σ IG is further than this
+   * share of |z(x) − z(0)| from it. Off when left out: exactly `igSteps` steps.
+   */
+  igTolerance?: number;
   occlusion?: OcclusionParams;
   /**
    * Images: the value an occluded patch is painted with, per channel. Defaults to 0 (blank) for
@@ -83,6 +96,12 @@ export interface AttributionResult {
   gradient: Float32Array;
   /** Point data with `point` given: ∂z_t/∂coordinates. */
   coordGrad?: Float32Array;
+  /**
+   * The path integrated gradients followed: 'straight', every input scaled together from 0
+   * (α·x); 'plane', point data with its coordinates, the point moving from the origin (features
+   * of α·coords). The two are the same when the features are the raw coordinates.
+   */
+  igPath: 'straight' | 'plane';
   /** Σ integrated, and what it should equal: z_t(x) − z_t(0). */
   igSum: number;
   igExpected: number;
@@ -98,7 +117,7 @@ export interface AttributionResult {
   fill: number[];
   /** Units sitting exactly on a kink for this input (see above). */
   kinks: Kinks;
-  /** The settings actually used, after clamping. */
+  /** The settings actually used, after clamping (and, for igSteps, refinement). */
   igSteps: number;
   occlusionSize: number;
   occlusionStride: number;
@@ -115,6 +134,10 @@ export interface Kinks {
 }
 
 export const DEFAULT_IG_STEPS = 32;
+/** The most steps refinement goes to (32 tripled twice). */
+export const IG_MAX_STEPS = 288;
+/** The view's tolerance: refine until Σ IG is within 2% of the score change. */
+export const IG_TOLERANCE = 0.02;
 export const DEFAULT_OCCLUSION: OcclusionParams = { size: 6, stride: 2 };
 
 export function oneHot(k: number, n = 10): Float32Array {
@@ -290,6 +313,38 @@ export function coordinateGradient(g: ArrayLike<number>, point: PointParams): Fl
   return out;
 }
 
+/** γ(α): the network input at step α of a path from the all-zero input (α = 0) to x (α = 1). */
+export type IgPath = (alpha: number, out: Float64Array) => Float64Array;
+
+/**
+ * Point data: the features along the straight line from the origin to the point, features(α·coords).
+ * Null when that line does not run from the all-zero input to x (unknown features, or coordinates
+ * that do not match x), so the caller falls back to the straight line in feature space.
+ */
+export function planePath(point: PointParams, x: ArrayLike<number>): IgPath | null {
+  let defs: ReturnType<typeof featureDefs>;
+  try {
+    defs = featureDefs(point.dims, point.features);
+  } catch {
+    return null;
+  }
+  if (defs.length !== x.length || point.coords.length !== point.dims) return null;
+  const coords = Float64Array.from(point.coords);
+  const c = new Float64Array(point.dims);
+  const path: IgPath = (alpha, out) => {
+    for (let i = 0; i < c.length; i++) c[i] = alpha * coords[i];
+    for (let f = 0; f < defs.length; f++) out[f] = defs[f].fn(c, 0);
+    return out;
+  };
+  const start = path(0, new Float64Array(defs.length));
+  const end = path(1, new Float64Array(defs.length));
+  for (let f = 0; f < defs.length; f++) {
+    if (start[f] !== 0) return null;
+    if (Math.abs(end[f] - x[f]) > 1e-5 * Math.max(1, Math.abs(x[f]))) return null;
+  }
+  return path;
+}
+
 /** |a − b| relative to |b|; 0 when both are (near) zero. Blows up as b → 0: see completenessGap. */
 export function relativeGap(a: number, b: number): number {
   const d = Math.abs(a - b);
@@ -301,25 +356,35 @@ export function relativeGap(a: number, b: number): number {
 export interface CompletenessGap {
   /** |Σ IG − (z(x) − z(blank))| */
   diff: number;
-  /** diff relative to `ref` (never infinite). */
-  rel: number;
-  /** 'ig': Σ|IG|, the total size of the attributions; 'score': |z(x) − z(blank)|, the larger. */
-  ref: 'ig' | 'score';
+  /** diff relative to the score change |z(x) − z(blank)|; Infinity when the score does not change but the sum is off. */
+  ofScore: number;
+  /** diff relative to Σ|IG|, the total size of the attributions (0 when there are none). */
+  ofIG: number;
+  /**
+   * Σ|IG| is at least CANCEL_RATIO × the score change: positive and negative attributions largely
+   * cancel, so even a sum that is accurate next to the attributions can miss the small change by a
+   * large share. The text then gives both shares.
+   */
+  cancels: boolean;
+  /** Off by more than LARGE_GAP of the score change: the bars do not add up to it. */
+  large: boolean;
 }
 
+export const CANCEL_RATIO = 10;
+export const LARGE_GAP = 0.05;
+
 /**
- * How far integrated gradients are from adding up to the score change. Measured against Σ|IG|
- * (or |z(x) − z(blank)| if larger), not the score change alone: for a digit the network neither
- * likes nor rejects, large positive and negative attributions cancel, z(x) − z(blank) is close to
- * 0 and a relative gap would read hundreds of percent although the sum is accurate.
+ * How far integrated gradients are from adding up to the score change, measured against that
+ * change, which is what completeness promises, so a large miss always shows. On colour photos the
+ * attributions cancel heavily (Σ|IG| is often 30 times the change); measured against Σ|IG|, a sum
+ * off by half the change read "0.1%". Against Σ|IG| too, for context, when they cancel.
  */
 export function completenessGap(igSum: number, igExpected: number, igAbsSum: number): CompletenessGap {
   const diff = Math.abs(igSum - igExpected);
   const score = Math.abs(igExpected);
-  const ref = igAbsSum >= score ? 'ig' : 'score';
-  const s = Math.max(igAbsSum, score);
-  // s = 0 means no attribution and no score change, so diff = 0 too.
-  return { diff, rel: s > 0 ? diff / s : 0, ref };
+  const ofScore = diff === 0 ? 0 : score > 0 ? diff / score : Infinity;
+  const ofIG = igAbsSum > 0 ? diff / igAbsSum : 0;
+  return { diff, ofScore, ofIG, cancels: igAbsSum >= CANCEL_RATIO * score, large: ofScore > LARGE_GAP };
 }
 
 /** Counts the units of the last forward pass that sit exactly on a kink (hidden blocks only). */
@@ -387,7 +452,8 @@ export function* attribution(net: Network, params: AttributionParams): Generator
   const patches = image ? patchGrid(H, size, stride, W) : [];
   const live = patches.map((p) => !patchIsFilled(x, p, size, { c: C, h: H, w: W }, fill));
   const evaluated = live.filter(Boolean).length;
-  const total = 2 + m + evaluated;
+  // Grows when integrated gradients need more steps (see below).
+  let total = 2 + m + evaluated;
   let done = 0;
   const last = net.blocks.length - 1;
   const seed = oneHot(target, net.classes);
@@ -405,21 +471,86 @@ export function* attribution(net: Network, params: AttributionParams): Generator
   const baseLogit = targetLogit(net, new Float32Array(n), target);
   yield { done: ++done, total };
 
-  // 3. Integrated gradients along the straight path from 0 to x.
+  // 3. Integrated gradients from 0 to x: along α·x, or, for a point, along the line from the origin.
+  const path = !image && params.point ? planePath(params.point, x) : null;
+  const tol = Number(params.igTolerance) > 0 ? Number(params.igTolerance) : 0;
+  const igExpected = at.logit - baseLogit;
   const xs = new Float32Array(n);
+  const gp = new Float64Array(n);
+  /** The gradient at step α of the path (a live buffer of the network). */
+  const gradAt = (alpha: number): Float32Array => {
+    if (path) {
+      path(alpha, gp);
+      for (let i = 0; i < n; i++) xs[i] = gp[i];
+    } else scaleInto(x, alpha, xs);
+    net.forward(xs);
+    return net.inputGradient(last, seed);
+  };
+  // Straight path: every step weighs the same, so the sum of the gradients is enough. Plane path:
+  // each feature changes by a different amount per step, so every step's gradient is kept.
   const acc = new Float64Array(n);
-  for (const alpha of igAlphas(m)) {
-    net.forward(scaleInto(x, alpha, xs));
-    const g = net.inputGradient(last, seed);
-    for (let i = 0; i < n; i++) acc[i] += g[i];
+  let grads: Float32Array[] = [];
+  const take = (g: Float32Array): Float32Array => {
+    if (!path) {
+      for (let i = 0; i < n; i++) acc[i] += g[i];
+      return g;
+    }
+    return g.slice();
+  };
+  let M = m;
+  for (const alpha of igAlphas(M)) {
+    const g = take(gradAt(alpha));
+    if (path) grads.push(g);
     yield { done: ++done, total };
+  }
+  /** IG for the M steps taken: x ⊙ mean g (straight), or Σ_k g_k ⊙ (γ(b_k+1) − γ(b_k)) (plane). */
+  const integrate = (): Float64Array => {
+    const ig = new Float64Array(n);
+    if (!path) {
+      for (let i = 0; i < n; i++) ig[i] = (x[i] * acc[i]) / M;
+      return ig;
+    }
+    let lo = new Float64Array(n); // γ(0) = 0
+    let hi = new Float64Array(n);
+    for (let k = 0; k < M; k++) {
+      if (k + 1 < M) path((k + 1) / M, hi);
+      else for (let i = 0; i < n; i++) hi[i] = x[i]; // end exactly at x
+      const g = grads[k];
+      for (let i = 0; i < n; i++) ig[i] += g[i] * (hi[i] - lo[i]);
+      [lo, hi] = [hi, lo];
+    }
+    return ig;
+  };
+  let ig = integrate();
+  // Refinement: the midpoints of 3M steps include those of M, so tripling reuses every gradient.
+  while (tol > 0 && 3 * M <= IG_MAX_STEPS) {
+    let sum = 0;
+    let abs = 0;
+    for (let i = 0; i < n; i++) {
+      sum += ig[i];
+      abs += Math.abs(ig[i]);
+    }
+    // The floor keeps float32 rounding in the network from asking for steps that cannot help.
+    if (Math.abs(sum - igExpected) <= Math.max(tol * Math.abs(igExpected), 1e-5 * (1 + abs))) break;
+    total += 2 * M;
+    const next: Float32Array[] = [];
+    for (let k = 0; k < M; k++) {
+      for (const j of [3 * k, 3 * k + 2]) {
+        const g = take(gradAt((j + 0.5) / (3 * M)));
+        if (path) next[j] = g;
+        yield { done: ++done, total };
+      }
+      if (path) next[3 * k + 1] = grads[k];
+    }
+    grads = next;
+    M *= 3;
+    ig = integrate();
   }
   const igC = new Float32Array(n);
   let igSum = 0;
   for (let i = 0; i < n; i++) {
-    const v = (x[i] * acc[i]) / m;
-    igC[i] = v;
-    igSum += v;
+    igC[i] = ig[i];
+    igSum += ig[i];
   }
   const integrated = sumChannels(igC, C);
   // Σ|IG| over what is shown: pixels (channels added up) or features.
@@ -476,15 +607,16 @@ export function* attribution(net: Network, params: AttributionParams): Generator
     channels: C > 1 ? { saliency: salC, gradInput: gxC, integrated: igC } : undefined,
     gradient: image ? new Float32Array(0) : at.grad,
     coordGrad: !image && params.point ? coordinateGradient(at.grad, params.point) : undefined,
+    igPath: path ? 'plane' : 'straight',
     igSum,
-    igExpected: at.logit - baseLogit,
+    igExpected,
     igAbsSum,
     baseLogit,
     occlusion,
     occlusionProb,
     fill,
     kinks,
-    igSteps: m,
+    igSteps: M,
     occlusionSize: size,
     occlusionStride: stride,
     patches: patches.length,
@@ -505,12 +637,16 @@ export function computeAttribution(net: Network, params: AttributionParams): Att
 
 const MINUS = '−';
 
-/** Three significant digits, a true minus sign (exponents too), '+' on request; never "−0". */
+/**
+ * Three significant digits, trailing zeros kept ("−3.30", so a column of values lines up and a
+ * value reads the same in the table and in the sentence above it), a true minus sign (exponents
+ * too), '+' on request; never "−0".
+ */
 export function sig(v: number, plus = false): string {
   if (!Number.isFinite(v)) return '–';
   if (v === 0) return '0';
   const a = Math.abs(v);
-  const body = a >= 1000 ? a.toFixed(0) : a >= 0.001 ? String(Number(a.toPrecision(3))) : a.toExponential(1).replace('e-', `e${MINUS}`);
+  const body = a >= 999.5 ? a.toFixed(0) : a >= 0.001 ? a.toPrecision(3) : a.toExponential(1).replace('e-', `e${MINUS}`);
   return (v < 0 ? MINUS : plus ? '+' : '') + body;
 }
 
@@ -529,21 +665,39 @@ export function percentText(fraction: number): string {
 
 /**
  * The completeness line under the integrated-gradients map, in three clauses the view may wrap
- * between: "Σ IG = 8.39;" "z(x) − z(blank) = 8.43" "(off by 0.0389, 0.3% of Σ|IG|)". `base` names
- * the all-zero input: "blank" for grey images, "black" for colour ones, "origin" for point features.
+ * between: "Σ IG = 8.39;" "z(x) − z(blank) = 8.43" "(off by 0.0389, 0.5% of the score change)".
+ * The gap is always given as a share of the score change z(x) − z(blank), which is what the
+ * attributions should add up to; when they cancel heavily, as a share of Σ|IG| too ("(off by
+ * 0.106: 53% of the score change, 0.1% of Σ|IG|)"). `base` names the all-zero input: "blank" for
+ * grey images, "black" for colour ones, "origin" for point features. `large` is true when the sum
+ * misses by more than LARGE_GAP of the change.
  */
-export function completenessText(r: Pick<AttributionResult, 'igSum' | 'igExpected' | 'igAbsSum'>, base = 'blank'): { sum: string; expected: string; gap: string; title: string } {
+export function completenessText(
+  r: Pick<AttributionResult, 'igSum' | 'igExpected' | 'igAbsSum'> & { igSteps?: number },
+  base = 'blank',
+): { sum: string; expected: string; gap: string; title: string; large: boolean } {
   const g = completenessGap(r.igSum, r.igExpected, r.igAbsSum);
-  const ref = g.ref === 'ig' ? 'Σ|IG|' : `|z(x) ${MINUS} z(${base})|`;
   const what = base === 'origin' ? 'the point at the origin, where every feature is 0,' : `a ${base} image`;
+  const parts = base === 'origin' ? 'feature' : 'pixel';
+  const change = 'the score change';
+  let gap: string;
+  if (g.diff === 0) gap = '(a match)';
+  else if (!Number.isFinite(g.ofScore)) gap = `(off by ${sig(g.diff)}, ${percentText(g.ofIG)} of Σ|IG|; the score does not change)`;
+  else if (g.cancels) gap = `(off by ${sig(g.diff)}: ${percentText(g.ofScore)} of ${change}, ${percentText(g.ofIG)} of Σ|IG|)`;
+  else gap = `(off by ${sig(g.diff)}, ${percentText(g.ofScore)} of ${change})`;
+  const steps = r.igSteps ? ` from ${r.igSteps} steps` : '';
+  const why = g.cancels
+    ? ` Here the positive and negative attributions largely cancel: Σ|IG| is ${sig(r.igAbsSum / Math.max(Math.abs(r.igExpected), 1e-12))} times the score change, so even a sum that is accurate next to the attributions (${percentText(g.ofIG)} of Σ|IG|) can miss the small change by a larger share.`
+    : '';
   return {
     sum: `Σ IG = ${sig(r.igSum)};`,
     expected: `z(x) ${MINUS} z(${base}) = ${sig(r.igExpected)}`,
-    gap: g.diff === 0 ? '(a match)' : `(off by ${sig(g.diff)}, ${percentText(g.rel)} of ${ref})`,
+    gap,
+    large: g.large,
     title:
       `Completeness: integrated gradients should add up to the change in the score from ${what} to this one. ` +
-      `Σ IG = ${exact(r.igSum)}, z(x) ${MINUS} z(${base}) = ${exact(r.igExpected)}, Σ|IG| = ${exact(r.igAbsSum)}. ` +
-      `The gap is measured against Σ|IG|, the total size of all the ${base === 'origin' ? 'feature' : 'pixel'} attributions, so it stays meaningful when positive and negative attributions cancel out.`,
+      `Σ IG = ${exact(r.igSum)}${steps}, z(x) ${MINUS} z(${base}) = ${exact(r.igExpected)}, Σ|IG| = ${exact(r.igAbsSum)} (the total size of all the ${parts} attributions). ` +
+      `The gap is measured against the score change.${why}`,
   };
 }
 
@@ -567,24 +721,31 @@ export function kinkText(k: Kinks, where: 'blank' | 'image' | 'features' = 'blan
  *
  * Integrated gradients measure from the origin, so with `change` (z(x) − z(origin)) the sentence
  * starts there: a point deep inside a class can still score lower than the origin does, and then
- * every feature "pushes away" although the class is predicted.
+ * every feature lowers the score on the way although the class is predicted. With `predicted`
+ * (the target is the prediction here) the sentence says so, so it does not read as the features
+ * arguing against the prediction.
  */
-export function featureSentence(labels: string[], ig: ArrayLike<number>, target: string, change?: number): string {
+export function featureSentence(labels: string[], ig: ArrayLike<number>, target: string, change?: number, predicted = false): string {
   let total = 0;
   for (let f = 0; f < labels.length; f++) total += Math.abs(ig[f]);
   const order = labels.map((_, f) => f).sort((a, b) => Math.abs(ig[b]) - Math.abs(ig[a]));
   const counts = (f: number) => total > 1e-6 && Math.abs(ig[f]) >= 0.05 * total && Math.abs(ig[f]) >= 1e-4;
   const up = order.find((f) => ig[f] > 0 && counts(f));
   const down = order.find((f) => ig[f] < 0 && counts(f));
-  const from =
-    change === undefined || !Number.isFinite(change)
-      ? ''
-      : Math.abs(change) < 1e-3
-        ? `From the origin to this point, the score for ${target} stays about the same. `
-        : `From the origin to this point, the score for ${target} ${change > 0 ? 'rises' : 'falls'} by ${sig(Math.abs(change))}. `;
+  const measured = change !== undefined && Number.isFinite(change);
+  const from = !measured
+    ? ''
+    : Math.abs(change) < 1e-3
+      ? `From the origin to this point, the score for ${target} stays about the same. `
+      : `From the origin to this point, the score for ${target} ${change > 0 ? 'rises' : 'falls'} by ${sig(Math.abs(change))}. ` +
+        (change < 0 && predicted ? `${target} is still the prediction here; the origin just scores even higher for it. ` : '');
   if (up === undefined && down === undefined) return `${from}No feature moves the score for ${target} much at this point.`;
   const v = (f: number) => sig(ig[f], true);
-  if (up === undefined) return `${from}Every feature that matters pushes away from ${target} here; ${labels[down!]} the most (${v(down!)}).`;
+  if (up === undefined) {
+    return measured
+      ? `${from}Every feature that matters lowers the score on the way; ${labels[down!]} the most (${v(down!)}).`
+      : `${from}Every feature that matters pushes away from ${target} here; ${labels[down!]} the most (${v(down!)}).`;
+  }
   const first = `${from}${labels[up]} pushes toward ${target} the most (${v(up)}).`;
   if (down === undefined) return first;
   return `${first} ${labels[down]} pushes away from it (${v(down)}).`;

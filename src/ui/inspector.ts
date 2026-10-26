@@ -247,9 +247,16 @@ export function mountInspector(): void {
     frozenEl.hidden = !frozen;
     clear(frozenEl);
     if (frozen) {
+      // As in 06: the backward pass stops at the lowest trainable layer (Network.backward), so δ
+      // passes through a frozen layer only when something below it still trains.
+      const below: string[] = [];
+      for (let k = 0; k < i; k++) if (!store.isFrozen(k)) below.push(layerTitle(k));
+      const list = below.length < 2 ? below.join('') : `${below.slice(0, -1).join(', ')} and ${below[below.length - 1]}`;
       frozenEl.append(
-        h('b', null, 'Frozen: training leaves these weights alone.'),
-        ' The optimizer skips its weights and bias; the error signal still flows through it to any trainable layer below.',
+        h('b', null, 'Frozen: training leaves this layer’s weights alone.'),
+        below.length
+          ? ` The optimiser skips its weights and bias, but the error signal δ still passes through it to ${list} below, which ${below.length > 1 ? 'are' : 'is'} trainable.`
+          : ' The optimiser skips its weights and bias, and nothing below it trains either, so training skips its backward pass altogether.',
       );
     }
   };
@@ -604,7 +611,7 @@ export function mountInspector(): void {
     let upright = false;
     if (cols && roomy && !numbers) {
       const fit = Math.floor((availW - left - 12) / (N + 1));
-      if (fit >= colW) cw = Math.max(cw, Math.min(56, colW));
+      if (fit >= colW) cw = Math.max(cw, Math.min(64, colW));
       else {
         cw = Math.max(16, Math.min(44, fit));
         upright = cw < colW;

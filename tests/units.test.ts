@@ -10,7 +10,10 @@ import { centreFieldSize, cropBox, receptiveBox, receptiveSize, wholeImage, type
 import {
   actmax,
   allOff,
+  article,
   coveragePhrase,
+  deadPhrase,
+  deadSummary,
   forwardTo,
   HIST_BINS,
   isDead,
@@ -986,5 +989,48 @@ suite('point datasets', () => {
     expect(mapScale(new Float32Array(4)).max).toBe(1);
     expect(mapScale(new Float32Array(0))).toEqual({ signed: false, max: 1, lo: 0, hi: 0 });
     expect(Array.from(unitColumn(Float32Array.from([1, 2, 3, 4, 5, 6]), 3, 1))).toEqual([2, 5]);
+  });
+});
+
+suite('review 3: true wording on dead units and articles', () => {
+  it('a unit dead on every test point can still fire on the plotted plane, and the words say so (ANA-3)', () => {
+    const d = pointsData(defaultPointsConfig('circle'));
+    const relu: LayerSpec[] = [{ kind: 'dense', units: 4, act: 'relu' }];
+    const net = new Network({ input: d.input, layers: relu, classes: 2 }, 7);
+    // Unit 0 fires only where x₁ + x₂ is beyond every test point, inside the plotted square [−1.25, 1.25]².
+    const tc = d.points!.testCoords;
+    let edge = -Infinity;
+    for (let i = 0; i < d.testY.length; i++) edge = Math.max(edge, tc[2 * i] + tc[2 * i + 1]);
+    expect(edge).toBeLessThan(2.4);
+    const F = d.input.c;
+    const W = net.blocks[0].W;
+    for (let f = 0; f < F; f++) W[f] = 0;
+    W[0] = 1;
+    W[1] = 1;
+    net.blocks[0].b[0] = -(edge + 0.02);
+    const ctx = anyContext(net, d.testX, d.testY, 1);
+    const r = drain(topk(ctx, { block: 0, k: 9 })).result;
+    expect(isDead(r.kind, r.units[0])).toBe(true);
+    const ev = new PointEvaluator();
+    ev.sync(net);
+    const coords = gridCoords(2, 48, 1.25, [0, 1], []);
+    const { acts } = ev.evaluate(coords, 2, d.points!.features, { activations: true });
+    expect(mapScale(unitColumn(acts![0], 4, 0)).hi).toBeGreaterThan(0); // the map has a firing corner
+    // So the card must not say it never fires at all.
+    expect(deadPhrase(true)).toBe('never fires on a test point');
+    expect(deadPhrase(false)).toBe('never fires (dead)');
+    expect(deadSummary(1, 'unit', 'points', true, 1)).toBe(
+      'One unit never fires on a test point (dead on the data); its card shows the points closest to firing. Its map still shows where it would fire: a region no test point reaches.',
+    );
+    expect(deadSummary(4, 'unit', 'points', true, 2)).toBe(
+      '4 units never fire on a test point (dead on the data); their cards show the points closest to firing. 2 of their maps still show where they would fire: regions no test point reaches.',
+    );
+    expect(deadSummary(2, 'unit', 'digits', false)).toBe('2 units never fire (dead); their cards show the digits closest to firing.');
+    expect(deadSummary(0, 'unit', 'digits', false)).toBe('');
+  });
+
+  it('chooses a or an by sound: "a unit", "an image" (ANA-8, design-5)', () => {
+    for (const w of ['unit', 'user', 'usual', 'filter', 'digit', 'point']) expect(article(w), w).toBe('a');
+    for (const w of ['image', 'Image', 'output', 'upper']) expect(article(w), w).toBe('an');
   });
 });

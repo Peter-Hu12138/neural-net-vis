@@ -542,7 +542,7 @@ test('point datasets: top points, response maps over the plane or a slice, point
   expect(hues.red).toBeGreaterThan(500);
   expect(hues.blue).toBeGreaterThan(500);
   const foot = await page.locator('#units-root .units-card-foot').allInnerTexts();
-  expect(foot.every((t) => /^(fires on [<>]?\d+% of points|never fires \(dead\))$/.test(t)), foot.join(' | ')).toBe(true);
+  expect(foot.every((t) => /^(fires on [<>]?\d+% of points|never fires on a test point)$/.test(t)), foot.join(' | ')).toBe(true);
 
   await cards(page).nth(2).click();
   const detail = page.locator('#units-detail');

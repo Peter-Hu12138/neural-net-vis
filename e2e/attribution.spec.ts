@@ -169,8 +169,9 @@ test('explains the prediction four ways, pins a chosen digit and follows the inp
   const c = await completeness(page);
   expect(Math.abs(c.expected)).toBeGreaterThan(0.5);
   expect(Math.abs(c.sum - c.expected) / Math.abs(c.expected)).toBeLessThan(0.05);
-  expect(c.gap).toMatch(/^off by [\d.e−]+, (<0\.1|\d+(\.\d)?)% of Σ\|IG\|$/);
-  await expect(page.locator('#attr-check')).toHaveAttribute('title', /Σ\|IG\| = [\d.]+\. The gap is measured against Σ\|IG\|/);
+  // The gap is always a share of the score change (ANA-4); of Σ|IG| too when the attributions cancel.
+  expect(c.gap).toMatch(/^off by [\d.e−]+(, |: )(<0\.1|\d+(\.\d)?)% of the score change(, (<0\.1|\d+(\.\d)?)% of Σ\|IG\|)?$/);
+  await expect(page.locator('#attr-check')).toHaveAttribute('title', /Σ\|IG\| = [\d.]+ \(the total size of all the pixel attributions\)\. The gap is measured against the score change\./);
 
   // One type scale with the other sections: 16/800 panel titles, 13 px hints, tags ≥ 9 px.
   const type = await page.evaluate(() => {
@@ -470,9 +471,11 @@ test('CIFAR-10: maps over the photo with the channels added up, mean-colour occl
 
   // Completeness over all three channels, measured from a black image.
   const text = (await page.locator('#attr-check').textContent())!;
-  const m = text.match(/^Σ IG = (\S+); z\(x\) − z\(black\) = (\S+) \((?:off by \S+, ([<\d.]+)% of .+|a match)\)$/);
+  const m = text.match(/^Σ IG = (\S+); z\(x\) − z\(black\) = (\S+) \((?:off by [^,:]+[,:] ([<\d.]+)% of the score change.*|a match)\)$/);
   expect(m, text).not.toBeNull();
+  // Refined until within 2% of the score change, or 288 steps (ANA-4).
   if (m![3]) expect(Number(m![3].replace('<', ''))).toBeLessThan(5);
+  await expect(page.locator('[data-panel="integrated"] .hint')).toContainText(/\((32|96|288) steps\)/);
 
   // Hover: the pixel's three values, and the attribution split over its channels.
   const ig = (await page.locator('#attr-map-integrated').boundingBox())!;

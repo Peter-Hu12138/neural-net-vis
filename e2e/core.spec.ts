@@ -167,10 +167,10 @@ test('04 labels a point network’s weights with its input features', async ({ p
   await page.waitForFunction(() => (window as unknown as W).raster.store.net.getWeights()[0].length === 8 * 4);
   await clearTexts(page);
   await inspect(page, 0, 'heat', 'dense-matrix');
-  await expect(inspCanvas(page)).toHaveAttribute('aria-label', 'Dense 1 weights as a heatmap: 8 rows, one per unit, by the input features (x₁, x₂, x₁², sin x₁), plus a bias column');
+  await expect(inspCanvas(page)).toHaveAttribute('aria-label', 'Dense 1 weights as a heatmap: 8 rows, one per unit, by the input features (x₁, x₂, x₁², sin\u00a0πx₁), plus a bias column');
   await expect.poll(async () => (await texts(page)).includes('x₁²')).toBe(true);
   const drawn = await texts(page);
-  for (const t of ['x₁', 'x₂', 'x₁²', 'sin x₁', 'u1', 'u8', 'b']) expect(drawn, t).toContain(t);
+  for (const t of ['x₁', 'x₂', 'x₁²', 'sin\u00a0πx₁', 'u1', 'u8', 'b']) expect(drawn, t).toContain(t);
 
   // A cell's tooltip names the unit and the feature.
   let tip = '';
@@ -178,7 +178,7 @@ test('04 labels a point network’s weights with its input features', async ({ p
     await inspCanvas(page).hover({ position: { x, y: 30 } });
     tip = (await page.locator('#tip').isVisible()) ? ((await page.locator('#tip').textContent()) ?? '') : '';
   }
-  expect(tip).toMatch(/^W\[u\d ← (x₁|x₂|x₁²|sin x₁)\] = −?\d\.\d{4}$/);
+  expect(tip).toMatch(/^W\[u\d ← (x₁|x₂|x₁²|sin\u00a0πx₁)\] = −?\d\.\d{4}$/);
   await page.mouse.move(0, 0);
   await page.locator('#weights').screenshot({ path: `${SHOTS}/17-core-inspector-points.png`, style: SHOT_STYLE });
 
@@ -320,15 +320,31 @@ test('06 update step leaves frozen layers alone, and 04 marks them', async ({ pa
   // 04: the marker and the layer menu.
   await inspect(page, 0, 'heat', 'conv');
   await expect(page.locator('#inspector .insp-frozen')).toBeVisible();
-  await expect(page.locator('#inspector .insp-frozen')).toContainText('Frozen: training leaves these weights alone.');
+  // Nothing below Conv 1 trains, so the note must not say the error signal still flows through it (ANA-5).
+  await expect(page.locator('#inspector .insp-frozen')).toHaveText(
+    'Frozen: training leaves this layer’s weights alone. The optimiser skips its weights and bias, and nothing below it trains either, so training skips its backward pass altogether.',
+  );
   await expect(page.locator('#insp-layer option').first()).toContainText('frozen');
   await inspect(page, 1, 'heat', 'conv-grid');
   await expect(page.locator('#inspector .insp-frozen')).toBeHidden();
+  // Freeze Conv 2 too, then thaw Conv 1: now δ has to pass through Conv 2 to reach Conv 1.
+  await page.evaluate(() => {
+    const a = (window as unknown as W).raster.actions;
+    a.setFrozen(1, true);
+    a.setFrozen(0, false);
+  });
+  await expect(page.locator('#inspector .insp-frozen')).toContainText('the error signal δ still passes through it to Conv 1 below, which is trainable.');
+  await page.evaluate(() => {
+    const a = (window as unknown as W).raster.actions;
+    a.setFrozen(1, false);
+    a.setFrozen(0, true);
+  });
+  await inspect(page, 0, 'heat', 'conv');
 
   // 06: Conv 1's gradient step explains that training skips it; the update leaves it alone.
   await page.locator('#backprop').scrollIntoViewIfNeeded();
   await page.locator('.steps li:not(.phase) button', { hasText: 'Conv 1: gradients' }).click();
-  await expect(page.locator('.bp-main .bp-frozen')).toContainText('Frozen: training leaves these weights alone.');
+  await expect(page.locator('.bp-main .bp-frozen')).toContainText('Frozen: training leaves this layer’s weights alone.');
   await expect(page.locator('.bp-main .bp-frozen')).toContainText('training skips this step entirely');
   await page.locator('.steps li:not(.phase) button', { hasText: 'Conv 2: gradients' }).click();
   await expect(page.locator('.bp-main .bp-frozen')).toHaveCount(0);

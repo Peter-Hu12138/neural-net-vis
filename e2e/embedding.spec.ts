@@ -178,7 +178,10 @@ test('PCA map: automatic, numerals, hover preview, click to probe, highlight and
 
   // Hover: tooltip with label and prediction, plus coordinates with a true minus sign (EMB-9).
   const tip = await hoverDigit(page);
-  expect(tip).toMatch(/^Test digit #\d+ · label \d · predicted \d\nPC1 −?\d+\.\d\d · PC2 −?\d+\.\d\d$/);
+  expect(tip).toMatch(/^Test digit #\d+ · label \d · predicted \d\nPC1 −?\d+(\.\d+)? · PC2 −?\d+(\.\d+)?$/);
+  // One precision for both coordinates of a map (design-9).
+  const pcs = tip.match(/PC1 −?\d+(\.\d*)? · PC2 −?\d+(\.\d*)?/)!;
+  expect((pcs[1] ?? '').length).toBe((pcs[2] ?? '').length);
   expect(tip).not.toContain('-');
   const index = Number(tip.match(/#(\d+)/)![1]);
   await expect(page.locator('#embed-root .embed-aside .sub').first()).toHaveText('Hovered digit');
@@ -628,7 +631,7 @@ test('CIFAR-10: class names as the legend, colour thumbnails, no digits anywhere
 
   // Hover: the image in colour, its class name and the prediction.
   const tip = await hoverSample(page, /^Test image #\d+/);
-  expect(tip).toMatch(/^Test image #\d+ · [a-z]+ · predicted [a-z]+\nPC1 −?\d+\.\d\d · PC2 −?\d+\.\d\d$/);
+  expect(tip).toMatch(/^Test image #\d+ · [a-z]+ · predicted [a-z]+\nPC1 −?\d+(\.\d+)? · PC2 −?\d+(\.\d+)?$/);
   await expect(page.locator('#embed-root .embed-aside .sub').first()).toHaveText('Hovered image');
   await expect(page.locator('#embed-preview')).toContainText(/Label: [a-z]+/);
   const colour = await page.locator('#embed-preview canvas').evaluate((c: HTMLCanvasElement) => {
@@ -687,7 +690,7 @@ test('point data: every test point, class chips, where each point lies in the in
 
   // Hover: the point's class, the prediction and where it lies in the input plane.
   const tip = await hoverSample(page, /^Test point #\d+/);
-  expect(tip).toMatch(/^Test point #\d+ · Class \d · predicted Class \d\nPC1 −?\d+\.\d\d · PC2 −?\d+\.\d\d\nAt x₁ −?\d\.\d\d · x₂ −?\d\.\d\d in the input$/);
+  expect(tip).toMatch(/^Test point #\d+ · Class \d · predicted Class \d\nPC1 −?\d+(\.\d+)? · PC2 −?\d+(\.\d+)?\nAt x₁ −?\d\.\d\d · x₂ −?\d\.\d\d in the input$/);
   await expect(page.locator('#embed-root .embed-aside .sub').first()).toHaveText('Hovered point');
   await expect(page.locator('#embed-preview canvas')).toHaveAttribute('aria-label', /^Where the hovered point lies in the input: x₁ −?\d\.\d\d, x₂ −?\d\.\d\d$/);
   const index = Number(tip.match(/#(\d+)/)![1]);

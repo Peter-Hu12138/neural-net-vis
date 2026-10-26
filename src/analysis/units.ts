@@ -500,6 +500,35 @@ export function isDead(kind: UnitKind, s: Pick<UnitSummary, 'sorted'>): boolean 
   return kind !== 'output' && n > 0 && s.sorted[0] === s.sorted[n - 1];
 }
 
+/**
+ * A dead unit's card line. Images: "never fires (dead)" (on the test images scanned). Points:
+ * "never fires on a test point": its response map covers the whole plane, which can show it firing
+ * where no test point lies, so "never fires" alone would contradict the map next to it.
+ */
+export const deadPhrase = (points: boolean): string => (points ? 'never fires on a test point' : 'never fires (dead)');
+
+/**
+ * The note on dead units above the cards: how many never fire, what their cards show instead, and,
+ * on point data, how many of their maps still fire somewhere (`firingOnMap`), a region no test
+ * point reaches. `what` names a unit ("unit", "filter"), `many` the samples ("digits", "points").
+ */
+export function deadSummary(dead: number, what: string, many: string, points: boolean, firingOnMap = 0): string {
+  if (dead <= 0) return '';
+  const where = points ? ' on a test point' : '';
+  let t =
+    `${dead === 1 ? `One ${what} never fires${where}` : `${dead} ${what}s never fire${where}`} (dead${points ? ' on the data' : ''}); ` +
+    `${dead === 1 ? 'its card shows' : 'their cards show'} the ${many} closest to firing.`;
+  const k = Math.min(firingOnMap, dead);
+  if (points && k > 0) {
+    const who = k === dead ? (dead === 1 ? 'Its map' : 'Their maps') : k === 1 ? 'One of their maps' : `${k} of their maps`;
+    t += ` ${who} still ${k === 1 ? 'shows' : 'show'} where ${k === 1 ? 'it' : 'they'} would fire: ${k === 1 ? 'a region' : 'regions'} no test point reaches.`;
+  }
+  return t;
+}
+
+/** "a" or "an" by sound: "an image", "an output", but "a unit", "a user" (a "u" read as "you"). */
+export const article = (w: string): 'a' | 'an' => (/^(?:[aeio]|u(?!ni|s[eu]))/i.test(w) ? 'an' : 'a');
+
 /** "Class 0" → "class 0", "Ankle boot" → "ankle boot"; leaves acronyms ("CNN") alone. */
 const lowerFirst = (t: string) => (/^[A-Z][A-Z]/.test(t) ? t : t.charAt(0).toLowerCase() + t.slice(1));
 
