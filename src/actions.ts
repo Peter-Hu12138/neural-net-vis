@@ -360,14 +360,12 @@ export async function loadModel(json: unknown): Promise<void> {
 }
 
 /**
- * Transfer learning: takes a model's layers and weights into the current dataset, with a new
- * output layer sized for this dataset's classes. The copied layers start frozen, so training
- * first fits only the new head; unfreeze them later to fine-tune.
+ * Why a model cannot be transferred to the current data, or null when it can. A point model's
+ * first layer was trained on particular input features (x₁², x₂², …); copied and frozen, it only
+ * means something when fed those same features, so they come with it (transferModel switches to
+ * them) and its input is checked against them, not against the features in use now.
  */
-export function transferModel(json: unknown): void {
-  const { file, net } = decodeModel(json);
-  // A point model's first layer was trained on particular input features (x₁², x₂², …). Copied
-  // and frozen, it only means something when fed those same features, so they come with it.
+export function transferProblem(file: Pick<ModelFile, 'name' | 'arch' | 'features'>): string | null {
   const info = store.info;
   const features = info.kind === 'points' && file.features ? file.features : null;
   if (features) {
@@ -375,13 +373,23 @@ export function transferModel(json: unknown): void {
     const missing = features.filter((f) => !have.has(f));
     if (missing.length) {
       const label = (id: FeatureId) => featureCatalog(3).find((f) => f.id === id)?.label ?? id;
-      throw new Error(`${file.name} was trained on ${missing.map(label).join(', ')}, which ${info.name} does not have: its points have ${info.dims} coordinates.`);
+      return `${file.name} was trained on ${missing.map(label).join(', ')}, which ${info.name} does not have: its points have ${info.dims} coordinates.`;
     }
   }
   const input = features ? featureShape(features) : store.input;
-  if (!sameShape(input, file.arch.input)) {
-    throw new Error(`${file.name} expects ${fmt(file.arch.input)} inputs, but ${info.name} has ${fmt(input)}.`);
-  }
+  return sameShape(input, file.arch.input) ? null : `${file.name} expects ${fmt(file.arch.input)} inputs, but ${info.name} has ${fmt(input)}.`;
+}
+
+/**
+ * Transfer learning: takes a model's layers and weights into the current dataset, with a new
+ * output layer sized for this dataset's classes. The copied layers start frozen, so training
+ * first fits only the new head; unfreeze them later to fine-tune.
+ */
+export function transferModel(json: unknown): void {
+  const { file, net } = decodeModel(json);
+  const problem = transferProblem(file);
+  if (problem) throw new Error(problem);
+  const features = store.info.kind === 'points' && file.features ? file.features : null;
   if (features && features.join() !== store.features.join()) setFeatures(features.slice());
   store.spec = structuredClone(file.arch.layers);
   store.keepWeights = true;

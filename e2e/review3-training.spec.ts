@@ -145,6 +145,21 @@ test('DATA-1 / ANA-1: Pause during Play on Circle: the test accuracy and confusi
   }
 });
 
+test('ANA-1: at Max speed on Spiral, Pause brings the test accuracy and matrix up to the paused weights', async ({ page }) => {
+  await open(page);
+  await switchTo(page, 'spiral');
+  await page.evaluate(() => (window as unknown as { raster: Raster }).raster.actions.setSpeed('max'));
+  await page.click('#play');
+  await page.waitForFunction(() => ((window as unknown as { raster: Raster }).raster.store.status?.step ?? 0) > 3000, null, { timeout: 30_000 });
+  await page.click('#play');
+  await page.waitForFunction(() => !(window as unknown as { raster: Raster }).raster.store.status?.running, null, { timeout: 2000 });
+  await stoppedAndEvaluated(page);
+  const t = await truth(page);
+  expect(await store<number>(page, 's.evals.at(-1).acc')).toBe(t.acc);
+  expect(await store<number[]>(page, 's.evals.at(-1).confusion')).toEqual(t.confusion);
+  await expect(testAccKpi(page)).toHaveText(pct(t.acc));
+});
+
 test('DATA-5: +1 Epoch on MNIST, Train on 200, batch 32 stops at exactly 1.00, 2.00 and 3.00 epochs', async ({ page }) => {
   await open(page);
   await page.getByRole('group', { name: 'Train on' }).getByRole('button', { name: '200', exact: true }).click();
