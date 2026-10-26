@@ -7,7 +7,10 @@ import {
   balancedIndices,
   calibrateRow,
   DEFAULT_N,
+  embedCount,
   embedIndices,
+  pcDecimals,
+  pcValue,
   gaussianProjection,
   isFrame,
   REDUCING,
@@ -681,6 +684,29 @@ suite('axis and tooltip numbers', () => {
     expect(signedValue(-0.0049)).toBe('−4.9e−3');
     expect(signedValue(0)).toBe('0.00');
     expect(signedValue(Infinity)).toBe('—');
+  });
+
+  it('PCA read-outs use one precision per map, without exponents (design-9)', () => {
+    // Circle: PC coordinates span about ±0.9, so three decimals for both.
+    const coords = Float32Array.from([-0.0071, -0.52, 0.91, 0.3]);
+    const d = pcDecimals(coords);
+    expect(d).toBe(3);
+    expect(`PC1 ${pcValue(-0.0071, d)} · PC2 ${pcValue(-0.52, d)}`).toBe('PC1 −0.007 · PC2 −0.520');
+    expect(pcDecimals([5.2, -3])).toBe(2);
+    expect(pcDecimals([120, 4])).toBe(0);
+    expect(pcDecimals([0.004, 0.001])).toBe(5);
+    expect(pcDecimals([0, 0])).toBe(2);
+    expect(pcValue(-0.0001, 3)).toBe('0.000');
+    expect(pcValue(NaN, 2)).toBe('—');
+  });
+
+  it('counts the samples a map holds: ⌊1,000 / classes⌋ of each class above 1,000 (ANA-6)', () => {
+    // Three blobs, 1,800 test points: 333 of each class, 999 in all (the note said 1,000).
+    const labels = Uint8Array.from({ length: 1800 }, (_, i) => i % 3);
+    expect(embedCount(labels, DEFAULT_N, 3)).toBe(999);
+    expect(embedCount(labels, DEFAULT_N, 3)).toBe(embedIndices(labels, DEFAULT_N, 3).length);
+    expect(embedCount(labels.subarray(0, 300), DEFAULT_N, 3)).toBe(300);
+    expect(embedCount(Uint8Array.from({ length: 2000 }, (_, i) => i % 10), DEFAULT_N, 10)).toBe(1000);
   });
 });
 

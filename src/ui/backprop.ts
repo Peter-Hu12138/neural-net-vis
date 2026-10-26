@@ -858,7 +858,8 @@ function denseForwardSteps(steps: Step[], bt: BT, c: Ctx): void {
       const terms = Array.from({ length: N }, (_, i) => ({ i, v: bt.W[j * N + i] * bt.x[i] })).sort((a, b) => Math.abs(b.v) - Math.abs(a.v));
       const top = terms.slice(0, 6);
       const rest = terms.slice(6).reduce((s, q) => s + q.v, 0);
-      const unit = bt.isOut ? `${c.digits ? 'digit' : 'class'} ${className(c, j)}` : `unit ${j + 1}`;
+      // "digit 7", "class cat", but "Class 0", not "class Class 0", for names that already say it.
+      const unit = bt.isOut ? `${c.digits ? 'digit ' : hasName(c, j) ? 'class ' : ''}${className(c, j)}` : `unit ${j + 1}`;
       const lines: (string | [string, boolean])[] = [[`${bt.isOut ? `Logit for ${unit}` : `Unit ${j + 1}`}: ${N > 6 ? `the 6 largest of its ${int(N)} terms` : `its ${N} term${N === 1 ? '' : 's'}`}`, true]];
       const jl = bt.isOut ? String(j) : String(j + 1);
       const wlab = (i: number) => (feats ? `W[${jl}, ${c.feats[i]}] · ${c.feats[i]}` : `W[${jl}, ${i + 1}] · x[${i + 1}]`);
@@ -876,7 +877,7 @@ function denseForwardSteps(steps: Step[], bt: BT, c: Ctx): void {
         h(
           'p',
           { class: 'bp-text' },
-          `${flat ? `The ${bt.inShape.h}×${bt.inShape.w}×${bt.inShape.c} input is first flattened into one vector of ${int(N)} numbers. ` : ''}${feats ? `Its inputs are the ${N} features (${c.feats.join(', ')}). ` : ''}Each of the ${M} ${outWhat} multiplies every input by its own weight, adds them up and adds a bias. The highlighted row of W produces ${unit}.`,
+          `${flat ? `The ${bt.inShape.h}×${bt.inShape.w}×${bt.inShape.c} input is first flattened into one vector of ${int(N)} numbers. ` : ''}${feats ? `Its inputs are the ${N} features (${c.feats.join(', ')}). ` : ''}Each of the ${M} ${outWhat} multiplies every input by its own weight, adds them up and adds a bias. The highlighted row of W produces ${bt.isOut ? `the logit for ${unit}` : unit}.`,
         ),
         formula('z[j] = b[j] + Σᵢ W[j, i] · x[i]', false),
         row(
@@ -900,12 +901,12 @@ function frozenBackward(bt: BT, layers: BT[]): HTMLElement | null {
   const below = layers.filter((b) => b.index < bt.index && !store.isFrozen(b.index));
   if (below.length) {
     return frozenNote(
-      h('b', null, 'Frozen: training leaves these weights alone.'),
+      h('b', null, 'Frozen: training leaves this layer’s weights alone.'),
       ` ∂L/∂W above is what plain training would use, but the update skips it. δ still has to pass through this layer, because ${below.map((b) => b.name).join(' and ')} below ${below.length > 1 ? 'are' : 'is'} trainable.`,
     );
   }
   return frozenNote(
-    h('b', null, 'Frozen: training leaves these weights alone.'),
+    h('b', null, 'Frozen: training leaves this layer’s weights alone.'),
     ' Nothing below this layer is trainable either, so training skips this step entirely: no one needs its gradients. They are worked out here only so you can see them.',
   );
 }
@@ -1179,7 +1180,7 @@ function renderUpdate(el: HTMLElement, t: Trace, ui: { eta: number; onEta: (v: n
     h(
       'p',
       { class: 'bp-text' },
-      'Every weight takes a small step against its gradient, scaled by the step size η. This walkthrough uses plain SGD on this one example, so you can see its effect directly. During training the trainer averages gradients over a batch and uses the optimizer chosen in the bar above.',
+      'Every weight takes a small step against its gradient, scaled by the step size η. This walkthrough uses plain SGD on this one example, so you can see its effect directly. During training the trainer averages gradients over a batch and uses the optimiser chosen in the bar above.',
     ),
     formula(`W ← W − η · ∂L/∂W        b ← b − η · ∂L/∂b${frozenNames.length ? '\nfrozen layers: W ← W, b ← b' : ''}`, true),
   );

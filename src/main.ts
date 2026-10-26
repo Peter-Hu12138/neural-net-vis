@@ -16,6 +16,7 @@ import { mountInspector } from './ui/inspector';
 import { mountModelPanel } from './ui/modelPanel';
 import { mountNetworkView } from './ui/networkView';
 import { analysis } from './analysis/client';
+import { DEFAULT_N, embedCount } from './analysis/embed';
 import { mountAttribution } from './ui/attributionView';
 import { mountDistributions } from './ui/distView';
 import { mountEmbedding } from './ui/embeddingView';
@@ -77,14 +78,16 @@ const notes = () => {
   $('note-data').textContent = pts
     ? 'Pick any point as the network’s input, and see the features it is turned into.'
     : `Pick any ${noun(info)} as the network's input, or add your own images to the training set.`;
+  // 3-D data: the cards map a slice through the cube, not a plane of the data.
   $('note-units').textContent = pts
-    ? 'What each unit responds to: the test points that excite it most, and its response over the whole plane.'
+    ? `What each unit responds to: the test points that excite it most, and its response ${info.dims === 3 ? 'over a slice through the 3-D space' : 'across the plane'}.`
     : `What each filter and unit responds to: the test ${many} that excite it most, and an input synthesised to excite it.`;
   $('note-attr').textContent = pts
     ? 'Which input features drive the prediction for the current point, measured several ways.'
     : 'Which pixels drive the prediction for the current input, measured four different ways.';
-  // Section 11 maps every test point when there are fewer than 1,000.
-  const n = store.data ? Math.min(1000, store.data.testY.length) : 1000;
+  // Section 11 maps every test point when there are at most 1,000, else ⌊1,000 / classes⌋ of each
+  // class (999 for three classes): the same count its map holds.
+  const n = store.data ? embedCount(store.data.testY, DEFAULT_N, store.classes) : DEFAULT_N;
   $('note-embed').textContent = `How a layer arranges ${pts && !store.data ? 'the test points' : `${int(n)} test ${noun(info, n)}`}, flattened to two dimensions with PCA or t-SNE.`;
 };
 store.on('dataset', notes);

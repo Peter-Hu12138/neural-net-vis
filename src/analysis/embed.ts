@@ -123,6 +123,11 @@ export function embedIndices(labels: ArrayLike<number>, n: number, classes = 10)
   return balancedIndices(labels, n, classes);
 }
 
+/** How many test samples embedIndices picks: every one up to n, else ⌊n/classes⌋ of each class (999 of 1,800 for three classes). */
+export function embedCount(labels: ArrayLike<number>, n: number, classes = 10): number {
+  return embedIndices(labels, n, classes).length;
+}
+
 /**
  * The first ⌊n/classes⌋ test samples of each class, in ascending index order. Deterministic,
  * balanced, and the order interleaves classes, so no class is always drawn on top of another.
@@ -999,6 +1004,26 @@ export function signedValue(v: number, d = 2): string {
   if (!Number.isFinite(v)) return '—';
   if (v !== 0 && Math.abs(v) < 10 ** -d) return minus(v.toExponential(1));
   return minus(v.toFixed(d));
+}
+
+/**
+ * Decimals for one map's PCA coordinates: enough for three significant digits of its largest
+ * coordinate (2 for a map spanning ±1 to ±10), so PC1 and PC2 of every point read at the same
+ * precision ("−0.007 · −0.520", not "−7.1e−3 · −0.52"). 0–8.
+ */
+export function pcDecimals(coords: ArrayLike<number>): number {
+  let max = 0;
+  for (let i = 0; i < coords.length; i++) {
+    const a = Math.abs(coords[i]);
+    if (Number.isFinite(a) && a > max) max = a;
+  }
+  if (!(max > 0)) return 2;
+  return Math.max(0, Math.min(8, 2 - Math.floor(Math.log10(max))));
+}
+
+/** A PCA coordinate at a map's own precision (see pcDecimals): a true minus sign, never "−0.00". */
+export function pcValue(v: number, d: number): string {
+  return Number.isFinite(v) ? minus(v.toFixed(d)) : '—';
 }
 
 // ── The job ────────────────────────────────────────────────────────────
