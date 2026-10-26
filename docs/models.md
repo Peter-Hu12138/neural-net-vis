@@ -126,10 +126,10 @@ The five conditions, each as it can be done on the page:
 
 | From → to | Images | From scratch | Transfer, all frozen | Transfer, conv frozen | Transfer, then fine-tune | Control: nothing copied |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| MNIST → Fashion-MNIST | 1,000 | 81.9% (80.9–82.4) | 63.6% (63.0–64.0) | 82.0% (81.5–82.4) | 81.2% (81.1–81.3) | 81.2% (80.1–82.6) |
-| MNIST → Fashion-MNIST | 200 | 76.0% (75.2–77.1) | 58.8% (58.7–59.2) | 75.0% (74.5–75.4) | 74.6% (73.7–75.4) | 76.6% (75.4–78.1) |
-| Fashion-MNIST → MNIST | 1,000 | 94.0% (93.7–94.2) | 61.7% (60.8–63.0) | 92.8% (92.6–93.0) | 92.3% (92.0–92.6) | 91.8% (90.8–92.5) |
-| Fashion-MNIST → MNIST | 200 | 80.0% (79.4–80.5) | 56.1% (54.9–57.6) | 78.9% (77.3–80.2) | 78.6% (77.7–80.0) | 80.2% (79.3–80.8) |
+| MNIST → Fashion-MNIST | 1,000 | 81.9% (80.9–82.4) | 63.6% (63.0–64.0) | 82.0% (81.5–82.4) | 79.3% (78.9–80.0) | 81.2% (80.1–82.6) |
+| MNIST → Fashion-MNIST | 200 | 76.0% (75.2–77.1) | 58.8% (58.7–59.2) | 75.0% (74.5–75.4) | 73.5% (72.6–74.3) | 76.6% (75.4–78.1) |
+| Fashion-MNIST → MNIST | 1,000 | 94.0% (93.7–94.2) | 61.7% (60.8–63.0) | 92.8% (92.6–93.0) | 91.0% (90.8–91.1) | 91.8% (90.8–92.5) |
+| Fashion-MNIST → MNIST | 200 | 80.0% (79.4–80.5) | 56.1% (54.9–57.6) | 78.9% (77.3–80.2) | 76.7% (75.9–78.2) | 80.2% (79.3–80.8) |
 
 ### Early on: after the first 1,000 and 5,000 training images
 
@@ -146,10 +146,10 @@ The five conditions, each as it can be done on the page:
 
 | From → to | Images | From scratch | Transfer, all frozen | Transfer, conv frozen | Transfer, then fine-tune | Control: nothing copied |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| MNIST → Fashion-MNIST | 1,000 | 28.7 s | 12.9 s | 13.7 s | 21.8 s | 14.2 s |
-| MNIST → Fashion-MNIST | 200 | 27.1 s | 11.8 s | 12.0 s | 19.2 s | 12.6 s |
-| Fashion-MNIST → MNIST | 1,000 | 28.9 s | 12.1 s | 13.4 s | 21.4 s | 14.2 s |
-| Fashion-MNIST → MNIST | 200 | 28.2 s | 12.5 s | 13.2 s | 19.4 s | 12.5 s |
+| MNIST → Fashion-MNIST | 1,000 | 28.7 s | 12.9 s | 13.7 s | 18.9 s | 14.2 s |
+| MNIST → Fashion-MNIST | 200 | 27.1 s | 11.8 s | 12.0 s | 18.7 s | 12.6 s |
+| Fashion-MNIST → MNIST | 1,000 | 28.9 s | 12.1 s | 13.4 s | 18.2 s | 14.2 s |
+| Fashion-MNIST → MNIST | 200 | 28.2 s | 12.5 s | 13.2 s | 17.6 s | 12.5 s |
 
 ### What the numbers say
 
@@ -171,8 +171,11 @@ The five conditions, each as it can be done on the page:
    training from scratch on Fashion-MNIST (67.4% against 68.2%) and behind it on MNIST (59.3% against
    75.3%; the control, with nothing copied, reaches 72.4%): layers learned on clothing slow down the
    first steps on digits.
-5. **Fine-tuning everything does not help with this little data**: it ends 0.3–0.8 points below
-   keeping the convolutions frozen.
+5. **Fine-tuning everything does not help with this little data**: it ends 1.5–2.7 points below
+   keeping the convolutions frozen. (The fine-tuning runs were repeated after a review found that
+   Adam took oversized steps in a layer just unfrozen; with the corrected optimiser, which resets a
+   layer's moments when it is unfrozen, fine-tuning ends 1–2 points lower than first measured, and
+   the conclusion is unchanged. `public/models/transfer.json` holds the repeated runs.)
 
 Between two small sets of 28×28 grey pictures, then, transfer mostly saves training time. Transfer
 pays off in accuracy when the source network has learned far more than the new examples can teach,
