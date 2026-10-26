@@ -329,7 +329,7 @@ test('3-D shells: the cube renders, dragging turns it, the slice slider moves th
   await expect(orbit).toHaveAttribute('data-yaw', String(yaw - 10));
   await page.getByRole('button', { name: 'Reset view' }).click();
   await expect(orbit).toHaveAttribute('data-yaw', '34');
-  await page.getByRole('button', { name: 'Turn ↻' }).click();
+  await page.getByRole('button', { name: 'Turn right 30°' }).click();
   await expect(orbit).toHaveAttribute('data-yaw', '64');
 
   // The slice: a slider moves it, the map follows.

@@ -5,6 +5,8 @@ import { store } from '../store';
 import { $, clear, h } from './dom';
 import { boundaryOpts, create2D, onBoundaryOpts, setBoundaryOpts, type View } from './boundary2d';
 import { create3D } from './boundary3d';
+import { lossText } from './charts';
+import { markSvg } from './marks';
 
 /**
  * Decision boundary of point datasets (2-D and 3-D), mounted into #boundary in section 03: the
@@ -39,10 +41,9 @@ export function mountBoundary(): void {
       const b = h(
         'button',
         { type: 'button', class: 'chip bd-class', 'aria-pressed': String(k === boundaryOpts.addClass), 'aria-label': `Add points of ${name}`, title: name },
-        h('i', { 'aria-hidden': 'true' }),
+        markSvg(k, 'train', { size: 13 }),
         info.glyphs[k],
       );
-      b.style.setProperty('--c', `var(--cat-${k % 10})`);
       b.addEventListener('click', () => setBoundaryOpts({ addClass: k, adding: true }));
       chips.append(b);
     });
@@ -59,7 +60,7 @@ export function mountBoundary(): void {
   store.on('custom', syncChips);
 
   const lead = h('p', { class: 'hint bd-lead' });
-  const key = h('div', { class: 'bd-key', 'aria-label': 'Key' });
+  const key = h('div', { class: 'bd-key', role: 'list', 'aria-label': 'Key' });
   const controls = h(
     'div',
     { class: 'bd-controls' },
@@ -73,9 +74,9 @@ export function mountBoundary(): void {
     return { el: h('div', { class: 'kpi', title }, h('span', { class: 'label' }, label), b), b };
   };
   const mEpoch = kpi('Epoch', 'Passes through the training points so far');
-  const mTrainLoss = kpi('Train loss', 'Training loss: cross-entropy on the latest training batches');
+  const mTrainLoss = kpi('Train loss', 'Training loss: cross-entropy on the latest training batches, smoothed as in 05');
   const mTestLoss = kpi('Test loss', 'Test loss: cross-entropy on the test points, at the latest evaluation');
-  const mTrainAcc = kpi('Train acc.', 'Training accuracy: share of the latest training batches classified correctly');
+  const mTrainAcc = kpi('Train acc.', 'Training accuracy: share of the latest training batches classified correctly, smoothed as in 05');
   const mTestAcc = kpi('Test acc.', 'Test accuracy: share of test points classified correctly, at the latest evaluation');
   mTestLoss.el.classList.add('is-accent');
   mTestAcc.el.classList.add('is-accent');
@@ -88,12 +89,19 @@ export function mountBoundary(): void {
     requestAnimationFrame(() => {
       metricsQueued = false;
       const s = store.status;
-      const tp = store.points.at(-1);
       const ev = store.evals.at(-1);
+      // The same figures as 05: the training curve smoothed the same way, losses in one format.
+      let loss = NaN;
+      let acc = NaN;
+      for (const q of store.points) {
+        loss = Number.isNaN(loss) ? q.loss : 0.6 * loss + 0.4 * q.loss;
+        acc = Number.isNaN(acc) ? q.acc : 0.6 * acc + 0.4 * q.acc;
+      }
+      const tp = store.points.length > 0;
       mEpoch.b.textContent = s ? fixed(s.epochFraction, 2) : fixed(0, 2);
-      mTrainLoss.b.textContent = tp ? fixed(tp.loss, 3) : '—';
-      mTestLoss.b.textContent = ev ? fixed(ev.loss, 3) : '—';
-      mTrainAcc.b.textContent = tp ? pct(tp.acc) : '—';
+      mTrainLoss.b.textContent = tp ? lossText(loss) : '—';
+      mTestLoss.b.textContent = ev ? lossText(ev.loss) : '—';
+      mTrainAcc.b.textContent = tp ? pct(acc) : '—';
       mTestAcc.b.textContent = ev ? pct(ev.acc) : '—';
     });
   };
@@ -125,12 +133,15 @@ export function mountBoundary(): void {
         ? 'Colour shows the class the network predicts at every spot of the plane; pale means unsure. The solid line is the decision boundary, where the prediction flips. Click anywhere to make that spot the network’s input.'
         : 'The grey surface is the decision boundary in space: on either side the network predicts a different class. Turn the cube to see its shape, and move the slice to see one flat cross-section.';
     clear(key);
+    // Each class has a shape as well as a colour; the fill tells the split.
+    const item = (...kids: (Node | string)[]) => h('span', { class: 'bd-key-item', role: 'listitem' }, ...kids);
+    const neutral = { color: 'var(--muted)' };
     key.append(
-      ...info.classes.map((name, k) => h('span', { class: 'bd-key-item' }, h('i', { class: 'bd-swatch', style: { background: `var(--cat-${k % 10})` } }), name)),
-      h('span', { class: 'bd-key-item' }, h('i', { class: 'bd-mark is-train' }), 'Training'),
-      h('span', { class: 'bd-key-item' }, h('i', { class: 'bd-mark is-test' }), 'Test'),
-      h('span', { class: 'bd-key-item' }, h('i', { class: 'bd-mark is-custom' }), 'Yours'),
-      h('span', { class: 'bd-key-item' }, h('i', { class: 'bd-mark is-probe' }), 'Current input'),
+      ...info.classes.map((name, k) => item(markSvg(k, 'train', { size: 13 }), name)),
+      item(markSvg(0, 'train', neutral), 'Training: filled'),
+      item(markSvg(0, 'test', neutral), 'Test: outline'),
+      item(markSvg(0, 'custom', { ...neutral, size: 13 }), 'Yours: heavy outline'),
+      item(h('i', { class: 'bd-mark is-probe', 'aria-hidden': 'true' }), 'Current input'),
     );
     buildChips();
     syncChips();

@@ -86,11 +86,10 @@
   gap: 6px;
 }
 
-.chip.bd-class i {
-  width: 11px;
-  height: 11px;
-  background: var(--c);
-  outline: 1px solid var(--surface);
+.chip.bd-class svg,
+.bd-key svg {
+  flex: none;
+  overflow: visible;
 }
 
 .bd-add-note {
@@ -112,35 +111,11 @@
   gap: 6px;
 }
 
-.bd-swatch {
-  width: 11px;
-  height: 11px;
-}
-
 .bd-mark {
   position: relative;
   width: 10px;
   height: 10px;
   display: inline-block;
-}
-
-.bd-mark.is-train {
-  border-radius: 50%;
-  background: var(--muted);
-  border: 1px solid var(--ink);
-}
-
-.bd-mark.is-test {
-  border-radius: 50%;
-  border: 1.7px solid var(--muted);
-}
-
-.bd-mark.is-custom {
-  width: 9px;
-  height: 9px;
-  transform: rotate(45deg);
-  background: var(--muted);
-  border: 1.5px solid var(--ink);
 }
 
 .bd-mark.is-probe::before,
@@ -182,6 +157,24 @@
 .bd-orbit:focus-visible {
   outline: 3px solid var(--accent);
   outline-offset: 2px;
+}
+
+/* Visually hidden, read by assistive tech (key hints of the interactive plots). */
+.bd-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.bd-res-note {
+  font-size: 12.5px;
+  margin-top: 6px;
 }
 
 /* Training read-out */

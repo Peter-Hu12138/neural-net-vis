@@ -72,6 +72,20 @@ export class Live {
     this.kick();
   }
 
+  /**
+   * Main-thread time a drawing costs after the script has run: the browser rasterises a canvas
+   * when it commits the frame, which no timer around the drawing calls sees. Estimated from how
+   * much later than due the next frame starts, smoothed over draws.
+   */
+  drawCost = 0;
+  /** Call after drawing, with the time the frame's work started and how long the script took. */
+  noteDraw(t0: number, work: number): void {
+    requestAnimationFrame(() => {
+      const extra = Math.max(0, performance.now() - t0 - Math.max(1000 / 60, work));
+      this.drawCost = 0.6 * this.drawCost + 0.4 * Math.min(extra, 500);
+    });
+  }
+
   /** Forgets a pass under way (the view dropped it) and asks for a fresh evaluation. */
   restart(): void {
     this.working = false;
@@ -835,10 +849,12 @@ export function create2D(): View {
         note.hidden = field.res >= COARSE_2D;
         if (!note.hidden) note.textContent = coarseNote(field.res, 'the map');
       }
+      live.noteDraw(t0, performance.now() - t0);
     }
-    // Every millisecond of a pass counts against the budget: evaluation, painting and drawing.
+    // Every millisecond of a pass counts against the budget: evaluation, painting, drawing, and
+    // the browser rasterising the drawing afterwards.
     if (inPass) passMs += performance.now() - t0;
-    if (fresh) live.gap = Math.max(100, 4 * passMs);
+    if (fresh) live.gap = Math.max(100, 4 * (passMs + live.drawCost));
     return job !== null;
   };
   const live = new Live(el, render);

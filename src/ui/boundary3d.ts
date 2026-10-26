@@ -620,10 +620,12 @@ export function create3D(): View {
       const coarse = vox && vox.n < 12;
       note.hidden = !coarse;
       if (coarse) note.textContent = coarseNote(vox!.n, 'the surface', 3);
+      live.noteDraw(t0, performance.now() - t0);
     }
     if (inPass) passMs += performance.now() - t0;
-    // Every millisecond of a pass counts against the budget: evaluation, meshing and drawing.
-    if (fresh && !vjob && !sjob) live.gap = Math.max(100, 4 * passMs);
+    // Every millisecond of a pass counts against the budget: evaluation, meshing, drawing, and the
+    // browser rasterising the drawing afterwards.
+    if (fresh && !vjob && !sjob) live.gap = Math.max(100, 4 * (passMs + live.drawCost));
     // A slider move during a pass is picked up when the pass is done.
     if (!vjob && !sjob && sliceDirty) {
       startSlice(r);

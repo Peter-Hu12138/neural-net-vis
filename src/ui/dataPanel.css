@@ -204,12 +204,18 @@
   border-bottom: 0;
 }
 
+/* A class's mark (shape and colour), as on the plots. */
 .dp-swatch {
   display: inline-block;
-  width: 10px;
-  height: 10px;
+  width: 13px;
+  height: 13px;
   margin-right: 8px;
-  vertical-align: -1px;
+  vertical-align: -2px;
+}
+
+.dp-swatch svg {
+  display: block;
+  overflow: visible;
 }
 
 .dp-custom {

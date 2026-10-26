@@ -4,3 +4,17 @@
   margin: -4px 0 10px;
   font-size: 12.5px;
 }
+
+/* Frozen layers are hatched in the diagram, as their cards are in 01. */
+.nv-hatch {
+  display: inline-block;
+  width: 14px;
+  height: 11px;
+  border: 1px solid var(--hair);
+  background-image: repeating-linear-gradient(-45deg, transparent 0 3px, var(--hair) 3px 4.5px);
+}
+
+.nv-res-note {
+  margin-top: 8px;
+  font-size: 12.5px;
+}
