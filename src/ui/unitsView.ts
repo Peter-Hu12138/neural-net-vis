@@ -33,7 +33,8 @@ import { gridCoords, pointDomain, PointEvaluator } from '../data/grid';
 import { Network } from '../nn/network';
 import type { Act, Shape } from '../nn/types';
 import { store, type Probe } from '../store';
-import { dotTrain, pickAt, probeCross } from './boundary2d';
+import { pickAt, probeCross } from './boundary2d';
+import { drawMark } from './marks';
 import { onSlice, slabWidth, slice, sliceAxes } from './boundary3d';
 import { axisName } from './boundaryMath';
 import { layerDetail, layerName } from './builder';
@@ -459,7 +460,7 @@ export function mountUnits(): void {
     ctx.globalAlpha = 1;
     for (const hit of [...hits].reverse()) {
       const [u, v] = pointUV(d, hit.index, plane);
-      dotTrain(ctx, tx(u), ty(v), 3.6, classColor(d.testY[hit.index]), p.ink);
+      drawMark(ctx, d.testY[hit.index], 'train', tx(u), ty(v), 3.6, { color: classColor(d.testY[hit.index]), ink: p.ink, surface: p.surface });
     }
   };
 
@@ -966,7 +967,7 @@ export function mountUnits(): void {
       ctx.globalAlpha = 1;
       for (const hit of [...s.top.slice(0, TOP_K)].reverse()) {
         const [x, y] = pointUV(d, hit.index, plane);
-        dotTrain(ctx, tx(x), ty(y), 4.2, classColor(d.testY[hit.index]), p.ink);
+        drawMark(ctx, d.testY[hit.index], 'train', tx(x), ty(y), 4.2, { color: classColor(d.testY[hit.index]), ink: p.ink, surface: p.surface });
       }
       // The current input.
       const c = store.probe?.coords;

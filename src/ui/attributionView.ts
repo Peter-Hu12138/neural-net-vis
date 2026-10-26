@@ -1,3 +1,4 @@
+import { drawMark } from './marks';
 import './attributionView.css';
 import './attribution.css';
 import {
@@ -20,7 +21,7 @@ import { argmax, Network } from '../nn/network';
 import type { Shape } from '../nn/types';
 import { store, type Probe } from '../store';
 import { axisName } from './boundaryMath';
-import { dotTest, drawAxes, drawField, evaluatePlane, netFits, pickAt, regionCanvas, type PlaneField, type Rect } from './boundary2d';
+import { drawAxes, drawField, evaluatePlane, netFits, pickAt, regionCanvas, type PlaneField, type Rect } from './boundary2d';
 import { $, h } from './dom';
 import { fitCanvas, maxAbs } from './draw';
 import { drawInputCross } from './embeddingView';
@@ -961,7 +962,7 @@ export function mountAttribution(): void {
     if (dims === 2) {
       // The test points, as hollow rings in their class colours (as in 03).
       const tc = d.points.testCoords;
-      for (let i = 0; i < d.testY.length; i++) dotTest(ctx, sx(tc[2 * i]), sy(tc[2 * i + 1]), 2.2, classColor(d.testY[i]), pal.surface);
+      for (let i = 0; i < d.testY.length; i++) drawMark(ctx, d.testY[i], 'test', sx(tc[2 * i]), sy(tc[2 * i + 1]), 2.2, { color: classColor(d.testY[i]), ink: pal.ink, surface: pal.surface });
     }
     const x0 = sx(c[0]);
     const y0 = sy(c[1]);
