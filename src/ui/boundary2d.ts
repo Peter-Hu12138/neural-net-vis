@@ -672,6 +672,7 @@ export class PlaneCanvas {
     ctx.clip();
     drawMarkers(ctx, this.markers, X, Y, rad);
     const pr = this.host.probe();
+    this.canvas.dataset.probeOn = pr ? (pr.on ? '1' : '0') : '';
     if (pr) probeCross(ctx, X(pr.u), Y(pr.v), this.small ? 5 : 6.5, p.accent, p.surface, !pr.on);
     ctx.restore();
     drawAxes(ctx, rect, r, field?.axes ?? [0, 1], this.small);

@@ -430,7 +430,7 @@ test('network view: unit maps for points, images in colour for CIFAR, MNIST unch
       }
     }
   }
-  expect(hit).toMatch(/^Dense 1 · unit \d+\nFor the current input: z = −?\d\.\d{3} · a = −?\d\.\d{3}\nMap: its value over the plane$/);
+  expect(hit).toMatch(/^Dense 1 · unit \d+\nFor the current input: z = −?\d\.\d{3} · a = −?\d\.\d{3}\nMap: its value over the plane\nColour scale: (±|0 … )\d\.\d\d, shared by this layer$/);
   expect(await page.evaluate(() => (window as any).raster.store.selected)).toBe(0);
 
   // 3-D: the maps show the slice, and follow it.

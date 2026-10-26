@@ -133,8 +133,14 @@ function drawHeader(ctx: CanvasRenderingContext2D, cx: number, name: string, lin
   ctx.fillStyle = p.muted;
   fitFont(ctx, lines[0], 400, 10.5, 8.5, MONO, maxW);
   ctx.fillText(lines[0], cx, 31);
-  fitFont(ctx, lines[1], 400, 10.5, 8.5, MONO, maxW);
-  ctx.fillText(lines[1], cx, 44);
+  let second = lines[1];
+  fitFont(ctx, second, 400, 10.5, 8.5, MONO, maxW);
+  // In a narrow column the hatching alone marks a frozen layer (the legend explains it).
+  if (ctx.measureText(second).width > maxW && second.endsWith(' · frozen')) {
+    second = second.slice(0, -' · frozen'.length);
+    fitFont(ctx, second, 400, 10.5, 8.5, MONO, maxW);
+  }
+  ctx.fillText(second, cx, 44);
   if (selected) {
     ctx.fillStyle = p.accent;
     ctx.fillRect(cx - 18, 51, 36, 3);
@@ -836,11 +842,14 @@ export function mountNetworkView(): void {
     const pc = probe?.coords;
     // The current input: an accent cross on a surface halo (it reads by its shape on any colour).
     const crosses = new Map<string, number[]>();
+    // On the slice by the same rule as 03's slice map.
+    const probeOn = !!pc && pc.length === T.dims && (T.dims === 2 || onCurrentSlice(pc, r));
+    canvas.dataset.probeOn = pc && pc.length === T.dims ? (probeOn ? '1' : '0') : '';
     const marker = (it: Item) => {
       if (!pc || pc.length !== T.dims || it.s < 18) return;
       const u = pc[T.axes[0]];
       const v = pc[T.axes[1]];
-      const on = T.dims === 2 || onCurrentSlice(pc, r);
+      const on = probeOn;
       const x = it.x + ((u + r) / (2 * r)) * it.s;
       const y = it.y + ((r - v) / (2 * r)) * it.s;
       if (x < it.x || x > it.x + it.s || y < it.y || y > it.y + it.s) return;
@@ -878,6 +887,8 @@ export function mountNetworkView(): void {
         text: `Feature ${defs[f].label}: ${defs[f].title}\nFor the current input: ${fixed(xv, 3)}\n${planeTip}\nColour scale: ${scaleText(scales[0][f])}, the feature’s range over the whole ${T.dims === 2 ? 'plane' : 'cube'}`,
       });
     });
+    canvas.dataset.slice = T.dims === 3 ? `${T.sliceAxis}:${T.pos.toFixed(2)}` : '';
+    canvas.dataset.featureTiles = layouts[0].map((it) => `${it.x} ${it.y} ${it.s}`).join(';');
     ctx.font = `600 11.5px ${SANS}`;
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
