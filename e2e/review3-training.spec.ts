@@ -466,3 +466,182 @@ test('MOD-8: a saved model reports a test accuracy only for the weights it saves
   await page.locator('#model-save-browser').click();
   await expect(page.locator('.saved-row').last().locator('.zoo-meta')).toContainText(`${pct(s.actual)} test`);
 });
+
+// ── Round B: FLOW-2, FLOW-3, FLOW-7 ──────────────────────────────────────
+
+const evalList = (page: Page) => store<string[]>(page, 's.evals.map((e) => `${e.step}:${e.acc}`)');
+
+test('FLOW-2: a switch between point datasets measures the new network on the new points only', async ({ page }) => {
+  await open(page);
+  await switchTo(page, 'circle');
+  for (const id of ['spiral', 'moons', 'xor', 'circle', 'checker']) {
+    await page.click('#epoch'); // a trained network, so the old points' figure stands out
+    await page.waitForFunction(() => {
+      const s = (window as unknown as { raster: Raster }).raster.store.status;
+      return !!s && s.epoch === 1 && !s.running;
+    });
+    await stoppedAndEvaluated(page);
+    await switchTo(page, id);
+    await page.waitForFunction(() => (window as unknown as { raster: Raster }).raster.store.evals.length > 0);
+    await page.waitForTimeout(300);
+    const t = await truth(page);
+    expect(await evalList(page), `evaluations after the switch to ${id}`).toEqual([`0:${t.acc}`]);
+  }
+});
+
+test('FLOW-2: while Fashion-MNIST loads, nothing is measured; then one evaluation, on Fashion-MNIST', async ({ page }) => {
+  test.setTimeout(180_000);
+  let release: () => void = () => {};
+  const gate = new Promise<void>((r) => (release = r));
+  await page.route('**/data/fashion-*', async (route) => {
+    await gate;
+    await route.continue();
+  });
+  await open(page);
+  await tab(page, 'Pretrained');
+  await page.getByRole('button', { name: 'Load MNIST LeNet' }).click();
+  await expect(page.locator('#model-provenance')).toContainText('MNIST LeNet', { timeout: 60_000 });
+  await page.waitForFunction(() => (window as unknown as { raster: Raster }).raster.store.evals.length > 0, null, { timeout: 30_000 });
+  expect(await store<number>(page, 's.evals.at(-1).acc')).toBeGreaterThan(0.9);
+  await page.evaluate(() => void (window as unknown as { raster: Raster }).raster.actions.setDataset('fashion'));
+  // The weights are kept (a loaded model) and fit Fashion-MNIST's input: before, the trainer
+  // measured them on MNIST while Fashion-MNIST loaded, and 05 showed 98% for Fashion-MNIST.
+  await page.waitForTimeout(4000);
+  expect(await store<boolean>(page, 's.data === null')).toBe(true);
+  expect(await evalList(page)).toEqual([]);
+  await expect(page.locator('.bar .stat').filter({ hasText: 'Test acc.' }).locator('b')).toHaveText('—');
+  await expect(testAccKpi(page)).toHaveText('—');
+  release();
+  await page.waitForFunction(() => {
+    const s = (window as unknown as { raster: Raster }).raster.store;
+    return !!s.data && s.evals.length > 0;
+  }, null, { timeout: 60_000 });
+  await page.waitForTimeout(1000);
+  const t = await truth(page);
+  expect(await evalList(page)).toEqual([`0:${t.acc}`]);
+  expect(t.acc).toBeLessThan(0.5); // digits' filters on clothes, before any training
+  await expect(testAccKpi(page)).toHaveText(pct(t.acc));
+});
+
+test('FLOW-3: noise and Regenerate continue the run; point count and share restart it', async ({ page }) => {
+  await open(page);
+  await switchTo(page, 'circle');
+  await page.evaluate(() => {
+    (window as unknown as { w0: Float32Array[] }).w0 = (window as unknown as { raster: Raster }).raster.store.net.getWeights();
+  });
+  const sameWeights = (name: string) =>
+    page.evaluate((n) => {
+      const w = (window as unknown as { raster: Raster }).raster.store.net.getWeights();
+      const ref = (window as unknown as Record<string, Float32Array[]>)[n];
+      return w.every((a, i) => a.length === ref[i].length && a.every((v, j) => v === ref[i][j]));
+    }, name);
+  const keep = () =>
+    page.evaluate(() => {
+      (window as unknown as { w1: Float32Array[] }).w1 = (window as unknown as { raster: Raster }).raster.store.net.getWeights();
+    });
+  for (let e = 1; e <= 2; e++) {
+    await page.click('#epoch');
+    await page.waitForFunction((n) => (window as unknown as { raster: Raster }).raster.store.status?.epoch === n, e);
+  }
+  await stoppedAndEvaluated(page);
+  const prov = page.locator('#model-provenance');
+  const evalLine = page.locator('#model-eval');
+  await expect(prov).toHaveText('Random start (seed 1), then trained here for 2.00 epochs');
+
+  /** After noise or Regenerate: the same network and run, measured on the new points. */
+  const continued = async (change: () => Promise<void>, settled: string) => {
+    await keep();
+    const before = await store<{ version: number; step: number; points: number; evals: number }>(
+      page,
+      '({ version: s.version, step: s.status.step, points: s.points.length, evals: s.evals.length })',
+    );
+    await change();
+    await page.waitForFunction(settled);
+    await page.waitForFunction(() => {
+      const s = (window as unknown as { raster: { store: { dataRev: number; evals: { dataRev: number }[] } } }).raster.store;
+      return s.evals.at(-1)?.dataRev === s.dataRev;
+    });
+    const after = await store<{ version: number; step: number; points: number; evals: number; last: number }>(
+      page,
+      '({ version: s.version, step: s.status.step, points: s.points.length, evals: s.evals.length, last: s.evals.at(-1).step })',
+    );
+    expect(after.version).toBe(before.version);
+    expect(after.step).toBe(before.step);
+    expect(after.last).toBe(before.step);
+    expect(after.points).toBeGreaterThanOrEqual(before.points);
+    expect(after.evals).toBe(before.evals + 1);
+    expect(await sameWeights('w1')).toBe(true);
+    const t = await truth(page);
+    expect(await store<number>(page, 's.evals.at(-1).acc')).toBe(t.acc);
+    await expect(testAccKpi(page)).toHaveText(pct(t.acc));
+    await expect(prov).toHaveText('Random start (seed 1), then trained here for 2.00 epochs');
+    await expect(evalLine).toHaveText(`Test accuracy here: ${pct(t.acc)} on 300 test points`);
+  };
+  await continued(
+    () =>
+      page.locator('#dsp-noise').evaluate((el: HTMLInputElement) => {
+        el.value = '0.3';
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+      }),
+    '(window.raster.store.pointsConfig.noise === 0.3)',
+  );
+  await continued(() => page.locator('#dsp-regenerate').click(), '(window.raster.store.pointsConfig.seed === 2)');
+
+  // While training runs, new points do not stop it.
+  await page.click('#play');
+  await page.waitForFunction(() => (window as unknown as { raster: Raster }).raster.store.status?.running === true);
+  await page.locator('#dsp-regenerate').click();
+  const s0 = await store<number>(page, 's.status.step');
+  await page.waitForFunction((n) => ((window as unknown as { raster: Raster }).raster.store.status?.step ?? 0) > n + 20, s0);
+  expect(await store<boolean>(page, 's.status.running')).toBe(true);
+  await page.click('#play');
+  await stoppedAndEvaluated(page);
+
+  // Another amount of training data is another experiment: back to the starting weights.
+  for (const change of [
+    () => page.locator('.dsp-seg[aria-labelledby="dsp-count-label"] button', { hasText: /^400$/ }).click(),
+    () =>
+      page.locator('#dsp-share').evaluate((el: HTMLInputElement) => {
+        el.value = '0.8';
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+      }),
+  ]) {
+    const v = await store<number>(page, 's.version');
+    await change();
+    await page.waitForFunction((n) => (window as unknown as { raster: Raster }).raster.store.version > n, v);
+    await page.waitForFunction(() => (window as unknown as { raster: Raster }).raster.store.evals.length > 0);
+    await page.waitForTimeout(200);
+    expect(await sameWeights('w0')).toBe(true);
+    expect(await store<number>(page, 's.status?.seen ?? 0')).toBe(0);
+    const t = await truth(page);
+    expect(await evalList(page)).toEqual([`0:${t.acc}`]);
+    await expect(prov).toHaveText('Random start (seed 1)');
+    await expect(evalLine).toContainText(', before any training');
+    await page.click('#epoch'); // train a little before the next change
+    await page.waitForFunction(() => {
+      const s = (window as unknown as { raster: Raster }).raster.store.status;
+      return !!s && s.epoch === 1 && !s.running;
+    });
+    await stoppedAndEvaluated(page);
+  }
+});
+
+test('FLOW-7: "Train on" keeps a drawing as the input and measures the restarted network once', async ({ page }) => {
+  await open(page);
+  await page.waitForFunction(() => (window as unknown as { raster: Raster }).raster.store.evals.length === 1, null, { timeout: 30_000 });
+  await page.evaluate(() => {
+    const r = (window as unknown as { raster: Raster }).raster;
+    const x = new Float32Array(784);
+    for (let i = 0; i < 28; i++) x[i * 28 + 14] = 1; // a vertical stroke
+    r.actions.setProbe({ x, label: null, caption: 'Your drawing', key: 'draw' });
+  });
+  for (const limit of ['1,000', 'All']) {
+    await page.getByRole('group', { name: 'Train on' }).getByRole('button', { name: limit, exact: true }).click();
+    expect(await store<string>(page, 's.probe.key')).toBe('draw');
+    await page.waitForFunction(() => (window as unknown as { raster: Raster }).raster.store.evals.length > 0, null, { timeout: 30_000 });
+    await page.waitForTimeout(1500); // a second evaluation of the same weights would have landed by now
+    expect(await evalList(page)).toHaveLength(1);
+    expect(await store<string>(page, 's.probe.key')).toBe('draw');
+    await expect(page.locator('#netview .probe-caption')).toHaveText('Your drawing');
+  }
+});
