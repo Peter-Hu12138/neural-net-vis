@@ -158,7 +158,7 @@ test('point data: 06 names classes once, 09 says "a unit", 10 integrates along t
   await expect(hints).not.toContainText('growing');
   // The slope column keeps its trailing zeros (design-9): three significant digits each.
   const slopes = await page.locator('#attr-features tbody td.attr-col-slope').allInnerTexts();
-  for (const s of slopes) expect(s).toMatch(/^([+−](\d\.\d\d|\d\d\.\d|\d{3,})|0|[+−]\d\.\de−\d)$/);
+  for (const s of slopes) expect(s).toMatch(/^([+−](\d\.\d\d|\d\d\.\d|\d{3,}|0\.0*[1-9]\d\d)|0|[+−]\d\.\de−\d)$/);
 });
 
 test('a ReLU unit dead on every test point but firing on the map says "never fires on a test point" (ANA-3)', async ({ page }) => {
