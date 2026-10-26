@@ -611,7 +611,7 @@ export function mountInspector(): void {
     let upright = false;
     if (cols && roomy && !numbers) {
       const fit = Math.floor((availW - left - 12) / (N + 1));
-      if (fit >= colW) cw = Math.max(cw, Math.min(56, colW));
+      if (fit >= colW) cw = Math.max(cw, Math.min(64, colW));
       else {
         cw = Math.max(16, Math.min(44, fit));
         upright = cw < colW;

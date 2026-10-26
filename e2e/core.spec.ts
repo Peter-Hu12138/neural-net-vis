@@ -167,10 +167,10 @@ test('04 labels a point network’s weights with its input features', async ({ p
   await page.waitForFunction(() => (window as unknown as W).raster.store.net.getWeights()[0].length === 8 * 4);
   await clearTexts(page);
   await inspect(page, 0, 'heat', 'dense-matrix');
-  await expect(inspCanvas(page)).toHaveAttribute('aria-label', 'Dense 1 weights as a heatmap: 8 rows, one per unit, by the input features (x₁, x₂, x₁², sin x₁), plus a bias column');
+  await expect(inspCanvas(page)).toHaveAttribute('aria-label', 'Dense 1 weights as a heatmap: 8 rows, one per unit, by the input features (x₁, x₂, x₁², sin\u00a0πx₁), plus a bias column');
   await expect.poll(async () => (await texts(page)).includes('x₁²')).toBe(true);
   const drawn = await texts(page);
-  for (const t of ['x₁', 'x₂', 'x₁²', 'sin x₁', 'u1', 'u8', 'b']) expect(drawn, t).toContain(t);
+  for (const t of ['x₁', 'x₂', 'x₁²', 'sin\u00a0πx₁', 'u1', 'u8', 'b']) expect(drawn, t).toContain(t);
 
   // A cell's tooltip names the unit and the feature.
   let tip = '';
@@ -178,7 +178,7 @@ test('04 labels a point network’s weights with its input features', async ({ p
     await inspCanvas(page).hover({ position: { x, y: 30 } });
     tip = (await page.locator('#tip').isVisible()) ? ((await page.locator('#tip').textContent()) ?? '') : '';
   }
-  expect(tip).toMatch(/^W\[u\d ← (x₁|x₂|x₁²|sin x₁)\] = −?\d\.\d{4}$/);
+  expect(tip).toMatch(/^W\[u\d ← (x₁|x₂|x₁²|sin\u00a0πx₁)\] = −?\d\.\d{4}$/);
   await page.mouse.move(0, 0);
   await page.locator('#weights').screenshot({ path: `${SHOTS}/17-core-inspector-points.png`, style: SHOT_STYLE });
 

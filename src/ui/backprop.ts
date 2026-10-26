@@ -87,6 +87,13 @@ interface Step {
 const MONO = '"IBM Plex Mono", ui-monospace, monospace';
 /** Feature labels carry sub- and superscripts (x₁²), which need a larger size to stay legible. */
 const labelFont = (labels?: string[]) => `500 ${labels?.some((l) => /[₁₂₃²]/.test(l)) ? 11.5 : 9.5}px ${MONO}`;
+/** Width of the widest of `labels` in their label font, so cells can make room for them. */
+function labelWidth(labels?: string[]): number {
+  if (!labels?.length) return 0;
+  const ctx = document.createElement('canvas').getContext('2d')!;
+  ctx.font = labelFont(labels);
+  return Math.ceil(labels.reduce((w, l) => Math.max(w, ctx.measureText(l).width), 0));
+}
 const actLabel = (a: Act) => ACTIVATIONS.find((x) => x.id === a)!.label;
 const actFormula = (a: Act) => ACTIVATIONS.find((x) => x.id === a)!.formula;
 const CHANNELS = ['red', 'green', 'blue'];
@@ -276,10 +283,11 @@ function vec(cap: string, data: Float32Array, o: { labels?: string[]; signed?: b
   const m = figMode();
   const numbers = len <= 10 || (m === 'numbers' && len <= 128);
   const mode: MatrixMode = numbers ? 'numbers' : m === 'hinton' ? 'hinton' : 'heat';
-  // Printed values wrap to fit a phone screen; colour cells keep sixteen to a row.
-  const perRow = Math.max(1, Math.min(len, numbers ? Math.min(10, Math.floor(roomForFigures() / 50)) : 16));
+  // Printed values get cells wide enough for their labels ("sin πx₁") with a gap between them;
+  // they wrap to fit a phone screen; colour cells keep sixteen to a row.
+  const cw = numbers ? Math.max(50, labelWidth(o.labels) + 8) : 18;
+  const perRow = Math.max(1, Math.min(len, numbers ? Math.min(10, Math.floor(roomForFigures() / cw)) : 16));
   const rows = Math.ceil(len / perRow);
-  const cw = numbers ? 50 : 18;
   const ch = numbers ? 22 : 18;
   const labH = 14;
   const canvas = document.createElement('canvas');
@@ -319,7 +327,8 @@ function mat(cap: string, data: Float32Array, rows: number, cols: number, o: { m
   measureCtx.font = `500 9.5px ${MONO}`;
   const widest = (ls?: string[]) => (ls ? Math.ceil(ls.reduce((w, l) => Math.max(w, measureCtx.measureText(l).width), 0)) : 0);
   let cw = numbers ? 44 : Math.max(1, Math.min(18, Math.floor(640 / cols)));
-  if (o.colLabels && !numbers) cw = Math.max(cw, Math.min(48, widest(o.colLabels) + 8));
+  // Column labels are drawn in their own (larger) font: make room for them, with a gap.
+  if (o.colLabels) cw = Math.max(cw, Math.min(64, labelWidth(o.colLabels) + 8));
   const ch = numbers ? 20 : Math.max(2, Math.min(18, Math.floor(180 / rows), Math.max(cw, 3)));
   const mode: MatrixMode = numbers ? 'numbers' : m === 'hinton' && cw >= 4 ? 'hinton' : 'heat';
   const left = Math.max(26, widest(o.rowLabels) + 8);
